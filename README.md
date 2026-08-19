@@ -13,7 +13,7 @@ dogfoods the ForgeSworn stack end to end:
 | [`lnurlcash-kit`](https://github.com/TheCryptoDonkey/lnurlcash-kit) | the whole LUD-25 client: resolve, info, rotate, split, merge, melt, mint, verify - and its error taxonomy, which the safety choreography hangs off |
 | [`farrier-kit`](https://github.com/forgesworn/farrier-kit) | BOLT-11 decoding before anything is paid, Lightning Address resolution for melt-to-address, preimage verification after settlement, DNS-pinned fetch |
 | [`@forgesworn/nwc-kit`](https://github.com/forgesworn/nwc-kit) | the optional Lightning arm: pay mint invoices and issue melt invoices through a wallet you already trust |
-| [`keystore-kit`](https://github.com/TheCryptoDonkey/keystore-kit) | PIN protection for the store key |
+| [`keystore-kit`](https://github.com/forgesworn/keystore-kit) | PIN protection for the store key |
 | [`@forgesworn/shamir-words`](https://github.com/forgesworn/shamir-words) | word-encoded backup shares of the store key |
 
 The companion mint is [`@forgesworn/moneyer`](https://github.com/forgesworn/moneyer);
@@ -42,6 +42,19 @@ A bearer note is lost the moment its secret exists nowhere durable. So:
   show note ids (hashes) only.
 
 ## Use
+
+Not on npm yet - build from source, with the sibling repos it links
+against until those publish:
+
+```bash
+git clone https://github.com/TheCryptoDonkey/lnurlcash-kit
+git clone https://github.com/TheCryptoDonkey/lnurlcash-conformance
+git clone https://github.com/forgesworn/keystore-kit
+git clone https://github.com/forgesworn/moneyer
+git clone https://github.com/forgesworn/notecase
+cd notecase && npm install && npm run build
+alias notecase="node $PWD/dist/cli.js"
+```
 
 ```bash
 notecase init                          # PIN-locked store at ~/.notecase

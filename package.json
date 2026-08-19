@@ -43,14 +43,14 @@
     "@noble/hashes": "^2.3.0",
     "farrier-kit": "^1.1.3",
     "keystore-kit": "file:../keystore-kit",
-    "lnurlcash-kit": "file:../../Mint/lnurlcash-kit"
+    "lnurlcash-kit": "file:../lnurlcash-kit"
   },
   "devDependencies": {
     "@forgesworn/moneyer": "file:../moneyer",
     "@types/node": "^24.0.0",
     "animejs": "^4.5.0",
     "happy-dom": "^20.11.2",
-    "lnurlcash-conformance": "file:../../Mint/lnurlcash-conformance",
+    "lnurlcash-conformance": "file:../lnurlcash-conformance",
     "nostr-tools": "2.24.1",
     "typescript": "^5.7.0",
     "uqr": "^0.1.3",

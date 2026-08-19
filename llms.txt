@@ -3,7 +3,7 @@
 LNURLcash (LUD-25) wallet for Node 22+: receive, hold, split, merge, send
 and melt Lightning bearer notes. CLI plus a reusable engine. ESM-only. MIT.
 
-Install: npm install @forgesworn/notecase
+Install: not yet on npm - build from source (see README)
 Companion mint: @forgesworn/moneyer
 Protocol client it builds on: lnurlcash-kit
 Draft spec: https://github.com/lnurl/luds/pull/301
