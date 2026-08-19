@@ -2,7 +2,8 @@ import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
 import {AmbiguousMintError, PendingNoteError, ProtocolError, hashK1} from 'lnurlcash-kit'
 import {fakeBolt11} from '@forgesworn/moneyer'
-import {InsufficientFundsError} from '../src/wallet.ts'
+import {InsufficientFundsError, Wallet} from '../src/wallet.ts'
+import type {PendingMint, WalletData} from '../src/types.ts'
 import {freshK1, makeWallet, waitMs} from './helpers.ts'
 
 // The wallet against the adversarial mock mint: every misbehaviour a
@@ -335,5 +336,118 @@ describe('the mints directory', () => {
     expect(data.settings.defaultMintHost).toBeUndefined()
     // the pubkey pin survives removal on purpose
     expect(data.pubkeyPins[host]).toBeDefined()
+  })
+})
+
+describe('mint claims', () => {
+  // The mock mint's invoices are unfundable fakes, so a settled claim is
+  // staged by hand: the preimage IS the note's k1, exactly what an NWC pay
+  // result or LUD-21 verify would hand claimMint.
+  const stageClaim = (theMint: Mint, data: WalletData, amountMsat: number): {pending: PendingMint; preimage: string} => {
+    const preimage = freshK1()
+    theMint.state.creditNote(preimage, amountMsat)
+    const pending: PendingMint = {
+      id: hashK1(preimage),
+      mintHost: new URL(theMint.url).host,
+      baseUrl: `${theMint.url}/w`,
+      pr: 'lnbc1staged',
+      grossMsat: amountMsat,
+      expectedNetMsat: amountMsat,
+      state: 'awaiting',
+      createdAt: 1,
+      updatedAt: 1
+    }
+    data.pendingMints.push(pending)
+    return {pending, preimage}
+  }
+
+  // A fetch that drops note-info GETs until healed - the flaky moment
+  // between a claim persisting and its receive landing.
+  const droppingFetch = () => {
+    let down = true
+    const fetchImpl: typeof fetch = (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
+      if (down && url.pathname === '/w' && url.searchParams.has('k1')) {
+        return Promise.reject(new Error('connection reset'))
+      }
+      return fetch(input, init)
+    }
+    return {fetchImpl, heal: () => (down = false)}
+  }
+
+  it('recovers a paid mint whose receive failed after the claim persisted', async () => {
+    const theMint = await start()
+    const {fetchImpl, heal} = droppingFetch()
+    const {wallet, data} = makeWallet({fetch: fetchImpl})
+    const {pending, preimage} = stageClaim(theMint, data, 21_000)
+
+    // the invoice is paid but the note-info GET fails between the claim
+    // persisting and the receive landing
+    await expect(wallet.claimMint(pending, preimage)).rejects.toThrow('Failed to reach the service')
+    expect(pending.state).toBe('claimed')
+    expect(pending.preimageHex).toBe(preimage)
+    expect(wallet.balanceMsat()).toBe(0)
+    expect(wallet.needsReconcile()).toBe(true)
+
+    // connectivity returns; reconcile re-drives the receive from the
+    // persisted preimage and the note lands live, rotated to a fresh secret
+    heal()
+    const events = await wallet.reconcile()
+    expect(events.some(event => event.kind === 'mint-claimed')).toBe(true)
+    expect(pending.preimageHex).toBeUndefined()
+    expect(wallet.balanceMsat()).toBe(21_000)
+    const live = wallet.liveNotes()
+    expect(live).toHaveLength(1)
+    expect(live[0]!.amountMsat).toBe(21_000)
+    expect(live[0]!.k1).not.toBe(preimage)
+    expect(wallet.needsReconcile()).toBe(false)
+  })
+
+  it('survives a crash between the claim and the receive landing', async () => {
+    const theMint = await start()
+    const {fetchImpl, heal} = droppingFetch()
+    const first = makeWallet({fetch: fetchImpl})
+    const {pending, preimage} = stageClaim(theMint, first.data, 21_000)
+    await expect(first.wallet.claimMint(pending, preimage)).rejects.toThrow('Failed to reach the service')
+
+    // the process dies here; the next start rebuilds the wallet over the
+    // same persisted data and reconcile finishes the claim
+    heal()
+    const restarted = new Wallet(first.data, async () => {}, {timeoutMs: 3_000})
+    const events = await restarted.reconcile()
+    expect(events.some(event => event.kind === 'mint-claimed')).toBe(true)
+    expect(pending.preimageHex).toBeUndefined()
+    expect(restarted.balanceMsat()).toBe(21_000)
+  })
+
+  it('drops the held preimage when the note is already in the wallet', async () => {
+    // the crash came after receive() persisted but before claimMint cleaned
+    // up: the note is in the wallet, the pending still holds the preimage
+    const theMint = await start()
+    const {wallet, data} = makeWallet()
+    const {pending, preimage} = stageClaim(theMint, data, 21_000)
+    await wallet.claimMint(pending, preimage)
+    expect(pending.preimageHex).toBeUndefined()
+
+    pending.preimageHex = preimage // what that crash would have left behind
+    const events = await wallet.reconcile()
+    expect(pending.preimageHex).toBeUndefined()
+    expect(events.some(event => event.kind === 'mint-claim-retry')).toBe(false)
+    // and nothing was received twice
+    expect(wallet.balanceMsat()).toBe(21_000)
+    expect(wallet.liveNotes()).toHaveLength(1)
+  })
+
+  it('keeps the held preimage when the mint still cannot answer', async () => {
+    const theMint = await start()
+    const {fetchImpl} = droppingFetch()
+    const {wallet, data} = makeWallet({fetch: fetchImpl})
+    const {pending, preimage} = stageClaim(theMint, data, 21_000)
+    await expect(wallet.claimMint(pending, preimage)).rejects.toThrow('Failed to reach the service')
+
+    const events = await wallet.reconcile()
+    expect(events.some(event => event.kind === 'mint-claim-retry')).toBe(true)
+    expect(pending.preimageHex).toBe(preimage)
+    expect(wallet.balanceMsat()).toBe(0)
   })
 })

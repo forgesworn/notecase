@@ -13,6 +13,118 @@ export class BackupError extends Error {}
 const MIN_PASSPHRASE = 10
 const PBKDF2_ITERATIONS = 600_000
 
+// A decrypted backup is attacker-shaped until checked: the whole WalletData
+// is validated before it is allowed anywhere near a store, and no field's
+// contents are ever echoed into an error - the contents are exactly what
+// cannot be trusted.
+const HEX64 = /^[0-9a-f]{64}$/
+const HEX = /^[0-9a-f]+$/
+const NOTE_STATES = new Set(['live', 'staged', 'ambiguous', 'melting', 'sent', 'spent'])
+const NOTE_ORIGINS = new Set(['mint', 'receive', 'rotate', 'split', 'change', 'merge', 'recovered'])
+const PENDING_STATES = new Set(['awaiting', 'claimed', 'expired', 'abandoned'])
+const MELT_STATES = new Set(['in-flight', 'settled', 'returned'])
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const isHttpUrl = (value: unknown): boolean => {
+  if (typeof value !== 'string') return false
+  try {
+    const {protocol} = new URL(value)
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+// host[:port] as the wallet records one - nothing that could smuggle
+// markup or a path into a screen or a log line.
+const isHost = (value: unknown): boolean => {
+  if (typeof value !== 'string' || value.length === 0) return false
+  try {
+    return new URL(`http://${value}`).host === value
+  } catch {
+    return false
+  }
+}
+
+const isAmount = (value: unknown): boolean => typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+const isTimestamp = (value: unknown): boolean => typeof value === 'number' && Number.isFinite(value)
+
+const isWalletData = (data: unknown): data is WalletData => {
+  if (!isRecord(data) || data.version !== 1) return false
+  if (!isRecord(data.settings)) return false
+  if (data.settings.defaultMintHost !== undefined && typeof data.settings.defaultMintHost !== 'string') return false
+  if (data.settings.nwcUri !== undefined && typeof data.settings.nwcUri !== 'string') return false
+
+  if (!isRecord(data.pubkeyPins)) return false
+  if (Object.values(data.pubkeyPins).some(pin => typeof pin !== 'string' || !HEX.test(pin))) return false
+
+  if (!Array.isArray(data.notes)) return false
+  for (const note of data.notes) {
+    if (!isRecord(note)) return false
+    if (typeof note.id !== 'string' || !HEX64.test(note.id)) return false
+    if (typeof note.k1 !== 'string' || !HEX64.test(note.k1)) return false
+    if (!isAmount(note.amountMsat)) return false
+    if (!isHttpUrl(note.baseUrl) || !isHttpUrl(note.callback)) return false
+    if (!isHost(note.mintHost)) return false
+    if (typeof note.state !== 'string' || !NOTE_STATES.has(note.state)) return false
+    if (typeof note.origin !== 'string' || !NOTE_ORIGINS.has(note.origin)) return false
+    if (note.signature !== undefined && (typeof note.signature !== 'string' || !HEX.test(note.signature))) return false
+    if (note.replaces !== undefined && (!Array.isArray(note.replaces) || note.replaces.some(id => typeof id !== 'string'))) {
+      return false
+    }
+    if (!isTimestamp(note.createdAt) || !isTimestamp(note.updatedAt)) return false
+  }
+
+  if (!Array.isArray(data.mints)) return false
+  for (const mint of data.mints) {
+    if (!isRecord(mint)) return false
+    if (typeof mint.input !== 'string' || !isHost(mint.host)) return false
+    if (!isHttpUrl(mint.payUrl)) return false
+    if (mint.baseUrl !== undefined && !isHttpUrl(mint.baseUrl)) return false
+    if (mint.label !== undefined && typeof mint.label !== 'string') return false
+    if (mint.mintFee !== undefined) {
+      if (!isRecord(mint.mintFee)) return false
+      if (typeof mint.mintFee.baseFeeMsat !== 'number' || !Number.isFinite(mint.mintFee.baseFeeMsat)) return false
+      if (typeof mint.mintFee.feePpm !== 'number' || !Number.isFinite(mint.mintFee.feePpm)) return false
+    }
+    if (!isTimestamp(mint.addedAt)) return false
+  }
+
+  if (!Array.isArray(data.pendingMints)) return false
+  for (const pending of data.pendingMints) {
+    if (!isRecord(pending)) return false
+    if (typeof pending.id !== 'string' || !HEX64.test(pending.id)) return false
+    if (!isHost(pending.mintHost) || !isHttpUrl(pending.baseUrl)) return false
+    if (typeof pending.pr !== 'string') return false
+    if (pending.verifyUrl !== undefined && !isHttpUrl(pending.verifyUrl)) return false
+    if (!isAmount(pending.grossMsat) || !isAmount(pending.expectedNetMsat)) return false
+    if (typeof pending.state !== 'string' || !PENDING_STATES.has(pending.state)) return false
+    if (pending.preimageHex !== undefined && (typeof pending.preimageHex !== 'string' || !HEX64.test(pending.preimageHex))) {
+      return false
+    }
+    if (!isTimestamp(pending.createdAt) || !isTimestamp(pending.updatedAt)) return false
+  }
+
+  if (!Array.isArray(data.melts)) return false
+  for (const melt of data.melts) {
+    if (!isRecord(melt)) return false
+    if (typeof melt.paymentHash !== 'string' || !HEX64.test(melt.paymentHash)) return false
+    if (typeof melt.noteId !== 'string' || !HEX64.test(melt.noteId)) return false
+    if (typeof melt.pr !== 'string' || typeof melt.target !== 'string') return false
+    if (melt.verifyUrl !== undefined && !isHttpUrl(melt.verifyUrl)) return false
+    if (!isAmount(melt.amountMsat)) return false
+    if (typeof melt.state !== 'string' || !MELT_STATES.has(melt.state)) return false
+    if (melt.proofPreimage !== undefined && (typeof melt.proofPreimage !== 'string' || !HEX64.test(melt.proofPreimage))) {
+      return false
+    }
+    if (!isTimestamp(melt.createdAt) || !isTimestamp(melt.updatedAt)) return false
+  }
+
+  return true
+}
+
 export type BackupEnvelope = {
   format: 'notecase-backup'
   v: 1
@@ -60,14 +172,14 @@ export const importBackup = async (contents: string, passphrase: string): Promis
   if (envelope?.format !== 'notecase-backup' || envelope.v !== 1 || typeof envelope.sealed !== 'string' || typeof envelope.salt !== 'string') {
     throw new BackupError('That is not a notecase backup file.')
   }
-  let data: WalletData
+  let data: unknown
   try {
     data = await unsealWallet(envelope.sealed, await backupKey(passphrase, envelope.salt))
   } catch {
     throw new BackupError('Wrong passphrase, or the file is damaged.')
   }
-  if (data?.version !== 1 || !Array.isArray(data.notes) || !Array.isArray(data.mints)) {
-    throw new BackupError('The backup decrypted but does not hold a wallet.')
+  if (!isWalletData(data)) {
+    throw new BackupError('The backup decrypted but does not hold a valid wallet.')
   }
   return data
 }

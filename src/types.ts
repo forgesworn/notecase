@@ -48,6 +48,10 @@ export type PendingMint = {
   grossMsat: number
   expectedNetMsat: number
   state: 'awaiting' | 'claimed' | 'expired' | 'abandoned'
+  // Held only between claim and a confirmed receive; deleted once the note
+  // is safely in the wallet. It is the note's k1 - while it sits here the
+  // money is a persisted record reconcile() can re-drive, never a memory.
+  preimageHex?: string
   createdAt: number
   updatedAt: number
 }

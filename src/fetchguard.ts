@@ -17,7 +17,9 @@ const isLoopbackLiteral = (hostname: string): boolean =>
   /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)
 
 export const createWalletFetch = (options: {allowPrivate?: boolean} = {}): typeof globalThis.fetch => {
-  const allowPrivate = options.allowPrivate ?? process.env.NOTECASE_ALLOW_PRIVATE === '1'
+  // process may not exist in a browser bundle - the env var is a Node nicety
+  const allowPrivate =
+    options.allowPrivate ?? (typeof process !== 'undefined' && process.env?.NOTECASE_ALLOW_PRIVATE === '1')
   const pinned = createPinnedFetch(allowPrivate ? {allowPrivate: true} : {})
   return async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url)

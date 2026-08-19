@@ -4,6 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#100e0b" />
+    <!-- Bearer-note traffic is GETs with the k1 in the URL; nothing but
+         our own bundle may run, and only mint/NWC endpoints may be
+         contacted (loopback http for dev mints). frame-ancestors only
+         takes effect when also sent as an HTTP header. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https: wss: http://localhost:* http://127.0.0.1:*; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
     <title>notecase</title>
     <meta name="description" content="A case for Lightning bearer notes" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='6' width='20' height='14' rx='4' fill='%23f0a028'/%3E%3Crect x='14' y='11' width='6' height='4' rx='2' fill='%23100e0b'/%3E%3C/svg%3E" />

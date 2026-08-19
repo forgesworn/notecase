@@ -65,16 +65,19 @@ notecase mints add mint@mint.example   # or any LNURL / bare domain
 notecase mint 21                       # pay via NWC if set, else an invoice to pay
 notecase balance
 notecase send 8                        # prints a bearer note URL + LNURL
-notecase receive 'lnurlw://…?k1=…'     # rotates it into the wallet
+notecase receive                       # prompts for the note, rotates it in
 notecase melt 21 --to you@wallet.com   # or a raw bolt11, or --to-nwc
 notecase reconcile                     # resolves anything uncertain
-notecase nwc set 'nostr+walletconnect://…'
+notecase nwc set                       # prompts for the connection URI
 notecase backup shares --threshold 2 --count 3
 ```
 
 Amounts are sats (`--msat` for precision). The PIN comes from the prompt
 or `$NOTECASE_PIN`. `NOTECASE_HOME` moves the store; `NOTECASE_ALLOW_PRIVATE=1`
-admits LAN mints through the SSRF guard.
+admits LAN mints through the SSRF guard. `receive` and `nwc set` still
+accept their argument on the command line, but prefer the prompted form:
+whatever goes on the command line lands in your shell history, and these
+two are live secrets.
 
 As a library, the same engine drives other frontends:
 

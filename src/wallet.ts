@@ -81,7 +81,9 @@ export class Wallet {
   needsReconcile(): boolean {
     return (
       this.data.notes.some(note => note.state === 'staged' || note.state === 'ambiguous' || note.state === 'melting') ||
-      this.data.pendingMints.some(pending => pending.state === 'awaiting')
+      this.data.pendingMints.some(
+        pending => pending.state === 'awaiting' || (pending.state === 'claimed' && pending.preimageHex !== undefined)
+      )
     )
   }
 
@@ -511,10 +513,20 @@ export class Wallet {
     if (!verifyPreimage(preimageHex, pending.id)) {
       throw new WalletUsageError('That preimage does not settle this mint invoice.')
     }
+    // The preimage is the note's k1, so it is persisted with the claim
+    // BEFORE the receive runs: a failure from here to the note landing
+    // (timeout, crash, changed mint key) leaves reconcile() everything it
+    // needs to re-drive the receive, and the money is never memory-only.
+    pending.preimageHex = preimageHex
     pending.state = 'claimed'
     pending.updatedAt = now()
     await this.persist()
+    // If this throws, state and preimage stay persisted as they are -
+    // reconcile() owns the retry from here.
     const result = await this.receive(buildNoteUrl(pending.baseUrl, preimageHex, pending.expectedNetMsat))
+    delete pending.preimageHex
+    pending.updatedAt = now()
+    await this.persist()
     if (result.note.amountMsat !== pending.expectedNetMsat) {
       result.warnings.push(
         `expected ${pending.expectedNetMsat} msat net but the mint credited ${result.note.amountMsat} msat`
@@ -525,12 +537,16 @@ export class Wallet {
 
   // Polls LUD-21 verify until the invoice settles, then claims.
   async awaitMint(pending: PendingMint, options: {timeoutMs?: number; intervalMs?: number} = {}): Promise<ReceiveResult | null> {
+    const timeoutMs = options.timeoutMs ?? 60_000
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new WalletUsageError('The wait must be a positive, finite number of milliseconds.')
+    }
     if (!pending.verifyUrl) {
       throw new WalletUsageError(
-        'This mint offers no LUD-21 verify - pay the invoice, then claim with `notecase receive <baseUrl>?k1=<payment preimage>`.'
+        'This mint offers no LUD-21 verify - pay the invoice, then run `notecase receive` and paste <baseUrl>?k1=<payment preimage>.'
       )
     }
-    const deadline = now() + (options.timeoutMs ?? 60_000)
+    const deadline = now() + timeoutMs
     for (;;) {
       const verification = await fetchInvoiceVerification(pending.verifyUrl, this.opts)
       if (verification.settled && verification.preimage) {
@@ -611,6 +627,38 @@ export class Wallet {
         }
       } catch {
         events.push({kind: 'unreachable', detail: `${pending.mintHost} could not answer about a pending mint`})
+      }
+    }
+
+    // Claims that persisted their preimage but crashed (or failed) before
+    // the receive landed. hashK1 is sha256 and the note's id IS the invoice
+    // payment hash, so a note under pending.id - in any state - means the
+    // claim already landed and the held preimage can simply be dropped.
+    // Otherwise the receive is re-driven from the persisted record.
+    for (const pending of [...this.data.pendingMints]) {
+      if (pending.state !== 'claimed' || !pending.preimageHex) continue
+      if (this.data.notes.some(note => note.id === pending.id)) {
+        delete pending.preimageHex
+        pending.updatedAt = now()
+        continue
+      }
+      try {
+        const result = await this.receive(buildNoteUrl(pending.baseUrl, pending.preimageHex, pending.expectedNetMsat))
+        delete pending.preimageHex
+        pending.updatedAt = now()
+        events.push({kind: 'mint-claimed', detail: `${result.note.amountMsat} msat from ${pending.mintHost}`})
+      } catch (err) {
+        if (err instanceof WalletUsageError && err.message === 'This note is already in the wallet.') {
+          // an odd state, but the money is provably here - clean up
+          delete pending.preimageHex
+          pending.updatedAt = now()
+          continue
+        }
+        // the preimage stays persisted; the next reconcile tries again
+        events.push({
+          kind: 'mint-claim-retry',
+          detail: `${pending.mintHost} has not confirmed a paid mint yet - will try again`
+        })
       }
     }
 

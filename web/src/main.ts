@@ -36,7 +36,13 @@ let store: BrowserStore | null = null
 let wallet: Wallet | null = null
 let viewEpoch = 0
 
-const WALLET_OPTS = {timeoutMs: 20_000}
+// Every LNURLcash call is a GET with the k1 secret in the query string:
+// never let the HTTP cache keep one (even if a mint sends cacheable
+// headers), and never send this origin onward as a Referer.
+const protocolFetch: typeof fetch = (input, init) =>
+  fetch(input, {...init, cache: 'no-store', referrerPolicy: 'no-referrer'})
+
+const WALLET_OPTS = {timeoutMs: 20_000, fetch: protocolFetch}
 
 const SUGGESTED_MINTS = ['mint@moneyer.dev', 'mint@mint.forgesworn.dev']
 
@@ -96,10 +102,19 @@ const toast = (message: string, kind: 'ok' | 'err' | '' = ''): void => {
   }, 3400)
 }
 
-const copyText = async (text: string, label: string): Promise<void> => {
+// bearer: what was copied IS the money, so a plain "copied" is not enough -
+// say what the clipboard means for a live note.
+const copyText = async (text: string, label: string, bearer = false): Promise<void> => {
   try {
     await navigator.clipboard.writeText(text)
-    toast(`${label} copied`, 'ok')
+    if (bearer) {
+      toast(
+        `${label} copied. Anyone who sees it owns the sats - the clipboard is readable by other apps, so send it to exactly one person.`,
+        'ok'
+      )
+    } else {
+      toast(`${label} copied`, 'ok')
+    }
   } catch {
     toast('Copying is blocked here - long-press to copy instead.', 'err')
   }
@@ -175,19 +190,23 @@ const qrCard = (text: string): HTMLElement => {
   return card
 }
 
-// A bearer QR never flashes on screen from one careless tap: blurred
-// behind a cover until deliberately revealed.
+// A bearer QR never sits in the DOM waiting for one careless tap: the SVG
+// is rendered only when the cover is tapped, and the opaque cover over a
+// square veil holds the space until then.
 const coveredQr = (text: string): HTMLElement => {
   const wrap = el('<div class="covered"></div>')
-  const qr = qrCard(text)
+  const veil = el('<div class="veil" aria-hidden="true"></div>')
   const cover = el(
     `<button class="cover">${icons.eye}<span>Tap to reveal</span><small>Anyone who sees this code can take the sats.</small></button>`
   )
   cover.addEventListener('click', () => {
+    const qr = qrCard(text)
+    veil.remove()
+    wrap.append(qr)
     animate(cover, {opacity: 0, duration: 220, ease: 'outCubic', onComplete: () => cover.remove()})
     animate(qr, {filter: ['blur(14px)', 'blur(0px)'], scale: [0.98, 1], duration: 420, ease: 'outCubic'})
   })
-  wrap.append(qr, cover)
+  wrap.append(veil, cover)
   return wrap
 }
 
@@ -322,7 +341,7 @@ const viewWelcome = (): void =>
       </div>
       <div class="features">
         <div class="feature">${icons.note}<b>Bearer notes</b><small>No account, no custodian's ledger - holding the secret is holding the money.</small></div>
-        <div class="feature">${icons.lock}<b>Sealed on this device</b><small>Encrypted at rest, behind your PIN and biometrics.</small></div>
+        <div class="feature">${icons.lock}<b>Sealed on this device</b><small>Encrypted at rest - the PIN gates casual access on this device; a stolen backup is protected by its own passphrase, so pick a real one.</small></div>
         <div class="feature">${icons.mint}<b>Any mint</b><small>Mint, split, merge and melt at any LNURLcash service.</small></div>
       </div>
       <div class="stack" style="margin-top:auto">
@@ -505,7 +524,8 @@ const viewHome = (): void => {
       sub.textContent = 'nothing minted yet'
     } else {
       for (const [host, msat] of mints) {
-        const chip = el(`<button class="chip"><span>${host}</span><b>${sats(msat)}</b></button>`)
+        const chip = el(`<button class="chip"><span></span><b>${sats(msat)}</b></button>`)
+        chip.querySelector('span')!.textContent = host
         chip.addEventListener('click', () => viewMints())
         sub.append(chip)
       }
@@ -598,17 +618,30 @@ const viewNote = (note: NoteRecord): void => {
       <div class="hero burst-host" style="padding:6px 0 0">
         <div class="amount">${sats(note.amountMsat)}<span class="unit">sat</span></div>
       </div>
-      <div class="badges">
-        ${signedOk(w, note) ? `<span class="badge good">${icons.shield}<span>signed by ${note.mintHost}</span></span>` : `<span class="badge">${icons.shield}<span>no verified signature</span></span>`}
-        ${note.state === 'sent' ? `<span class="badge wait">${icons.send}<span>handed over - whoever holds it can spend it</span></span>` : ''}
-      </div>
+      <div class="badges"></div>
       <div class="card" style="text-align:left">
-        <div class="kv"><span>mint</span><b>${note.mintHost}</b></div>
-        <div class="kv"><span>came from</span><b>${note.origin}</b></div>
+        <div class="kv"><span>mint</span><b></b></div>
+        <div class="kv"><span>came from</span><b></b></div>
         <div class="kv"><span>created</span><b>${when(note.createdAt)}</b></div>
-        <div class="kv"><span>note id</span><code>${note.id.slice(0, 16)}…</code></div>
+        <div class="kv"><span>note id</span><code></code></div>
       </div>
     </div>`)
+    // mintHost, origin and id are persisted strings - a crafted backup must
+    // never become markup, so they go in as text, not through el().
+    const badges = body.querySelector('.badges')!
+    const signed = signedOk(w, note)
+    const sigBadge = el(`<span class="badge${signed ? ' good' : ''}">${icons.shield}<span></span></span>`)
+    sigBadge.querySelector('span')!.textContent = signed ? `signed by ${note.mintHost}` : 'no verified signature'
+    badges.append(sigBadge)
+    if (note.state === 'sent') {
+      badges.append(
+        el(`<span class="badge wait">${icons.send}<span>handed over - whoever holds it can spend it</span></span>`)
+      )
+    }
+    const [kvMint, kvOrigin] = body.querySelectorAll('.kv b')
+    kvMint!.textContent = note.mintHost
+    kvOrigin!.textContent = note.origin
+    body.querySelector('.kv code')!.textContent = `${note.id.slice(0, 16)}…`
     view.append(body)
 
     if (note.state === 'sent') {
@@ -648,9 +681,9 @@ const viewNote = (note: NoteRecord): void => {
     }
 
     const copyUrl = el(`<button class="btn">${icons.copy}<span>Copy note URL</span></button>`)
-    copyUrl.addEventListener('click', () => void copyText(url, 'Note URL'))
+    copyUrl.addEventListener('click', () => void copyText(url, 'Note URL', true))
     const copyLnurl = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy LNURL</span></button>`)
-    copyLnurl.addEventListener('click', () => void copyText(toBech32Lnurl(url), 'LNURL'))
+    copyLnurl.addEventListener('click', () => void copyText(toBech32Lnurl(url), 'LNURL', true))
     body.append(copyUrl, copyLnurl)
     const share = shareButton(url)
     if (share) body.append(share)
@@ -794,9 +827,9 @@ const viewSend = (): void => {
           </div>`)
           inner.insertBefore(coveredQr(toBech32Lnurl(url)), inner.querySelector('p'))
           const copyUrl = el(`<button class="btn">${icons.copy}<span>Copy note URL</span></button>`)
-          copyUrl.addEventListener('click', () => void copyText(url, 'Note URL'))
+          copyUrl.addEventListener('click', () => void copyText(url, 'Note URL', true))
           const copyLnurl = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy LNURL</span></button>`)
-          copyLnurl.addEventListener('click', () => void copyText(toBech32Lnurl(url), 'LNURL'))
+          copyLnurl.addEventListener('click', () => void copyText(toBech32Lnurl(url), 'LNURL', true))
           inner.append(copyUrl, copyLnurl)
           const share = shareButton(url)
           if (share) inner.append(share)
@@ -813,10 +846,16 @@ const viewSend = (): void => {
 // ---------- minting ----------
 
 const mintPicker = (w: Wallet): HTMLElement => {
-  const hosts = w.data.mints.map(mint => mint.host)
-  return el(`<div class="field"><label>Mint</label><select data-mint>${hosts
-    .map(host => `<option ${host === w.data.settings.defaultMintHost ? 'selected' : ''}>${host}</option>`)
-    .join('')}</select></div>`)
+  const field = el(`<div class="field"><label>Mint</label><select data-mint></select></div>`)
+  const select = field.querySelector('select') as HTMLSelectElement
+  for (const mint of w.data.mints) {
+    // mint hosts are persisted strings: build options, never interpolate
+    const option = document.createElement('option')
+    option.textContent = mint.host
+    option.selected = mint.host === w.data.settings.defaultMintHost
+    select.append(option)
+  }
+  return field
 }
 
 const viewMint = (): void => {
@@ -903,7 +942,10 @@ const viewMintInvoice = (pending: PendingMint): void => {
       <p class="pulse" style="color:var(--ink-dim)">Waiting for the payment…</p>
       <p class="warn">Pay this invoice from any Lightning wallet - the note (${sats(pending.expectedNetMsat)} sat) is claimed automatically when it settles.</p>
     </div>`)
-    const qrLink = el(`<a href="lightning:${pending.pr}" style="display:block"></a>`)
+    // the invoice string comes from the mint: assign href as a property,
+    // never through HTML where a quote would break out of the attribute
+    const qrLink = el('<a style="display:block"></a>') as HTMLAnchorElement
+    qrLink.href = `lightning:${pending.pr}`
     qrLink.append(qrCard(pending.pr.toUpperCase()))
     body.prepend(qrLink)
     const copy = el(`<button class="btn">${icons.copy}<span>Copy invoice</span></button>`)
@@ -1048,7 +1090,7 @@ const viewMints = (prefillAdd?: string): void => {
       const fee = entry.mintFee
       const card = el(`<div class="card">
         <div class="kv" style="align-items:center">
-          <b style="font-size:16.5px">${entry.host}</b>
+          <b style="font-size:16.5px"></b>
           <span class="row" style="gap:8px">
             <button class="btn-icon" data-star aria-label="Make default" style="color:${isDefault ? 'var(--gold)' : 'var(--ink-dim)'}">${icons.star}</button>
             <button class="btn-icon" data-remove aria-label="Remove">${icons.trash}</button>
@@ -1060,9 +1102,12 @@ const viewMints = (prefillAdd?: string): void => {
             ? `${fee.baseFeeMsat > 0 ? `${sats(fee.baseFeeMsat)} sat flat` : ''}${fee.baseFeeMsat > 0 && fee.feePpm > 0 ? ' + ' : ''}${fee.feePpm > 0 ? `${fee.feePpm / 10_000}%` : ''}`
             : 'none advertised'
         }</b></div>
-        <div class="kv"><span>key pinned</span>${pin ? `<code>${pin.slice(0, 20)}…</code>` : '<b>not yet - first receive pins it</b>'}</div>
+        <div class="kv"><span>key pinned</span>${pin ? '<code></code>' : '<b>not yet - first receive pins it</b>'}</div>
         ${isDefault ? `<div class="kv"><span>default</span><b>new mints and sends start here</b></div>` : ''}
       </div>`)
+      // host and pin are persisted strings: text, never markup
+      card.querySelector('.kv b')!.textContent = entry.host
+      if (pin) card.querySelector('.kv code')!.textContent = `${pin.slice(0, 20)}…`
       card.querySelector('[data-star]')!.addEventListener('click', async () => {
         await w.setDefaultMint(entry.host)
         viewMints()
@@ -1150,14 +1195,27 @@ const viewSettings = (): void => {
       })
       nwc.append(check, clear)
     } else {
+      // A live spending capability: hidden like a passphrase, with a
+      // deliberate reveal toggle rather than a permanently visible input.
       const row = el(`<div class="stack">
-        <input data-nwc placeholder="nostr+walletconnect://…" autocomplete="off" />
+        <div class="row" style="align-items:center">
+          <input data-nwc type="password" placeholder="nostr+walletconnect://…" autocomplete="off" data-1p-ignore data-lpignore="true" />
+          <button class="btn-icon" data-reveal aria-label="Show the connection string" style="flex:none">${icons.eye}</button>
+        </div>
         <button class="btn">${icons.bolt}<span>Connect</span></button>
       </div>`)
-      const connect = row.querySelector('button') as HTMLButtonElement
+      const nwcInput = row.querySelector('[data-nwc]') as HTMLInputElement
+      const reveal = row.querySelector('[data-reveal]') as HTMLButtonElement
+      reveal.addEventListener('click', () => {
+        const showing = nwcInput.type === 'text'
+        nwcInput.type = showing ? 'password' : 'text'
+        reveal.innerHTML = showing ? icons.eye : icons.eyeOff
+        reveal.setAttribute('aria-label', showing ? 'Show the connection string' : 'Hide the connection string')
+      })
+      const connect = row.querySelector('button.btn') as HTMLButtonElement
       connect.addEventListener('click', () =>
         busy(connect, async () => {
-          const uri = (row.querySelector('[data-nwc]') as HTMLInputElement).value.trim()
+          const uri = nwcInput.value.trim()
           await nwcStatus(uri)
           w.data.settings.nwcUri = uri
           await s.save()

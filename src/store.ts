@@ -1,5 +1,5 @@
 import {mkdirSync, readFileSync, renameSync, writeFileSync, existsSync, openSync, fsyncSync, closeSync} from 'node:fs'
-import {join} from 'node:path'
+import {dirname, join} from 'node:path'
 import {homedir} from 'node:os'
 import {sha256} from '@noble/hashes/sha2.js'
 import {bytesToHex, utf8ToBytes, randomBytes} from '@noble/hashes/utils.js'
@@ -12,8 +12,9 @@ import {emptyWallet, type WalletData} from './types.ts'
 // key lives behind keystore-kit's PIN protection; --insecure-plaintext
 // exists for throwaway dev wallets and says so in its name.
 //
-// Every save is atomic - temp file, fsync, rename - because the staging
-// discipline in wallet.ts depends on "persisted" meaning persisted.
+// Every save is atomic - temp file, fsync, rename, directory fsync -
+// because the staging discipline in wallet.ts depends on "persisted"
+// meaning persisted.
 
 export const walletHome = (): string => process.env.NOTECASE_HOME ?? join(homedir(), '.notecase')
 
@@ -30,6 +31,18 @@ const atomicWrite = (path: string, contents: string): void => {
     closeSync(fd)
   }
   renameSync(tmp, path)
+  // The rename itself is only durable once the containing directory is
+  // flushed - best-effort: some filesystems refuse to fsync a directory.
+  try {
+    const dirFd = openSync(dirname(path), 'r')
+    try {
+      fsyncSync(dirFd)
+    } finally {
+      closeSync(dirFd)
+    }
+  } catch {
+    // the file is written and renamed; the power-loss window just stays open
+  }
 }
 
 // keystore-kit's storage seam, over one JSON file. Grace keys hold live

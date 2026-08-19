@@ -244,12 +244,15 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--gold); outl
 .fab svg { width: 28px; height: 28px; }
 
 /* ---------- covered QR (two-stage reveal) ---------- */
+/* The QR SVG is rendered only when the cover is tapped; until then the
+   opaque cover sits over a square veil that just holds the space. */
 .covered { position: relative; max-width: 320px; margin: 0 auto; width: 100%; }
+.covered .veil { aspect-ratio: 1; border-radius: var(--radius); }
 .covered .qr { filter: blur(14px); transform: scale(0.98); }
 .cover {
   position: absolute; inset: 0; border-radius: var(--radius);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
-  background: rgba(16, 14, 11, 0.55);
+  background: var(--bg-raise);
   border: 1px dashed var(--line); color: var(--ink); font-weight: 650; font-size: 15px;
   cursor: pointer; text-align: center; padding: 18px;
 }

@@ -1,4 +1,5 @@
 import {bytesToHex, randomBytes} from '@noble/hashes/utils.js'
+import type {LnurlcashOptions} from 'lnurlcash-kit'
 import {Wallet} from '../src/wallet.ts'
 import {emptyWallet, type WalletData} from '../src/types.ts'
 
@@ -10,7 +11,7 @@ export type TestWallet = {
 
 // A wallet over in-memory persistence that still COUNTS saves, so tests
 // can assert the persist-before-disclose ordering actually persisted.
-export const makeWallet = (): TestWallet => {
+export const makeWallet = (opts: LnurlcashOptions = {}): TestWallet => {
   const data = emptyWallet()
   let saves = 0
   const wallet = new Wallet(
@@ -18,7 +19,7 @@ export const makeWallet = (): TestWallet => {
     async () => {
       saves += 1
     },
-    {timeoutMs: 3_000}
+    {timeoutMs: 3_000, ...opts}
   )
   return {wallet, data, saves: () => saves}
 }

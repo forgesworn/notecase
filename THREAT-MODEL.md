@@ -53,6 +53,11 @@ Loopback literals bypass it deliberately - a literal cannot rebind, and
 local mints are how development happens. `NOTECASE_ALLOW_PRIVATE=1` is the
 explicit LAN opt-in.
 
+The web build cannot do any of that: a browser's fetch has no socket
+control, so DNS pinning - and with it the rebinding defence - is CLI-only.
+The web app is left with the mitigations a browser allows: scheme
+admission, no-store requests and user-confirmed actions only.
+
 ## Residual risks, stated plainly
 
 - Whoever has the PIN and the file has the money. The PIN is the last

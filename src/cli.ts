@@ -20,19 +20,22 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase balance
   notecase list [--all]
   notecase mint <sats> [--mint <host>] [--manual] [--wait <seconds>]
-  notecase receive <note>
+  notecase receive [note]
   notecase send <sats> [--mint <host>]
   notecase melt <bolt11>
   notecase melt <sats> --to <lightning-address>
   notecase melt <sats> --to-nwc
   notecase reconcile
   notecase verify <note>
-  notecase nwc set <uri> | nwc status | nwc clear
+  notecase nwc set [uri] | nwc status | nwc clear
   notecase backup export | backup shares [--threshold N --count M] | backup recover-key
 
 Amounts are sats; add --msat for milli-satoshi precision. The PIN is read
-from $NOTECASE_PIN or prompted. Notes are bearer money: whoever sees a k1
-owns it, which is why this tool never prints one unless you ask it to send.`
+from $NOTECASE_PIN or prompted. Omit the argument to receive or nwc set
+and you are prompted for it instead - prefer that: whatever goes on the
+command line lands in your shell history, and these two are live secrets.
+Notes are bearer money: whoever sees a k1 owns it, which is why this tool
+never prints one unless you ask it to send.`
 
 const sats = (msat: number): string =>
   msat % 1000 === 0 ? `${msat / 1000} sat` : `${(msat / 1000).toFixed(3)} sat`
@@ -190,7 +193,14 @@ const main = async (): Promise<void> => {
       } else {
         console.log('Pay this invoice, then the note is claimed automatically:\n')
         console.log(pending.pr)
-        const waitMs = values.wait ? Number(values.wait) * 1000 : 300_000
+        let waitMs = 300_000
+        if (values.wait !== undefined) {
+          const seconds = Number(values.wait)
+          if (!Number.isFinite(seconds) || seconds <= 0) {
+            throw new WalletUsageError('--wait takes a positive number of seconds.')
+          }
+          waitMs = seconds * 1000
+        }
         const result = await wallet.awaitMint(pending, {timeoutMs: waitMs})
         if (!result) {
           console.log('\nNot settled yet - `notecase reconcile` will claim it once paid.')
@@ -203,8 +213,11 @@ const main = async (): Promise<void> => {
     }
 
     case 'receive': {
-      if (!rest[0]) throw new WalletUsageError('Give the note to receive.')
-      const result = await wallet.receive(rest[0])
+      // Prefer the prompt over argv: a note URL on the command line lands
+      // in shell history, and the k1 in it is the money.
+      const input = (rest[0] ?? (await promptHidden('Note: '))).trim()
+      if (!input) throw new WalletUsageError('Give the note to receive.')
+      const result = await wallet.receive(input)
       for (const warning of result.warnings) console.log(`  warning: ${warning}`)
       console.log(`Received ${sats(result.note.amountMsat)} at ${result.note.mintHost} (${shortId(result.note)}).`)
       return
@@ -217,7 +230,7 @@ const main = async (): Promise<void> => {
       console.log(`A bearer note for ${sats(note.amountMsat)} - whoever sees this owns it:\n`)
       console.log(url)
       console.log(`\n${toBech32Lnurl(url)}`)
-      console.log(`\nIf it is never claimed: \`notecase receive '${url.slice(0, 40)}…'\` takes it back.`)
+      console.log('\nIf it is never claimed, `notecase receive` with the URL above takes it back.')
       return
     }
 
@@ -275,8 +288,12 @@ const main = async (): Promise<void> => {
 
     case 'nwc': {
       const [sub, uri] = rest
-      if (sub === 'set' && uri) {
-        store.data.settings.nwcUri = uri
+      if (sub === 'set') {
+        // Prefer the prompt over argv: the URI is a spending capability and
+        // the command line lands in shell history.
+        const value = (uri ?? (await promptHidden('NWC connection URI: '))).trim()
+        if (!value) throw new WalletUsageError('Give the NWC connection URI.')
+        store.data.settings.nwcUri = value
         await store.save()
         console.log('NWC connection stored. It is a spending capability - the wallet file guards it.')
       } else if (sub === 'status') {
@@ -304,6 +321,8 @@ const main = async (): Promise<void> => {
           writeFileSync(values.file, body, {mode: 0o600})
           console.log(`Exported PLAINTEXT wallet data to ${values.file} - it holds spendable secrets.`)
         } else {
+          // stderr, so piped stdout stays clean JSON but the caution is seen
+          console.error('Printing PLAINTEXT wallet data - it holds spendable secrets.')
           console.log(body)
         }
       } else if (sub === 'shares') {
