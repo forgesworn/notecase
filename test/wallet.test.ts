@@ -194,6 +194,58 @@ describe('melting', () => {
 
 })
 
+describe('mint fees', () => {
+  // LUD-25: a fee-advertising mint takes base_fee_msat out of every
+  // split's change and refunds (n - 1) of them on a merge of n. The
+  // wallet prices its own mutations off the cached advertisement.
+  const feeMint = () => start({baseFeeMsat: 1000, feePpm: 0})
+
+  it('prices a split with the advertised fee', async () => {
+    const theMint = await feeMint()
+    const {wallet} = makeWallet()
+    await wallet.addMint(`mint@${new URL(theMint.url).host}`)
+    await wallet.receive(fund(theMint, 21_000).url)
+
+    const sent = await wallet.send(8_000)
+    expect(sent.amountMsat).toBe(8_000)
+    expect(wallet.balanceMsat()).toBe(12_000)
+    // and the mint's own books agree
+    const change = wallet.liveNotes()[0]!
+    expect(theMint.state.notes.get(change.id)?.amountMsat).toBe(12_000)
+  })
+
+  it('gathers several notes with fee-aware change', async () => {
+    const theMint = await feeMint()
+    const {wallet} = makeWallet()
+    await wallet.addMint(`mint@${new URL(theMint.url).host}`)
+    await wallet.receive(fund(theMint, 10_000).url)
+    await wallet.receive(fund(theMint, 8_000).url)
+
+    const sent = await wallet.send(14_000)
+    expect(sent.amountMsat).toBe(14_000)
+    expect(wallet.balanceMsat()).toBe(3_000)
+  })
+
+  it('refuses politely when the change cannot cover the split fee', async () => {
+    const theMint = await feeMint()
+    const {wallet} = makeWallet()
+    await wallet.addMint(`mint@${new URL(theMint.url).host}`)
+    await wallet.receive(fund(theMint, 10_000).url)
+    await expect(wallet.send(9_500)).rejects.toThrow(InsufficientFundsError)
+    expect(wallet.balanceMsat()).toBe(10_000)
+  })
+
+  it('corrects amounts from the mint when the fee was never advertised to us', async () => {
+    // no addMint: the host's fee is unknown, so the wallet prices
+    // fee-free and then asks the mint what the outputs are really worth
+    const theMint = await feeMint()
+    const {wallet} = makeWallet()
+    await wallet.receive(fund(theMint, 21_000).url)
+    await wallet.send(8_000)
+    expect(wallet.balanceMsat()).toBe(12_000)
+  })
+})
+
 describe('pending lockout', () => {
   it('surfaces the pending state on a mutation racing a melt', async () => {
     const theMint = await start({meltNeverSettles: true})

@@ -105,6 +105,7 @@ export class Wallet {
       payUrl,
       baseUrl: fromLud17(pay.withdrawLink),
       ...(label ? {label} : {}),
+      ...(pay.mintFee ? {mintFee: pay.mintFee} : {}),
       addedAt: now()
     }
     const existing = this.data.mints.findIndex(mint => mint.host === host)
@@ -173,14 +174,31 @@ export class Wallet {
     const template = inputs[0]!
     const inputIds = inputs.map(note => note.id)
     const origin: NoteOrigin = plan.kind === 'rotate' ? 'rotate' : plan.kind
+
+    // LUD-25 fee algebra, priced from the cached advertisement: the flat
+    // base fee comes out of a split's CHANGE (never the requested amount),
+    // and a merge of n notes refunds (n - 1) of it. A mint we never
+    // fetched a payRequest from has an unknown fee: price fee-free and
+    // correct against the mint's authoritative answer afterwards.
+    const entry = this.data.mints.find(mint => mint.host === template.mintHost)
+    const feeKnown = entry !== undefined
+    const baseFeeMsat = entry?.mintFee?.baseFeeMsat ?? 0
+    const changeMsat = plan.kind === 'split' ? totalMsat - plan.amountMsat - baseFeeMsat : 0
+    if (plan.kind === 'split' && feeKnown && changeMsat < 1) {
+      throw new InsufficientFundsError(
+        `That split leaves no change once the mint's ${baseFeeMsat} msat split fee is paid.`
+      )
+    }
+    const mergedMsat = totalMsat + (inputs.length - 1) * baseFeeMsat
+
     const secret = (this.opts.randomSecret ?? defaultRandomSecret)()
     const staged: NoteRecord[] =
       plan.kind === 'split'
         ? [
             this.record(template, secret, plan.amountMsat, 'split', inputIds),
-            this.record(template, (this.opts.randomSecret ?? defaultRandomSecret)(), totalMsat - plan.amountMsat, 'change', inputIds)
+            this.record(template, (this.opts.randomSecret ?? defaultRandomSecret)(), changeMsat, 'change', inputIds)
           ]
-        : [this.record(template, secret, totalMsat, origin, inputIds)]
+        : [this.record(template, secret, mergedMsat, origin, inputIds)]
 
     // The hashes are about to be disclosed: the secrets go to disk first.
     this.data.notes.push(...staged)
@@ -213,6 +231,24 @@ export class Wallet {
         this.touch(note, 'live')
       })
       await this.persist()
+      // An unknown-fee mint may have priced the outputs differently: ask
+      // it what they are actually worth so the balance cannot drift. The
+      // k1 travels only to the mint that just minted it, over the same
+      // admitted URL scheme every other call uses.
+      if (!feeKnown && (plan.kind === 'split' || inputs.length > 1)) {
+        for (const output of staged) {
+          try {
+            const authoritative = await fetchNoteInfo(buildNoteUrl(output.baseUrl, output.k1), this.opts)
+            if (authoritative.maxWithdrawable !== output.amountMsat) {
+              output.amountMsat = authoritative.maxWithdrawable
+              output.updatedAt = now()
+            }
+          } catch {
+            // keep the computed value - reconcile and later use correct it
+          }
+        }
+        await this.persist()
+      }
       return staged
     } catch (err) {
       if (err instanceof AmbiguousMintError) {
@@ -313,6 +349,7 @@ export class Wallet {
       if (b === this.data.settings.defaultMintHost) return 1
       return 0
     })
+    let feeBlocked = false
     for (const host of hosts) {
       const notes = candidates.get(host)!
       const total = notes.reduce((sum, note) => sum + note.amountMsat, 0)
@@ -321,33 +358,47 @@ export class Wallet {
       const exact = notes.find(note => note.amountMsat === amountMsat)
       if (exact) return exact
 
-      const bigger = notes
-        .filter(note => note.amountMsat > amountMsat)
+      // A split's change must survive the mint's flat fee and stay above
+      // zero, so a note is only splittable with that much headroom.
+      const baseFeeMsat = this.data.mints.find(mint => mint.host === host)?.mintFee?.baseFeeMsat ?? 0
+      const minChangeMsat = baseFeeMsat + 1
+
+      const splittable = notes
+        .filter(note => note.amountMsat >= amountMsat + minChangeMsat)
         .sort((a, b) => a.amountMsat - b.amountMsat)[0]
-      if (bigger) {
-        const [target] = await this.mutate([bigger], {kind: 'split', amountMsat})
+      if (splittable) {
+        const [target] = await this.mutate([splittable], {kind: 'split', amountMsat})
         return target!
       }
 
-      // No single note is big enough: gather largest-first, then one
-      // request either merges exactly or splits off the target.
+      // No single note works: gather largest-first. An exact-sum merge
+      // only yields the exact amount when the mint refunds nothing, so
+      // with a flat fee the target is always a split with coverable change.
       const selection: NoteRecord[] = []
       let sum = 0
       for (const note of [...notes].sort((a, b) => b.amountMsat - a.amountMsat)) {
         selection.push(note)
         sum += note.amountMsat
-        if (sum >= amountMsat) break
+        if (baseFeeMsat === 0 && sum === amountMsat) break
+        if (sum >= amountMsat + minChangeMsat) break
       }
-      const [target] = await this.mutate(
-        selection,
-        sum === amountMsat ? {kind: 'merge'} : {kind: 'split', amountMsat}
-      )
-      return target!
+      if (baseFeeMsat === 0 && sum === amountMsat) {
+        const [target] = await this.mutate(selection, {kind: 'merge'})
+        return target!
+      }
+      if (sum >= amountMsat + minChangeMsat) {
+        const [target] = await this.mutate(selection, {kind: 'split', amountMsat})
+        return target!
+      }
+      // enough value in total, but the change cannot cover the split fee
+      feeBlocked = true
     }
     throw new InsufficientFundsError(
-      mintHost
-        ? `Not enough at ${mintHost} for ${amountMsat} msat.`
-        : `No single mint holds ${amountMsat} msat - notes from different mints cannot be combined.`
+      feeBlocked
+        ? `Not enough headroom for ${amountMsat} msat once the mint's split fee comes out of the change.`
+        : mintHost
+          ? `Not enough at ${mintHost} for ${amountMsat} msat.`
+          : `No single mint holds ${amountMsat} msat - notes from different mints cannot be combined.`
     )
   }
 
@@ -372,6 +423,9 @@ export class Wallet {
     const pay = await fetchPayRequest(entry.payUrl, this.opts)
     if (!pay.withdrawLink) throw new WalletUsageError(`${entry.host} no longer advertises minting.`)
     const fee = pay.mintFee ?? null
+    // keep the cached fee current - mutations price themselves off it
+    if (fee) entry.mintFee = fee
+    else delete entry.mintFee
     const invoice = await requestInvoice(pay.callback, grossMsat, this.opts)
     const decoded = tryDecodeBolt11(invoice.pr)
     if (!decoded) throw new WalletUsageError('The mint returned an invoice this wallet cannot decode.')

@@ -74,6 +74,10 @@ export type MintEntry = {
   payUrl: string
   baseUrl?: string
   label?: string
+  // The advertised mint fee, cached so mutations can price themselves per
+  // LUD-25 (base fee out of a split's change, (n-1) refunds on a merge)
+  // without a round trip. Refreshed whenever the payRequest is fetched.
+  mintFee?: {baseFeeMsat: number; feePpm: number}
   addedAt: number
 }
 
