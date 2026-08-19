@@ -84,6 +84,35 @@ const store = await openWallet({pin})
 const wallet = new Wallet(store.data, store.save, {fetch: createWalletFetch()})
 ```
 
+## The web wallet
+
+`npm run web:build` produces a fully static, installable PWA (`web/dist`,
+vite + anime.js) around the same engine - live at
+[wallet.moneyer.dev](https://wallet.moneyer.dev). What it does:
+
+- PIN + biometric (WebAuthn PRF) unlock; the store is the same sealed
+  AES-GCM blob the CLI writes.
+- Mint (you type what the note should hold - fees are grossed up and
+  shown before you pay), receive-and-rotate, exact-amount send behind a
+  tap-to-reveal QR with system share, melt to invoice / Lightning Address
+  / NWC.
+- A note detail view per note: verified-signature badge, panic rotate,
+  copy/share/QR - and handed-over notes stay listed until taken, with
+  one-tap reclaim.
+- Camera QR scanning (BarcodeDetector, jsQR fallback) with one universal
+  scan button that classifies notes, invoices and mint addresses itself.
+- History derived from the wallet's own records - nothing logged twice.
+- Mint management: per-mint balances, default mint, key pins on display,
+  guarded removal.
+- Portable backups sealed under their own passphrase (never the 6-digit
+  PIN - a file must survive an offline brute force), restorable from the
+  welcome screen on any device.
+- A `#/claim?u=…` route other sites can link notes into - the fragment
+  never reaches a server, and the wallet prefills rather than
+  auto-accepts.
+- Installable PWA whose service worker asks before updating and caches no
+  protocol call: money answers are live or visibly absent, never stale.
+
 ## Testing
 
 ```bash

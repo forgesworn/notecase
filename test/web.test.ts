@@ -30,12 +30,15 @@ const onHome = () => document.querySelectorAll('.tile').length === 4
 beforeAll(async () => {
   document.body.innerHTML = '<div id="app"></div><div id="toasts"></div>'
   await import('../web/src/main.ts')
-  await until(() => document.querySelector('.pinwrap') !== null, 'the setup screen')
+  await until(() => document.querySelector('[data-create]') !== null, 'the welcome screen')
 })
 
 describe('the web wallet', () => {
-  it('walks first run: PIN, confirm, home', async () => {
-    expect(document.querySelector('.pinwrap h1')?.textContent).toContain('Welcome')
+  it('walks first run: welcome, PIN, confirm, home', async () => {
+    expect(document.body.textContent).toContain('Restore a backup')
+    document.querySelector<HTMLButtonElement>('[data-create]')!.click()
+    await until(() => document.querySelector('.pinwrap') !== null, 'the setup screen')
+    expect(document.querySelector('.pinwrap h1')?.textContent).toContain('Choose a PIN')
     for (const digit of '210987') type(digit)
     await until(
       () => document.querySelector('.pinwrap h1')?.textContent?.includes('Once more') ?? false,

@@ -38,14 +38,23 @@ const storeFor = (storeKey: string, data: WalletData): BrowserStore => ({
   }
 })
 
-export const createBrowserWallet = async (pin: string): Promise<BrowserStore> => {
+// Creates the device wallet: fresh by default, or around restored data -
+// either way under a NEW store key guarded by this device's PIN.
+export const createBrowserWallet = async (pin: string, data: WalletData = emptyWallet()): Promise<BrowserStore> => {
   if (walletExists()) throw new Error('A wallet already exists on this device.')
   const ks = keystore()
   const storeKey = ks.generateSecret()
   await ks.setupPIN(pin, storeKey)
-  const store = storeFor(storeKey, emptyWallet())
+  const store = storeFor(storeKey, data)
   await store.save()
   return store
+}
+
+// Erases the wallet and its keystore from this device. The caller has
+// already made absolutely sure - this does not ask again.
+export const forgetBrowserWallet = async (): Promise<void> => {
+  localStorage.removeItem(WALLET_SLOT)
+  await keystore().burn()
 }
 
 export const unlockWithPin = async (pin: string): Promise<BrowserStore | null> => {

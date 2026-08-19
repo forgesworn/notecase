@@ -262,3 +262,78 @@ describe('pending lockout', () => {
     expect(data.notes.filter(record => record.state === 'staged')).toHaveLength(0)
   })
 })
+
+describe('sent notes', () => {
+  it('reclaims an unclaimed sent note under a fresh secret', async () => {
+    const theMint = await start()
+    const {wallet} = makeWallet()
+    await wallet.receive(fund(theMint, 50_000).url)
+    const sent = await wallet.send(20_000)
+    expect(wallet.sentNotes()).toHaveLength(1)
+    expect(wallet.balanceMsat()).toBe(30_000)
+
+    const result = await wallet.reclaim(sent)
+    expect(result.note.state).toBe('live')
+    expect(result.note.k1).not.toBe(sent.k1)
+    expect(wallet.sentNotes()).toHaveLength(0)
+    expect(wallet.balanceMsat()).toBe(50_000)
+    // the old secret is dead to whoever saw it
+    expect(theMint.state.noteState(sent.k1)).toBe('burned')
+  })
+
+  it('cannot reclaim a note the recipient already took, and markTaken resolves it', async () => {
+    const theMint = await start()
+    const {wallet} = makeWallet()
+    await wallet.receive(fund(theMint, 50_000).url)
+    const sent = await wallet.send(20_000)
+
+    const {wallet: recipient} = makeWallet()
+    await recipient.receive(wallet.noteUrlFor(sent))
+
+    await expect(wallet.reclaim(sent)).rejects.toThrow()
+    expect(sent.state).toBe('sent')
+    await wallet.markTaken(sent)
+    expect(sent.state).toBe('spent')
+    expect(wallet.sentNotes()).toHaveLength(0)
+  })
+
+  it('refuses to reclaim or mark anything that is not sent', async () => {
+    const theMint = await start()
+    const {wallet} = makeWallet()
+    const {note} = await wallet.receive(fund(theMint, 21_000).url)
+    await expect(wallet.reclaim(note)).rejects.toThrow('Only a sent note')
+    await expect(wallet.markTaken(note)).rejects.toThrow('Only a sent note')
+  })
+})
+
+describe('the mints directory', () => {
+  it('sets the default and refuses unknown hosts', async () => {
+    const theMint = await start()
+    const {wallet, data} = makeWallet()
+    await wallet.addMint(`mint@${new URL(theMint.url).host}`)
+    const host = new URL(theMint.url).host
+    await wallet.setDefaultMint(host)
+    expect(data.settings.defaultMintHost).toBe(host)
+    await expect(wallet.setDefaultMint('nowhere.example')).rejects.toThrow('No mint known')
+  })
+
+  it('refuses to remove a mint still holding notes, allows it once empty', async () => {
+    const theMint = await start()
+    const {wallet, data} = makeWallet()
+    await wallet.addMint(`mint@${new URL(theMint.url).host}`)
+    const host = new URL(theMint.url).host
+    const {note} = await wallet.receive(fund(theMint, 21_000).url)
+
+    await expect(wallet.removeMint(host)).rejects.toThrow('still live')
+
+    // hand it over and mark it taken - nothing left at the mint
+    const sent = await wallet.send(21_000)
+    await wallet.markTaken(sent)
+    expect(note.state).toBe('spent')
+    await wallet.removeMint(host)
+    expect(data.mints).toHaveLength(0)
+    expect(data.settings.defaultMintHost).toBeUndefined()
+    // the pubkey pin survives removal on purpose
+    expect(data.pubkeyPins[host]).toBeDefined()
+  })
+})

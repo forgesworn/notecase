@@ -124,6 +124,34 @@ export class Wallet {
     return entry
   }
 
+  async setDefaultMint(host: string): Promise<void> {
+    if (!this.data.mints.some(mint => mint.host === host)) {
+      throw new WalletUsageError(`No mint known for ${host}.`)
+    }
+    this.data.settings.defaultMintHost = host
+    await this.persist()
+  }
+
+  // Forgetting a mint never forgets money: any note not fully spent keeps
+  // the entry. The pubkey pin is deliberately kept too - if this mint is
+  // ever added back, the old pin still vets it.
+  async removeMint(host: string): Promise<void> {
+    const holding = this.data.notes.some(note => note.mintHost === host && note.state !== 'spent')
+    if (holding) {
+      throw new WalletUsageError(`Notes still live at ${host} - spend, melt or reclaim them first.`)
+    }
+    if (this.data.pendingMints.some(pending => pending.mintHost === host && pending.state === 'awaiting')) {
+      throw new WalletUsageError(`A mint invoice at ${host} is still awaiting payment - resolve it first.`)
+    }
+    this.data.mints = this.data.mints.filter(mint => mint.host !== host)
+    if (this.data.settings.defaultMintHost === host) {
+      const next = this.data.mints[0]?.host
+      if (next) this.data.settings.defaultMintHost = next
+      else delete this.data.settings.defaultMintHost
+    }
+    await this.persist()
+  }
+
   // Trust on first use. A changed key is surfaced hard: it is either a mint
   // rotating its identity or something standing between the wallet and it.
   private pinPubkey(host: string, observed: string | undefined): void {
@@ -410,6 +438,35 @@ export class Wallet {
     this.touch(note, 'sent')
     await this.persist()
     return note
+  }
+
+  sentNotes(): NoteRecord[] {
+    return this.data.notes.filter(note => note.state === 'sent')
+  }
+
+  // A panic rotate: same value, fresh secret, everything anyone ever saw of
+  // this note - a screenshot, a log line, a shoulder - stops mattering.
+  async rotateLive(note: NoteRecord): Promise<NoteRecord> {
+    if (note.state !== 'live') throw new WalletUsageError('Only a live note can be rotated.')
+    const [rotated] = await this.mutate([note], {kind: 'rotate'})
+    return rotated!
+  }
+
+  // Takes back a handed-over note nobody has claimed yet: receiving our own
+  // copy rotates it to a fresh secret, dead to whoever saw the old one. If
+  // the recipient DID claim it, the receive fails with spent/unknown and
+  // markTaken is the honest resolution.
+  async reclaim(note: NoteRecord): Promise<ReceiveResult> {
+    if (note.state !== 'sent') throw new WalletUsageError('Only a sent note can be reclaimed.')
+    return this.receive(this.noteUrlFor(note))
+  }
+
+  // The recipient took the note (or it should simply stop being offered
+  // back): out of the sent list, into history.
+  async markTaken(note: NoteRecord): Promise<void> {
+    if (note.state !== 'sent') throw new WalletUsageError('Only a sent note can be marked taken.')
+    this.touch(note, 'spent')
+    await this.persist()
   }
 
   noteUrlFor(note: NoteRecord): string {

@@ -22,6 +22,7 @@ export {
   type WalletStore
 } from './store.ts'
 export {createWalletFetch} from './fetchguard.ts'
+export {exportBackup, importBackup, BackupError, type BackupEnvelope} from './backup.ts'
 export {payWithNwc, invoiceFromNwc, nwcStatus, NwcPaymentUnprovenError, type NwcOptions} from './nwc.ts'
 export {emptyWallet} from './types.ts'
 export type {
