@@ -1,0 +1,54 @@
+# notecase
+
+LNURLcash (LUD-25) wallet for Node 22+: receive, hold, split, merge, send
+and melt Lightning bearer notes. CLI plus a reusable engine. ESM-only. MIT.
+
+Install: npm install @forgesworn/notecase
+Companion mint: @forgesworn/moneyer
+Protocol client it builds on: lnurlcash-kit
+Draft spec: https://github.com/lnurl/luds/pull/301
+
+## The rules the engine enforces (and any wallet MUST)
+
+1. Persist before disclose: a replacement secret reaches disk BEFORE its
+   hash goes on the wire. Use the kit's *WithHash variants, never the
+   generating ones, if you care about crashes.
+2. Only a DEFINITIVE rejection discards a staged secret. Timeouts, broken
+   JSON, dropped connections and unconfirmed 200s all keep it, parked as
+   ambiguous, until a probe of the mint proves what happened.
+3. Melt OK means in flight. The note locks; settlement is confirmed via
+   LUD-21 verify, and a failed melt is recovered by a rotate probe - safe
+   in every outcome by construction.
+4. Rotate immediately on receive and on mint claim: the previous holder
+   (or anyone who saw the invoice) still knows the old secret.
+5. maxWithdrawable from the informational GET is the note's value; the
+   URL's amount parameter is an unverified claim.
+6. Pin mint pubkeys on first use; refuse hard on a change.
+7. Verify NWC payments by preimage against the invoice's payment hash -
+   a successful-looking response is not evidence money moved.
+8. Never print, log or echo a k1 except on explicit send/export.
+
+## CLI
+
+notecase init [--insecure-plaintext]
+notecase mints add <address|lnurl> / list / use <host>
+notecase mint <sats> [--manual] [--mint <host>]
+notecase receive <note> | send <sats> | melt <bolt11 | sats --to <addr> | sats --to-nwc>
+notecase balance | list [--all] | reconcile | verify <note>
+notecase nwc set <uri> / status / clear
+notecase backup export | shares [--threshold N --count M] | recover-key
+
+Amounts are sats (--msat for msat). PIN via prompt or $NOTECASE_PIN.
+NOTECASE_HOME relocates the store; NOTECASE_ALLOW_PRIVATE=1 admits LAN mints.
+
+## Library API
+
+openWallet({pin?, home?}) / initWallet(...) -> {data, save, encrypted, storeKey}
+new Wallet(data, save, {fetch?, timeoutMs?}) ->
+  receive(input), send(amountMsat), prepareExact(amountMsat), melt(pr, target),
+  startMint(grossMsat), claimMint(pending, preimage), awaitMint(pending),
+  reconcile(), balanceMsat(), verifyNoteOffline(input), addMint(input)
+createWalletFetch({allowPrivate?}) - DNS-pinned fetch, loopback passthrough
+payWithNwc(uri, pr) / invoiceFromNwc(uri, amountMsat, desc) / nwcStatus(uri)
+
+All amounts are integer milli-satoshis in the engine; the CLI speaks sats.
