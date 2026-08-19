@@ -2,8 +2,9 @@ import {mkdirSync, readFileSync, renameSync, writeFileSync, existsSync, openSync
 import {join} from 'node:path'
 import {homedir} from 'node:os'
 import {sha256} from '@noble/hashes/sha2.js'
-import {bytesToHex, hexToBytes, utf8ToBytes, randomBytes} from '@noble/hashes/utils.js'
+import {bytesToHex, utf8ToBytes, randomBytes} from '@noble/hashes/utils.js'
 import {Keystore, type KeystoreStorage} from 'keystore-kit'
+import {sealWallet, unsealWallet} from './cryptobox.ts'
 import {emptyWallet, type WalletData} from './types.ts'
 
 // The wallet file holds bearer secrets and (optionally) an NWC spending
@@ -61,34 +62,6 @@ const keystoreFor = (home: string): Keystore =>
     prfSalt: sha256(utf8ToBytes('notecase-prf-salt-v1'))
   })
 
-const aesKey = async (storeKey: string) =>
-  crypto.subtle.importKey('raw', sha256(utf8ToBytes(storeKey)), {name: 'AES-GCM'}, false, [
-    'encrypt',
-    'decrypt'
-  ])
-
-type EncryptedFile = {v: 1; cipher: 'aes-256-gcm'; iv: string; ct: string}
-
-const encryptWallet = async (data: WalletData, storeKey: string): Promise<string> => {
-  const iv = randomBytes(12)
-  const ct = new Uint8Array(
-    await crypto.subtle.encrypt({name: 'AES-GCM', iv}, await aesKey(storeKey), utf8ToBytes(JSON.stringify(data)))
-  )
-  const file: EncryptedFile = {v: 1, cipher: 'aes-256-gcm', iv: bytesToHex(iv), ct: Buffer.from(ct).toString('base64')}
-  return JSON.stringify(file)
-}
-
-const decryptWallet = async (contents: string, storeKey: string): Promise<WalletData> => {
-  const file = JSON.parse(contents) as EncryptedFile
-  if (file.v !== 1 || file.cipher !== 'aes-256-gcm') throw new Error('Unrecognised wallet file format.')
-  const plain = await crypto.subtle.decrypt(
-    {name: 'AES-GCM', iv: hexToBytes(file.iv)},
-    await aesKey(storeKey),
-    Buffer.from(file.ct, 'base64')
-  )
-  return JSON.parse(new TextDecoder().decode(plain)) as WalletData
-}
-
 export type WalletStore = {
   data: WalletData
   save: () => Promise<void>
@@ -121,12 +94,12 @@ export const initWallet = async (options: {pin?: string; home?: string}): Promis
   const keystore = keystoreFor(home)
   const storeKey = keystore.generateSecret()
   await keystore.setupPIN(options.pin, storeKey)
-  atomicWrite(walletPath, await encryptWallet(data, storeKey))
+  atomicWrite(walletPath, await sealWallet(data, storeKey))
   return {
     data,
     encrypted: true,
     storeKey,
-    save: async () => atomicWrite(walletPath, await encryptWallet(data, storeKey))
+    save: async () => atomicWrite(walletPath, await sealWallet(data, storeKey))
   }
 }
 
@@ -151,11 +124,11 @@ export const openWallet = async (options: {pin?: string; home?: string}): Promis
   const keystore = keystoreFor(home)
   const storeKey = await keystore.unlockPIN(options.pin)
   if (storeKey === null) throw new WrongPinError('wrong PIN')
-  const data = await decryptWallet(contents, storeKey)
+  const data = await unsealWallet(contents, storeKey)
   return {
     data,
     encrypted: true,
     storeKey,
-    save: async () => atomicWrite(walletPath, await encryptWallet(data, storeKey))
+    save: async () => atomicWrite(walletPath, await sealWallet(data, storeKey))
   }
 }
