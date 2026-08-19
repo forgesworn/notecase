@@ -1,0 +1,38 @@
+name: release
+
+# Hardened npm release via forgesworn/anvil: OIDC trusted publishing (no
+# NPM_TOKEN), SLSA provenance, secret scan on the pack set, exports check,
+# and a two-runner reproducible-build attestation.
+#
+# STAGED, not yet live. Before the first release can work:
+#   1. lnurlcash-kit, lnurlcash-conformance, keystore-kit and moneyer publish to npm, and this
+#      package.json swaps its file: links for semver ranges.
+#   2. "private": true comes out of package.json.
+#   3. npmjs.com trusted publisher is configured for @forgesworn/notecase
+#      (repo forgesworn/notecase, workflow release.yml, environment
+#      npm-publish), with the one-off bootstrap publish a new name needs.
+# Until then a release run fails loudly and publishes nothing.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (e.g. v0.1.0)
+        type: string
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    uses: forgesworn/anvil/.github/workflows/release.yml@d4294e622932d93957d73e5b1af0267382b6af04 # v0.10.1
+    with:
+      tag: ${{ inputs.tag || '' }}
+      # ci.yml actions are SHA-pinned, so the pin audit runs strict.
+      strict-action-pins: true
+      lifecycle-scripts-policy: strict
+      reproducibility-mode: strict

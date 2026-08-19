@@ -35,7 +35,8 @@
     "web:dev": "vite web",
     "web:build": "vite build web",
     "web:preview": "vite preview web",
-    "typecheck:web": "tsc -p web"
+    "typecheck:web": "tsc -p web",
+    "check": "npm run typecheck && npm run typecheck:web && npm test && npm run build && npm run web:build && npm pack --dry-run"
   },
   "dependencies": {
     "@forgesworn/nwc-kit": "^0.1.7",

@@ -1,0 +1,71 @@
+name: CI
+
+# notecase links lnurlcash-kit, keystore-kit, and (for its integration
+# tests) moneyer as file: siblings until they publish to npm, so CI checks
+# everything out by name and builds in dependency order - the same shape a
+# from-source clone follows (see README).
+
+on:
+  push:
+    branches: [main, dev, 'feat/**', 'fix/**', 'chore/**']
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: notecase
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          path: notecase
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: TheCryptoDonkey/lnurlcash-kit
+          path: lnurlcash-kit
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: TheCryptoDonkey/lnurlcash-conformance
+          path: lnurlcash-conformance
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: forgesworn/keystore-kit
+          path: keystore-kit
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: forgesworn/moneyer
+          path: moneyer
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: notecase/package-lock.json
+
+      - name: build lnurlcash-kit (its dist is not committed)
+        working-directory: lnurlcash-kit
+        run: |
+          npm ci
+          npm run build
+
+      - name: build keystore-kit (its prepare script builds it)
+        working-directory: keystore-kit
+        run: npm ci
+
+      - name: build moneyer (integration-test dependency)
+        working-directory: moneyer
+        run: |
+          npm ci
+          npm run build
+
+      - run: npm ci
+      - run: npm run check
