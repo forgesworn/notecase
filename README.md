@@ -52,6 +52,9 @@ git clone https://github.com/TheCryptoDonkey/lnurlcash-conformance
 git clone https://github.com/forgesworn/keystore-kit
 git clone https://github.com/forgesworn/moneyer
 git clone https://github.com/forgesworn/notecase
+(cd lnurlcash-kit && npm install && npm run build)
+(cd keystore-kit && npm install)   # its prepare script builds it
+(cd moneyer && npm install && npm run build)
 cd notecase && npm install && npm run build
 alias notecase="node $PWD/dist/cli.js"
 ```
