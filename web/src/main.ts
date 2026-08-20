@@ -1,10 +1,20 @@
+import '@fontsource/cinzel/400.css'
+import '@fontsource/cinzel/700.css'
+import '@fontsource/spectral/400.css'
+import '@fontsource/spectral/400-italic.css'
+import '@fontsource/spectral/500-italic.css'
+import '@fontsource/spectral/600.css'
+import '@fontsource/ibm-plex-mono/400.css'
+import '@fontsource/ibm-plex-mono/500.css'
+import '@fontsource/ibm-plex-mono/600.css'
 import './style.css'
 import {registerSW} from 'virtual:pwa-register'
-import {animate, stagger, utils} from 'animejs'
+import {animate, stagger, svg as animeSvg, utils} from 'animejs'
 import {renderSVG} from 'uqr'
 import type {SetupBiometricResult} from 'keystore-kit'
 import {
   buildNoteUrl,
+  hashK1,
   isBolt11Invoice,
   resolveMintInput,
   resolveNoteInput,
@@ -28,10 +38,14 @@ import {
 } from './browser-store.ts'
 import {scanAvailable, scanQr} from './scanner.ts'
 import {icons} from './icons.ts'
+import {rosette} from './guilloche.ts'
+import {banknote} from './banknote.ts'
 
-// notecase web - the same Wallet engine the CLI drives, behind an
-// icon-first, thumb-sized surface. Nothing here touches protocol logic:
-// every rule lives in src/wallet.ts and is shared with the CLI and tests.
+// notecase web - the same Wallet engine the CLI drives, set like the
+// banknotes it holds. Nothing here touches protocol logic: every rule
+// lives in src/wallet.ts and is shared with the CLI and tests. The design
+// language is the moneyer mint's silver series - a note minted there
+// looks the same held here, down to the scratch foil over its secret.
 
 const app = document.getElementById('app')!
 let store: BrowserStore | null = null
@@ -78,6 +92,8 @@ const el = (html: string): HTMLElement => {
   template.innerHTML = html.trim()
   return template.content.firstElementChild as HTMLElement
 }
+
+const esc = (value: string): string => value.replace(/[&<>"']/g, char => `&#${char.charCodeAt(0)};`)
 
 const sats = (msat: number): string => {
   const whole = msat / 1000
@@ -144,14 +160,53 @@ const burst = (host: HTMLElement): void => {
   })
 }
 
+const countTo = (node: Element, msat: number): void => {
+  const counter = {value: 0}
+  animate(counter, {
+    value: msat / 1000,
+    duration: 1000,
+    ease: 'outExpo',
+    onUpdate: () => (node.textContent = sats(Math.round(counter.value) * 1000))
+  })
+}
+
+// The lathe turns: engine-turned rings draw themselves on.
+const drawOn = (host: Element, duration = 1600): void => {
+  const paths = host.querySelectorAll('path')
+  if (!paths.length) return
+  try {
+    const drawables = animeSvg.createDrawable(paths)
+    animate(drawables, {draw: ['0 0', '0 1'], duration, delay: stagger(90), ease: 'inOutQuad'})
+  } catch {
+    // an environment without real SVG geometry (tests) just shows it drawn
+  }
+}
+
+const letterSettle = (node: HTMLElement): void => {
+  const text = node.textContent ?? ''
+  node.textContent = ''
+  const letters = [...text].map(char => {
+    const span = el(`<b style="display:inline-block">${char === ' ' ? '&nbsp;' : esc(char)}</b>`)
+    node.append(span)
+    return span
+  })
+  animate(letters, {
+    opacity: [0, 1],
+    y: [14, 0],
+    delay: stagger(55, {start: 120}),
+    duration: 500,
+    ease: 'outCubic'
+  })
+}
+
 const show = (build: () => HTMLElement): void => {
   viewEpoch += 1
   app.replaceChildren(build())
   const view = app.firstElementChild as HTMLElement
-  animate(view, {opacity: [0, 1], y: [14, 0], duration: 340, ease: 'outCubic'})
-  const tiles = view.querySelectorAll('.tile, .note-row, .feature, .hist-row')
-  if (tiles.length) {
-    animate(tiles, {opacity: [0, 1], y: [18, 0], delay: stagger(45), duration: 380, ease: 'outCubic'})
+  animate(view, {opacity: [0, 1], y: [10, 0], duration: 320, ease: 'outCubic'})
+  const items = view.querySelectorAll('.tile, .step, .note-row, .hist-row, .kv')
+  if (items.length) {
+    animate(items, {opacity: [0, 1], y: [14, 0], delay: stagger(35), duration: 360, ease: 'outCubic'})
   }
 }
 
@@ -179,9 +234,10 @@ const busy = async <T>(button: HTMLButtonElement, work: () => Promise<T>): Promi
 const topBar = (title: string, onBack: () => void): HTMLElement => {
   const bar = el(`<div class="top">
     <button class="btn-icon" data-back aria-label="Back">${icons.back}</button>
-    <div class="brand">${title}</div>
+    <div class="brand"></div>
     <span class="spacer"></span>
   </div>`)
+  bar.querySelector('.brand')!.textContent = title
   bar.querySelector('[data-back]')!.addEventListener('click', onBack)
   return bar
 }
@@ -192,24 +248,249 @@ const qrCard = (text: string): HTMLElement => {
   return card
 }
 
-// A bearer QR never sits in the DOM waiting for one careless tap: the SVG
-// is rendered only when the cover is tapped, and the opaque cover over a
-// square veil holds the space until then.
-const coveredQr = (text: string): HTMLElement => {
-  const wrap = el('<div class="covered"></div>')
-  const veil = el('<div class="veil" aria-hidden="true"></div>')
-  const cover = el(
-    `<button class="cover">${icons.eye}<span>Tap to reveal</span><small>Anyone who sees this code can take the sats.</small></button>`
-  )
-  cover.addEventListener('click', () => {
-    const qr = qrCard(text)
-    veil.remove()
-    wrap.append(qr)
-    animate(cover, {opacity: 0, duration: 220, ease: 'outCubic', onComplete: () => cover.remove()})
-    animate(qr, {filter: ['blur(14px)', 'blur(0px)'], scale: [0.98, 1], duration: 420, ease: 'outCubic'})
+// ---------- the reveal: scratch silver ----------
+// A bearer secret hides under actual scratch silver: an opaque painted
+// foil the holder rubs away with a finger, flakes falling, until enough is
+// gone and the rest dissolves into sparks and the glint. A secret that
+// must be scratched for can never flash from a careless tap - and it is a
+// small ceremony of ownership. Keyboard: Enter reveals at once.
+
+const paintFoil = (canvas: HTMLCanvasElement): void => {
+  const w = canvas.clientWidth
+  const h = canvas.clientHeight
+  if (!w || !h) return
+  const dpr = Math.min(window.devicePixelRatio || 1, 3)
+  canvas.width = Math.round(w * dpr)
+  canvas.height = Math.round(h * dpr)
+  const ctx = canvas.getContext('2d', {willReadFrequently: true})
+  if (!ctx) return
+  ctx.scale(dpr, dpr)
+
+  // the metal: a diagonal silver gradient
+  const metal = ctx.createLinearGradient(0, 0, w, h)
+  for (const [stop, colour] of [
+    [0, '#cfd4db'],
+    [0.22, '#eef1f5'],
+    [0.42, '#a7b0bc'],
+    [0.58, '#dfe3e9'],
+    [0.78, '#98a1ad'],
+    [1, '#d5dae1']
+  ] as Array<[number, string]>) {
+    metal.addColorStop(stop, colour)
+  }
+  ctx.fillStyle = metal
+  ctx.fillRect(0, 0, w, h)
+
+  // brushed grain
+  for (let i = 0; i < 900; i++) {
+    const light = Math.random() > 0.5
+    ctx.fillStyle = light ? `rgba(255,255,255,${Math.random() * 0.1})` : `rgba(40,46,54,${Math.random() * 0.07})`
+    ctx.fillRect(Math.random() * w, Math.random() * h, 2 + Math.random() * 10, 1)
+  }
+  // a sheen band
+  ctx.fillStyle = 'rgba(255,255,255,0.14)'
+  ctx.beginPath()
+  ctx.moveTo(w * 0.15, 0)
+  ctx.lineTo(w * 0.38, 0)
+  ctx.lineTo(w * 0.12, h)
+  ctx.lineTo(-w * 0.1, h)
+  ctx.closePath()
+  ctx.fill()
+
+  // embossed instruction
+  const size = Math.max(11, w * 0.055)
+  ctx.textAlign = 'center'
+  ctx.font = `600 ${size}px 'IBM Plex Mono', monospace`
+  ctx.fillStyle = 'rgba(255,255,255,0.55)'
+  ctx.fillText('SCRATCH TO REVEAL', w / 2, h / 2 + 1)
+  ctx.fillStyle = 'rgba(44,50,58,0.72)'
+  ctx.fillText('SCRATCH TO REVEAL', w / 2, h / 2)
+  ctx.font = `500 ${Math.max(8.5, w * 0.032)}px 'IBM Plex Mono', monospace`
+  ctx.fillStyle = 'rgba(44,50,58,0.6)'
+  ctx.fillText('THE CODE BENEATH IS THE MONEY', w / 2, h / 2 + size * 1.5)
+
+  // hairline frame
+  ctx.strokeStyle = 'rgba(44,50,58,0.4)'
+  ctx.lineWidth = 1
+  ctx.strokeRect(3.5, 3.5, w - 7, h - 7)
+
+  // the CSS gradient only covered the pre-paint frame; from here the
+  // bitmap is the foil, and scratching must open onto the code beneath
+  canvas.style.background = 'none'
+}
+
+// A silver flake spins off the scrub point.
+const flake = (host: HTMLElement, x: number, y: number): void => {
+  const bit = el('<i class="foil-flake" aria-hidden="true"></i>')
+  bit.style.left = `${x}px`
+  bit.style.top = `${y}px`
+  host.append(bit)
+  animate(bit, {
+    x: utils.random(-22, 22),
+    y: utils.random(18, 60),
+    rotate: `${utils.random(-200, 200)}deg`,
+    opacity: [1, 0],
+    duration: utils.random(400, 750),
+    ease: 'inQuad',
+    onComplete: () => bit.remove()
   })
-  wrap.append(veil, cover)
-  return wrap
+}
+
+// The last of the foil dissolves: sparks, the glint, the seal, the serial.
+const finale = (root: HTMLElement, canvas: HTMLCanvasElement): void => {
+  if (navigator.vibrate) navigator.vibrate([12, 30, 20])
+  animate(canvas, {
+    opacity: [1, 0],
+    scale: [1, 1.05],
+    duration: 380,
+    ease: 'outCubic',
+    onComplete: () => canvas.remove()
+  })
+  const qr = root.querySelector('.covered .qr') as HTMLElement | null
+  if (qr) animate(qr, {scale: [0.985, 1.02, 1], duration: 480, ease: 'outBack(1.6)'})
+  const panel = root.querySelector('.nb-panel') as HTMLElement | null
+  burst(panel ?? root)
+  const seal = root.querySelector('.nb-seal') as HTMLElement | null
+  if (seal) {
+    animate(seal, {scale: [1.9, 1], opacity: [0, 0.8], rotate: ['-6deg', '8deg'], duration: 520, delay: 260, ease: 'outBack(2)'})
+  }
+  const serial = root.querySelector('.nb-serial') as HTMLElement | null
+  if (serial) animate(serial, {opacity: [0, 1], y: [4, 0], duration: 420, delay: 380, ease: 'outCubic'})
+  setTimeout(() => {
+    root.classList.add('glint')
+    setTimeout(() => root.classList.remove('glint'), 1500)
+  }, 320)
+}
+
+const wireCover = (root: HTMLElement): void => {
+  const canvas = root.querySelector('canvas.scratch-foil') as HTMLCanvasElement | null
+  if (!canvas) return
+  const covered = canvas.parentElement as HTMLElement
+  let revealed = false
+  let painted = false
+  let strokes = 0
+  let lastX = 0
+  let lastY = 0
+  let scrubbing = false
+
+  // paint once the layout has given the canvas its real size
+  if ('ResizeObserver' in window) {
+    const observer = new ResizeObserver(() => {
+      if (!painted && canvas.clientWidth > 0) {
+        painted = true
+        paintFoil(canvas)
+        observer.disconnect()
+      }
+    })
+    observer.observe(canvas)
+  } else {
+    paintFoil(canvas)
+  }
+
+  const reveal = (): void => {
+    if (revealed) return
+    revealed = true
+    finale(root, canvas)
+  }
+
+  const clearedEnough = (): boolean => {
+    const ctx = canvas.getContext('2d', {willReadFrequently: true})
+    if (!ctx || !canvas.width) return false
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+    let clear = 0
+    let total = 0
+    // sample every 23rd pixel - plenty for a fraction
+    for (let i = 3; i < data.length; i += 4 * 23) {
+      total++
+      if (data[i]! < 40) clear++
+    }
+    return total > 0 && clear / total > 0.45
+  }
+
+  const scrub = (x: number, y: number): void => {
+    const ctx = canvas.getContext('2d', {willReadFrequently: true})
+    if (!ctx) return
+    const dpr = canvas.width / canvas.clientWidth
+    const radius = Math.max(16, canvas.clientWidth * 0.09)
+    ctx.save()
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.globalCompositeOperation = 'destination-out'
+    ctx.lineWidth = radius
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    ctx.beginPath()
+    ctx.moveTo(lastX, lastY)
+    ctx.lineTo(x, y)
+    ctx.stroke()
+    ctx.restore()
+    strokes++
+    if (strokes % 4 === 0) flake(covered, x, y)
+    if (navigator.vibrate && strokes % 7 === 0) navigator.vibrate(4)
+    if (strokes % 10 === 0 && clearedEnough()) reveal()
+  }
+
+  const local = (event: PointerEvent): {x: number; y: number} => {
+    const rect = canvas.getBoundingClientRect()
+    return {x: event.clientX - rect.left, y: event.clientY - rect.top}
+  }
+
+  canvas.addEventListener('pointerdown', event => {
+    if (revealed) return
+    event.preventDefault()
+    canvas.setPointerCapture(event.pointerId)
+    scrubbing = true
+    const {x, y} = local(event)
+    lastX = x
+    lastY = y
+    scrub(x, y)
+  })
+  canvas.addEventListener('pointermove', event => {
+    if (!scrubbing || revealed) return
+    const {x, y} = local(event)
+    scrub(x, y)
+    lastX = x
+    lastY = y
+  })
+  for (const eventName of ['pointerup', 'pointercancel'] as const) {
+    canvas.addEventListener(eventName, () => {
+      scrubbing = false
+      if (!revealed && clearedEnough()) reveal()
+    })
+  }
+  // keyboard: reveal at once - nobody scratches with a spacebar
+  canvas.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      reveal()
+    }
+  })
+}
+
+// The note itself, printed: the engraved plate, the denomination in words,
+// the serial from the note id, and the bearer QR under scratch silver.
+const notePrint = (note: {id: string; amountMsat: number; mintHost: string}, qrText: string): HTMLElement => {
+  const print = banknote({
+    sats: Math.round(note.amountMsat / 1000),
+    serialHex: note.id,
+    host: note.mintHost.toUpperCase(),
+    variant: {kind: 'live', qrText}
+  })
+  wireCover(print)
+  return print
+}
+
+// The strike: the note lands and the corners count up.
+const strikeIn = (print: HTMLElement, amountMsat: number, host: HTMLElement): void => {
+  animate(print, {scale: [0.96, 1], y: [10, 0], duration: 600, ease: 'outBack(1.4)'})
+  const counterEl = print.querySelector('[data-value]')
+  if (counterEl && amountMsat < 1_000_000_000_000) {
+    setTimeout(() => {
+      countTo(counterEl, amountMsat)
+      burst(host)
+    }, 250)
+  } else {
+    setTimeout(() => burst(host), 300)
+  }
 }
 
 const shareButton = (text: string): HTMLElement | null => {
@@ -221,7 +502,7 @@ const shareButton = (text: string): HTMLElement | null => {
   return button
 }
 
-// An amount entry with big digits, preset chips and an optional Max.
+// An amount entry with big engraved digits, presets and an optional Max.
 const amountField = (options: {presets?: number[]; maxMsat?: number} = {}): {node: HTMLElement; msat: () => number} => {
   const node = el(`<div class="stack">
     <div class="amount-input"><input data-amount inputmode="numeric" pattern="[0-9]*" placeholder="0" /><span class="unit">sat</span></div>
@@ -233,6 +514,7 @@ const amountField = (options: {presets?: number[]; maxMsat?: number} = {}): {nod
     const chip = el(`<button>${sats(value * 1000)}</button>`)
     chip.addEventListener('click', () => {
       input.value = String(value)
+      animate(input, {scale: [1.06, 1], duration: 260, ease: 'outCubic'})
       input.dispatchEvent(new Event('input'))
     })
     return chip
@@ -278,7 +560,7 @@ const pinPad = (options: {
 }): HTMLElement => {
   const view = el(`<div class="view pinwrap">
     <div>
-      <div class="mark" style="color:var(--gold)">${icons.logo}</div>
+      <div class="mark" data-rosette>${rosette(120)}</div>
       <h1></h1>
       <p></p>
     </div>
@@ -287,6 +569,7 @@ const pinPad = (options: {
   </div>`)
   view.querySelector('h1')!.textContent = options.title
   view.querySelector('p')!.textContent = options.subtitle
+  drawOn(view.querySelector('[data-rosette]')!)
   const dots = [...view.querySelectorAll('.dots i')] as HTMLElement[]
   const pad = view.querySelector('.pad')!
   let entry = ''
@@ -336,23 +619,62 @@ const pinPad = (options: {
 const viewWelcome = (): void =>
   show(() => {
     const view = el(`<div class="view welcome">
-      <div class="hero" style="padding-top:36px">
-        <div class="mark" style="color:var(--gold)">${icons.logo}</div>
-        <h1 style="font-size:clamp(30px,8vw,40px);margin-top:12px">notecase</h1>
-        <div class="sub" style="font-size:16px;max-width:40ch;margin:10px auto 0">A case for Lightning bearer notes - money as a secret you hold.</div>
+      <header class="masthead">
+        <h1 class="wordmark" data-wordmark>NOTECASE</h1>
+        <div class="tagline">A case for Lightning bearer notes</div>
+      </header>
+      <div class="hero">
+        <span class="medallion"><span class="mark" data-rosette>${rosette(150)}</span></span>
+        <p class="promise">A bearer note is a 32-byte secret that <em>is</em> the money - <em>this case holds yours</em>, and makes sure no crash, timeout or lying mint can part you from one.</p>
+        <div class="fineline">No account · sealed on this device · any LNURLcash mint</div>
       </div>
-      <div class="features">
-        <div class="feature">${icons.note}<b>Bearer notes</b><small>No account, no custodian's ledger - holding the secret is holding the money.</small></div>
-        <div class="feature">${icons.lock}<b>Sealed on this device</b><small>Encrypted at rest - the PIN gates casual access on this device; a stolen backup is protected by its own passphrase, so pick a real one.</small></div>
-        <div class="feature">${icons.mint}<b>Any mint</b><small>Mint, split, merge and melt at any LNURLcash service.</small></div>
-      </div>
-      <div class="stack" style="margin-top:auto">
-        <button class="btn btn-gold" data-create>${icons.plus}<span>Create a wallet</span></button>
+      <div class="stack">
+        <button class="btn btn-silver" data-create>${icons.plus}<span>Create a wallet</span></button>
         <button class="btn btn-ghost" data-restore>${icons.upload}<span>Restore a backup</span></button>
       </div>
+      <div class="rubric">What it holds</div>
+      <div data-specimen></div>
+      <p class="warn">Notes like this one - minted at any LNURLcash mint, split, merged, handed over or melted back onto Lightning. Received notes are rotated to a fresh secret at once, so the sender can never double-spend them.</p>
+      <div class="rubric">How it works</div>
+      <div class="steps">
+        <div class="step"><span class="n">I</span><b>Mint or receive</b><p>Pay a Lightning invoice at a mint, or take a note from a friend - it is re-secured the moment it arrives.</p></div>
+        <div class="step"><span class="n">II</span><b>Hold the secret</b><p>Notes live sealed on this device behind your PIN. Backups are sealed again under their own passphrase.</p></div>
+        <div class="step"><span class="n">III</span><b>Spend anywhere</b><p>Hand a note to anyone, or melt it back onto Lightning. Uncertain outcomes are reconciled, never guessed.</p></div>
+      </div>
+      <footer>
+        <div class="microprint">${Array(8).fill('NOTECASE · MONEY AS A SECRET YOU HOLD · LNURLCASH · NOT LEGAL TENDER · ').join('')}</div>
+      </footer>
     </div>`)
     view.querySelector('[data-create]')!.addEventListener('click', viewSetup)
     view.querySelector('[data-restore]')!.addEventListener('click', viewRestore)
+
+    const specimen = banknote({
+      sats: 21,
+      serialHex: 'b0171f0000000000000000000000000000000000000000000000000000000011fd',
+      host: 'MONEYER.DEV',
+      variant: {kind: 'specimen'}
+    })
+    view.querySelector('[data-specimen]')!.append(specimen)
+
+    letterSettle(view.querySelector('[data-wordmark]') as HTMLElement)
+    drawOn(view.querySelector('[data-rosette]')!)
+    const overstamps = [...specimen.querySelectorAll('.nb-overstamp')] as HTMLElement[]
+    if (overstamps.length && 'IntersectionObserver' in window) {
+      overstamps.forEach(stamp => (stamp.style.opacity = '0'))
+      const seen = new IntersectionObserver(
+        entries => {
+          if (entries.some(entry => entry.isIntersecting)) {
+            seen.disconnect()
+            for (const stamp of overstamps) {
+              stamp.style.removeProperty('opacity')
+              animate(stamp, {scale: [2.4, 1], opacity: [0, 0.3], rotate: ['-4deg', '-14deg'], duration: 520, ease: 'outBack(2)'})
+            }
+          }
+        },
+        {threshold: 0.4}
+      )
+      seen.observe(specimen)
+    }
     return view
   })
 
@@ -397,7 +719,7 @@ const viewRestore = (): void =>
         <label>Backup passphrase</label>
         <input data-pass type="password" autocomplete="off" data-1p-ignore data-lpignore="true" placeholder="the passphrase the backup was sealed with" />
       </div>
-      <button class="btn btn-gold" data-go>${icons.check}<span>Restore</span></button>
+      <button class="btn btn-silver" data-go>${icons.check}<span>Restore</span></button>
       <p class="warn">Restoring puts every note from the backup on THIS device, then asks for a fresh PIN. If someone else wrote this file, they may still hold copies of these notes - receive or rotate them soon.</p>
     </div>`)
     view.append(body)
@@ -475,13 +797,13 @@ const noteRow = (w: Wallet, note: NoteRecord): HTMLElement => {
   const row = el(`<button class="note-row">
     <div class="coin">${icons.note}</div>
     <div class="who"><b></b><small></small></div>
-    <div class="amt"></div>
+    <div class="amt"><span></span><span class="unit">sat</span></div>
     <span class="chev">${icons.chevron}</span>
   </button>`)
   row.querySelector('b')!.textContent =
     note.state === 'sent' ? 'handed over' : note.origin === 'change' ? 'change' : note.origin
   row.querySelector('small')!.textContent = `${note.mintHost}${signedOk(w, note) ? ' · signed' : ''}`
-  row.querySelector('.amt')!.textContent = `${sats(note.amountMsat)} sat`
+  row.querySelector('.amt span')!.textContent = sats(note.amountMsat)
   row.addEventListener('click', () => viewNote(note))
   return row
 }
@@ -491,7 +813,7 @@ const viewHome = (): void => {
   show(() => {
     const view = el(`<div class="view">
       <div class="top">
-        <div class="brand" style="color:var(--gold)">${icons.logo}<span style="color:var(--ink)">notecase</span></div>
+        <div class="brand">${icons.logo}<span>NOTECASE</span></div>
         <span class="spacer"></span>
         <button class="btn-icon" data-history aria-label="History">${icons.history}</button>
         <button class="btn-icon" data-settings aria-label="Settings">${icons.settings}</button>
@@ -506,24 +828,18 @@ const viewHome = (): void => {
         <button class="tile" data-go="mint">${icons.mint}<b>Mint</b></button>
         <button class="tile" data-go="melt">${icons.melt}<b>Melt</b></button>
       </div>
-      <div data-lists></div>
+      <div data-lists class="stack"></div>
     </div>`)
 
     const balance = w.balanceMsat()
-    const counter = {value: 0}
     const balanceEl = view.querySelector('[data-balance]')!
-    animate(counter, {
-      value: balance / 1000,
-      duration: 900,
-      ease: 'outExpo',
-      onUpdate: () => (balanceEl.textContent = sats(Math.round(counter.value) * 1000))
-    })
+    countTo(balanceEl, balance)
     balanceEl.textContent = '0'
 
     const sub = view.querySelector('[data-sub]') as HTMLElement
     const mints = w.balanceByMint()
     if (mints.size === 0) {
-      sub.textContent = 'nothing minted yet'
+      sub.append(el('<span class="fineline" style="margin-top:6px">nothing minted yet</span>'))
     } else {
       for (const [host, msat] of mints) {
         const chip = el(`<button class="chip"><span></span><b>${sats(msat)}</b></button>`)
@@ -534,7 +850,9 @@ const viewHome = (): void => {
     }
 
     if (w.needsReconcile()) {
-      const chip = el(`<button class="chip">${icons.refresh}<span>unresolved outcomes - tap to reconcile</span></button>`)
+      const chip = el(
+        `<button class="badge wait" style="margin-top:14px">${icons.refresh}<span>unresolved outcomes - tap to reconcile</span></button>`
+      )
       chip.addEventListener('click', () =>
         busy(chip as HTMLButtonElement, async () => {
           const events = await w.reconcile()
@@ -556,14 +874,14 @@ const viewHome = (): void => {
       )
     }
     if (live.length) {
-      lists.append(el('<div class="section-title">Notes</div>'))
-      const stack = el('<div class="stack"></div>')
+      lists.append(el('<div class="rubric">The notes</div>'))
+      const stack = el('<div class="stack-tight"></div>')
       live.forEach(note => stack.append(noteRow(w, note)))
       lists.append(stack)
     }
     if (sent.length) {
-      lists.append(el('<div class="section-title">Handed over - reclaimable until taken</div>'))
-      const stack = el('<div class="stack"></div>')
+      lists.append(el('<div class="rubric">Handed over · reclaimable until taken</div>'))
+      const stack = el('<div class="stack-tight"></div>')
       sent.forEach(note => stack.append(noteRow(w, note)))
       lists.append(stack)
     }
@@ -616,38 +934,40 @@ const viewNote = (note: NoteRecord): void => {
   show(() => {
     const view = el('<div class="view"></div>')
     view.append(topBar(note.state === 'sent' ? 'Handed over' : 'Your note', viewHome))
-    const body = el(`<div class="stack center">
-      <div class="hero burst-host" style="padding:6px 0 0">
-        <div class="amount">${sats(note.amountMsat)}<span class="unit">sat</span></div>
-      </div>
-      <div class="badges"></div>
-      <div class="card" style="text-align:left">
-        <div class="kv"><span>mint</span><b></b></div>
-        <div class="kv"><span>came from</span><b></b></div>
-        <div class="kv"><span>created</span><b>${when(note.createdAt)}</b></div>
-        <div class="kv"><span>note id</span><code></code></div>
-      </div>
-    </div>`)
-    // mintHost, origin and id are persisted strings - a crafted backup must
-    // never become markup, so they go in as text, not through el().
-    const badges = body.querySelector('.badges')!
+    const body = el('<div class="stack center"></div>')
+
+    const print = notePrint(note, toBech32Lnurl(url).toUpperCase())
+    body.append(print)
+
+    const badges = el('<div class="badges"></div>')
     const signed = signedOk(w, note)
     const sigBadge = el(`<span class="badge${signed ? ' good' : ''}">${icons.shield}<span></span></span>`)
     sigBadge.querySelector('span')!.textContent = signed ? `signed by ${note.mintHost}` : 'no verified signature'
     badges.append(sigBadge)
     if (note.state === 'sent') {
       badges.append(
-        el(`<span class="badge wait">${icons.send}<span>handed over - whoever holds it can spend it</span></span>`)
+        el(`<span class="badge wait">${icons.hourglass}<span>handed over - whoever holds it can spend it</span></span>`)
       )
     }
-    const [kvMint, kvOrigin] = body.querySelectorAll('.kv b')
+    body.append(badges)
+
+    // mintHost, origin and id are persisted strings - a crafted backup must
+    // never become markup, so they go in as text, not through el().
+    const ledger = el(`<div class="card" style="text-align:left">
+      <div class="kv"><span>mint</span><b></b></div>
+      <div class="kv"><span>came from</span><b></b></div>
+      <div class="kv"><span>created</span><b>${when(note.createdAt)}</b></div>
+      <div class="kv"><span>note id</span><code></code></div>
+    </div>`)
+    const [kvMint, kvOrigin] = ledger.querySelectorAll('.kv b')
     kvMint!.textContent = note.mintHost
     kvOrigin!.textContent = note.origin
-    body.querySelector('.kv code')!.textContent = `${note.id.slice(0, 16)}…`
+    ledger.querySelector('.kv code')!.textContent = `${note.id.slice(0, 16)}…`
+    body.append(ledger)
     view.append(body)
 
     if (note.state === 'sent') {
-      const reclaim = el(`<button class="btn btn-gold">${icons.undo}<span>Take it back</span></button>`)
+      const reclaim = el(`<button class="btn btn-silver">${icons.undo}<span>Take it back</span></button>`)
       reclaim.addEventListener('click', () =>
         busy(reclaim as HTMLButtonElement, async () => {
           try {
@@ -668,9 +988,8 @@ const viewNote = (note: NoteRecord): void => {
           viewHome()
         })
       )
-      body.append(reclaim, coveredQr(toBech32Lnurl(url)), taken)
+      body.append(reclaim, taken)
     } else {
-      body.append(coveredQr(toBech32Lnurl(url)))
       const rotate = el(`<button class="btn btn-ghost">${icons.refresh}<span>Rotate the secret</span></button>`)
       rotate.addEventListener('click', () =>
         busy(rotate as HTMLButtonElement, async () => {
@@ -689,6 +1008,8 @@ const viewNote = (note: NoteRecord): void => {
     body.append(copyUrl, copyLnurl)
     const share = shareButton(url)
     if (share) body.append(share)
+
+    strikeIn(print, note.amountMsat, body)
     return view
   })
 }
@@ -745,7 +1066,7 @@ const viewHistory = (): void => {
       view.append(el(`<div class="empty">${icons.history}<br/>Nothing yet - it all starts with a first note.</div>`))
       return view
     }
-    const stack = el('<div class="stack"></div>')
+    const stack = el('<div class="stack-tight"></div>')
     for (const event of events) {
       const row = el(`<div class="hist-row ${event.kind}">
         <div class="coin">${event.icon}</div>
@@ -768,12 +1089,13 @@ const viewReceive = (prefill?: string): void => {
     const view = el(`<div class="view"></div>`)
     view.append(topBar('Receive a note', viewHome))
     const body = el(`<div class="stack">
+      <div class="rubric">Present the note</div>
       <div class="field">
         <label>Paste the note you were given</label>
         <textarea data-input placeholder="lnurlw://… or LNURL1…" autocomplete="off" spellcheck="false"></textarea>
       </div>
       <button class="btn btn-ghost" data-paste>${icons.paste}<span>Paste from clipboard</span></button>
-      <button class="btn btn-gold" data-receive>${icons.receive}<span>Receive</span></button>
+      <button class="btn btn-silver" data-receive>${icons.receive}<span>Receive</span></button>
       <p class="warn">Receiving rotates the note to a fresh secret straight away, so whoever sent it can no longer spend it.</p>
     </div>`)
     view.append(body)
@@ -809,9 +1131,10 @@ const viewSend = (): void => {
     view.append(topBar('Send', viewHome))
     const amount = amountField({presets: [500, 1000, 5000], maxMsat: w.balanceMsat()})
     const body = el('<div class="stack"></div>')
+    body.append(el('<div class="rubric">To be handed over</div>'))
     body.append(amount.node)
     body.append(
-      el(`<button class="btn btn-gold" data-cut>${icons.send}<span>Cut a note</span></button>`),
+      el(`<button class="btn btn-silver" data-cut>${icons.send}<span>Cut a note</span></button>`),
       el(`<p class="warn">notecase splits or merges your notes to the exact amount, then hands you a fresh bearer note to share.</p>`)
     )
     view.append(body)
@@ -823,11 +1146,12 @@ const viewSend = (): void => {
         show(() => {
           const done = el('<div class="view"></div>')
           done.append(topBar('Your note', viewHome))
-          const inner = el(`<div class="stack center">
-            <div class="hero burst-host" style="padding:6px 0 0"><div class="amount">${sats(note.amountMsat)}<span class="unit">sat</span></div></div>
-            <p class="warn">Whoever sees this note owns it. Show the QR or share the text - once, to one person. Until they take it, you can reclaim it from the home screen.</p>
-          </div>`)
-          inner.insertBefore(coveredQr(toBech32Lnurl(url)), inner.querySelector('p'))
+          const inner = el('<div class="stack center"></div>')
+          const print = notePrint(note, toBech32Lnurl(url).toUpperCase())
+          inner.append(
+            print,
+            el(`<p class="warn"><strong>Whoever sees this note owns it.</strong> Scratch the silver and show the QR, or share the text - once, to one person. Until they take it, you can reclaim it from the home screen.</p>`)
+          )
           const copyUrl = el(`<button class="btn">${icons.copy}<span>Copy note URL</span></button>`)
           copyUrl.addEventListener('click', () => void copyText(url, 'Note URL', true))
           const copyLnurl = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy LNURL</span></button>`)
@@ -836,7 +1160,7 @@ const viewSend = (): void => {
           const share = shareButton(url)
           if (share) inner.append(share)
           done.append(inner)
-          setTimeout(() => burst(inner.querySelector('.hero')!), 350)
+          strikeIn(print, note.amountMsat, inner)
           return done
         })
       })
@@ -872,10 +1196,11 @@ const viewMint = (): void => {
     view.append(topBar('Mint notes', viewHome))
     const amount = amountField({presets: [500, 1000, 5000, 21000]})
     const form = el('<div class="stack"></div>')
+    form.append(el('<div class="rubric">To be struck</div>'))
     form.append(mintPicker(w), amount.node)
     form.append(
       el(`<p class="warn" data-feenote>&nbsp;</p>`),
-      el(`<button class="btn btn-gold" data-mintgo>${icons.mint}<span>${w.data.settings.nwcUri ? 'Mint - pay with connected wallet' : 'Create the invoice'}</span></button>`),
+      el(`<button class="btn btn-silver" data-mintgo>${icons.mint}<span>${w.data.settings.nwcUri ? 'Mint - pay with connected wallet' : 'Create the invoice'}</span></button>`),
       el(`<p class="warn">You type what the note should hold; any mint fee is added to the invoice, shown before you pay.</p>`)
     )
     view.append(form)
@@ -941,15 +1266,17 @@ const viewMintInvoice = (pending: PendingMint): void => {
     const view = el('<div class="view"></div>')
     view.append(topBar('Pay to mint', viewHome))
     const body = el(`<div class="stack center">
-      <p class="pulse" style="color:var(--ink-dim)">Waiting for the payment…</p>
-      <p class="warn">Pay this invoice from any Lightning wallet - the note (${sats(pending.expectedNetMsat)} sat) is claimed automatically when it settles.</p>
+      <div class="rubric">The invoice</div>
+      <div class="amount"><span>${sats(pending.grossMsat)}</span><span class="unit">sat</span></div>
+      <p class="warn">Pay from any Lightning wallet - tap the QR to open one on this device. The note (${sats(pending.expectedNetMsat)} sat) is claimed automatically when it settles.</p>
+      <p class="pulse" style="color:var(--dim);font-family:var(--mono);font-size:12px;letter-spacing:0.2em;text-transform:uppercase">Waiting for the payment…</p>
     </div>`)
     // the invoice string comes from the mint: assign href as a property,
     // never through HTML where a quote would break out of the attribute
     const qrLink = el('<a style="display:block"></a>') as HTMLAnchorElement
     qrLink.href = `lightning:${pending.pr}`
     qrLink.append(qrCard(pending.pr.toUpperCase()))
-    body.prepend(qrLink)
+    body.insertBefore(qrLink, body.querySelector('p'))
     const copy = el(`<button class="btn">${icons.copy}<span>Copy invoice</span></button>`)
     copy.addEventListener('click', () => void copyText(pending.pr, 'Invoice'))
     body.append(copy)
@@ -985,7 +1312,7 @@ const viewMelt = (prefillPr?: string): void => {
         ${hasNwc ? '<button data-tab="nwc">My wallet</button>' : ''}
       </div>
       <div data-pane></div>
-      <button class="btn btn-gold" data-meltgo>${icons.melt}<span>Melt</span></button>
+      <button class="btn btn-silver" data-meltgo>${icons.melt}<span>Melt</span></button>
       <p class="warn">Melting burns a note of exactly the invoice's amount; the mint pays the invoice. OK means in flight - the home chip confirms settlement.</p>
     </div>`)
     view.append(body)
@@ -1016,7 +1343,7 @@ const viewMelt = (prefillPr?: string): void => {
       } else {
         pane.replaceChildren(
           el(`<div class="stack">
-            <p style="color:var(--ink-dim);font-size:15px">Cash a note straight into your connected NWC wallet.</p>
+            <p class="warn">Cash a note straight into your connected NWC wallet.</p>
             <div class="amount-input"><input data-amount inputmode="numeric" placeholder="0" /><span class="unit">sat</span></div>
           </div>`)
         )
@@ -1082,7 +1409,7 @@ const viewMints = (prefillAdd?: string): void => {
   show(() => {
     const view = el('<div class="view"></div>')
     view.append(topBar('Mints', viewHome))
-    const body = el('<div class="stack"></div>')
+    const body = el('<div class="stack" style="gap:26px"></div>')
     view.append(body)
 
     const balances = w.balanceByMint()
@@ -1092,9 +1419,9 @@ const viewMints = (prefillAdd?: string): void => {
       const fee = entry.mintFee
       const card = el(`<div class="card">
         <div class="kv" style="align-items:center">
-          <b style="font-size:16.5px"></b>
-          <span class="row" style="gap:8px">
-            <button class="btn-icon" data-star aria-label="Make default" style="color:${isDefault ? 'var(--gold)' : 'var(--ink-dim)'}">${icons.star}</button>
+          <b style="font-family:var(--display);letter-spacing:0.06em"></b>
+          <span class="row" style="gap:8px;flex:none">
+            <button class="btn-icon" data-star aria-label="Make default" style="color:${isDefault ? 'var(--silver)' : 'var(--dim)'}">${icons.star}</button>
             <button class="btn-icon" data-remove aria-label="Remove">${icons.trash}</button>
           </span>
         </div>
@@ -1126,12 +1453,12 @@ const viewMints = (prefillAdd?: string): void => {
     }
 
     const add = el(`<div class="card">
-      <div class="section-title" style="margin:0">Add a mint</div>
-      <div class="row">
+      <h3>Add a mint</h3>
+      <div class="row" style="border:none;padding-top:14px">
         <input data-newmint placeholder="mint@mint.example" autocomplete="off" style="flex:2" />
         <button class="btn" style="flex:1">${icons.plus}<span>Add</span></button>
       </div>
-      <div class="presets" data-suggest></div>
+      <div class="presets" data-suggest style="margin-top:12px"></div>
     </div>`)
     const addInput = add.querySelector('[data-newmint]') as HTMLInputElement
     if (prefillAdd) addInput.value = prefillAdd
@@ -1167,7 +1494,7 @@ const viewSettings = (): void => {
   show(() => {
     const view = el('<div class="view"></div>')
     view.append(topBar('Settings', viewHome))
-    const body = el('<div class="stack"></div>')
+    const body = el('<div class="stack" style="gap:26px"></div>')
 
     // mints
     const mints = el(`<button class="btn">${icons.mint}<span>Mints (${w.data.mints.length})</span></button>`)
@@ -1175,7 +1502,7 @@ const viewSettings = (): void => {
     body.append(mints)
 
     // nwc
-    const nwc = el(`<div class="card"><div class="section-title" style="margin:0">Lightning wallet (NWC)</div></div>`)
+    const nwc = el(`<div class="card"><h3>Lightning wallet (NWC)</h3></div>`)
     if (w.data.settings.nwcUri) {
       const status = el(`<div class="kv"><span>connection</span><b>configured</b></div>`)
       nwc.append(status)
@@ -1199,7 +1526,7 @@ const viewSettings = (): void => {
     } else {
       // A live spending capability: hidden like a passphrase, with a
       // deliberate reveal toggle rather than a permanently visible input.
-      const row = el(`<div class="stack">
+      const row = el(`<div class="stack" style="padding-top:14px">
         <div class="row" style="align-items:center">
           <input data-nwc type="password" placeholder="nostr+walletconnect://…" autocomplete="off" data-1p-ignore data-lpignore="true" />
           <button class="btn-icon" data-reveal aria-label="Show the connection string" style="flex:none">${icons.eye}</button>
@@ -1230,8 +1557,8 @@ const viewSettings = (): void => {
     body.append(nwc)
 
     // backup
-    const backup = el(`<div class="card"><div class="section-title" style="margin:0">Backup</div>
-      <p class="warn" style="text-align:left">A backup is sealed under its own passphrase - not the PIN - and restores on any device from the welcome screen.</p>
+    const backup = el(`<div class="card"><h3>Backup</h3>
+      <p class="warn" style="text-align:left;padding-top:12px">A backup is sealed under its own passphrase - not the PIN - and restores on any device from the welcome screen.</p>
     </div>`)
     const exportButton = el(`<button class="btn">${icons.download}<span>Download a backup</span></button>`)
     exportButton.addEventListener('click', () => viewExportBackup())
@@ -1239,8 +1566,8 @@ const viewSettings = (): void => {
     body.append(backup)
 
     // security
-    const security = el(`<div class="card"><div class="section-title" style="margin:0">Security</div></div>`)
-    const bioArea = el('<div class="stack"></div>')
+    const security = el(`<div class="card"><h3>Security</h3></div>`)
+    const bioArea = el('<div class="stack" style="padding-top:12px"></div>')
 
     // A tap on Enable mints a WebAuthn credential, and the result is a
     // discriminated union: each variant gets its own honest answer, and
@@ -1320,7 +1647,7 @@ const viewSettings = (): void => {
     body.append(security)
 
     // danger
-    const danger = el(`<div class="card"><div class="section-title" style="margin:0">Danger</div></div>`)
+    const danger = el(`<div class="card"><h3>Danger</h3></div>`)
     const forget = el(`<button class="btn btn-ghost danger-text">${icons.trash}<span>Forget this wallet</span></button>`)
     forget.addEventListener('click', () => viewForget())
     danger.append(forget)
@@ -1345,7 +1672,7 @@ const viewExportBackup = (): void => {
         <label>Once more</label>
         <input data-pass2 type="password" autocomplete="off" data-1p-ignore data-lpignore="true" />
       </div>
-      <button class="btn btn-gold" data-go>${icons.download}<span>Seal and download</span></button>
+      <button class="btn btn-silver" data-go>${icons.download}<span>Seal and download</span></button>
       <p class="warn">The file holds every note. Anyone with the file AND the passphrase holds your money; without the passphrase the file is useless. There is no recovery for a forgotten passphrase.</p>
     </div>`)
     view.append(body)
@@ -1389,6 +1716,35 @@ const viewForget = (): void => {
   )
 }
 
+// ---------- the proofing press ----------
+// #/proof prints the live note with a constant secret and an absurd
+// denomination - never money, always available, so the print can be
+// checked on any screen without paying anyone.
+
+const viewProof = (): void => {
+  const amountMsat = 600_000_000_000_000
+  const k1 = '11'.repeat(32)
+  const url = buildNoteUrl('lnurlw://moneyer.dev/w', k1, amountMsat)
+  show(() => {
+    const view = el('<div class="view"></div>')
+    view.append(
+      topBar('The proofing press', () => {
+        location.hash = ''
+        location.reload()
+      })
+    )
+    const body = el('<div class="stack center"></div>')
+    const print = notePrint({id: hashK1(k1), amountMsat, mintHost: 'moneyer.dev'}, toBech32Lnurl(url).toUpperCase())
+    body.append(
+      print,
+      el(`<p class="warn">A proof print: the secret is a constant, the denomination absurd - this is never money. Scratch it anyway.</p>`)
+    )
+    view.append(body)
+    strikeIn(print, amountMsat, body)
+    return view
+  })
+}
+
 // ---------- PWA update prompt ----------
 // registerType 'prompt' + no runtime caching: a build never swaps out
 // mid-melt, and no protocol call is ever served stale. Tests alias the
@@ -1407,8 +1763,11 @@ const update = registerSW({
 // ---------- boot ----------
 
 readClaimHash()
-if (walletExists()) void viewLocked()
-else if (pendingClaim) {
+if (location.hash === '#/proof') {
+  viewProof()
+} else if (walletExists()) {
+  void viewLocked()
+} else if (pendingClaim) {
   // A claim link on a fresh device: set up first, the note is kept for after.
   viewWelcome()
   toast('A note is waiting - set up the wallet to receive it.', 'ok')

@@ -30,6 +30,14 @@ Initial implementation.
   local mints.
 - Tested against the conformance mock mint's misbehaviour matrix, a fake
   NIP-47 wallet service running the real ceremony, and moneyer end to end.
+- The web wallet set in the mint's design language - the silver banknote
+  series: notes print as engraved banknotes (intaglio plates, the
+  denomination letterpressed in words, a serial from the note id) with
+  the bearer QR under scratch-off silver foil; a certificate frame around
+  every screen, inscriptional capitals, hairline ledgers, engine-turned
+  guilloché, dark and light paper; and a `#/proof` proofing press that
+  prints the note with a constant secret so the plate can be checked
+  without money.
 
 Security-review hardening:
 

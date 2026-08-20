@@ -15,8 +15,8 @@ export default defineConfig({
         name: 'notecase',
         short_name: 'notecase',
         description: 'A case for Lightning bearer notes - money as a secret you hold.',
-        theme_color: '#100e0b',
-        background_color: '#100e0b',
+        theme_color: '#0f1013',
+        background_color: '#0f1013',
         display: 'standalone',
         orientation: 'portrait',
         icons: [

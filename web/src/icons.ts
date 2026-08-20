@@ -38,7 +38,8 @@ export const icons = {
   x: svg('<path d="m6 6 12 12"/><path d="m18 6-12 12"/>'),
   qr: svg('<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><path d="M13.5 13.5h3v3h-3z"/><path d="M20.5 13.5v3"/><path d="M13.5 20.5h3"/><path d="M20.5 20.5v.01"/>'),
   wallet: svg('<rect x="2.5" y="6" width="19" height="13" rx="3.5"/><path d="M2.5 10h12"/><rect x="15" y="11.5" width="4.5" height="3.5" rx="1.75" fill="currentColor" stroke="none"/>'),
-  undo: svg('<path d="M8.5 5 4 9.5 8.5 14"/><path d="M4 9.5h9.5a6 6 0 0 1 0 12H9"/>')
+  undo: svg('<path d="M8.5 5 4 9.5 8.5 14"/><path d="M4 9.5h9.5a6 6 0 0 1 0 12H9"/>'),
+  hourglass: svg('<path d="M6.5 3h11"/><path d="M6.5 21h11"/><path d="M8 3v3.5c0 2.5 4 4 4 5.5s-4 3-4 5.5V21"/><path d="M16 3v3.5c0 2.5-4 4-4 5.5s4 3 4 5.5V21"/>')
 } as const
 
 export type IconName = keyof typeof icons

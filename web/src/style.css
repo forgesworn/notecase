@@ -90,7 +90,9 @@ body {
 /* ---------- masthead ---------- */
 .masthead { text-align: center; padding-top: 8px; }
 .wordmark {
-  display: flex; align-items: center; gap: 18px;
+  /* letterSettle splits the word into per-letter flex items, so the gap
+     runs between every letter: eight of them need it responsive */
+  display: flex; align-items: center; gap: clamp(5px, 2vw, 16px);
   font-family: var(--display); font-weight: 700;
   font-size: clamp(26px, 7vw, 38px); letter-spacing: 0.22em; text-indent: 0.22em;
   justify-content: center; color: var(--ink);
@@ -305,7 +307,8 @@ select { appearance: none; }
 .amount-input .unit { font-family: var(--mono); color: var(--dim); font-size: 13px; letter-spacing: 0.3em; text-transform: uppercase; }
 .presets { display: flex; flex-wrap: wrap; gap: 0; border: 1px solid var(--hair); }
 .presets button {
-  flex: 1; min-height: 46px; min-width: 72px; font-family: var(--mono); font-size: 13px; font-weight: 600;
+  flex: 1 1 auto; min-height: 46px; min-width: 72px; padding: 0 12px;
+  font-family: var(--mono); font-size: 13px; font-weight: 600;
   letter-spacing: 0.06em; background: var(--paper-2);
 }
 .presets button + button { border-left: 1px solid var(--hair); }
