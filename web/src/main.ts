@@ -67,7 +67,39 @@ const SUGGESTED_MINTS = ['mint@moneyer.dev', 'mint@mint.forgesworn.dev']
 // vault shape). The secret travels in the fragment, which never reaches a
 // server - and is scrubbed from the address bar the moment it is read.
 
-let pendingClaim: string | null = null
+// The fragment is scrubbed the instant it is read, so the claim must
+// survive a reload some other way or the note is gone: a locked wallet, a
+// first-run setup, or the service worker's own "new version - Reload"
+// prompt all interrupt the hand-off, and a reload would otherwise take the
+// only copy of a live secret with it. sessionStorage is the right depth -
+// it survives reload and navigation within this tab, and dies when the tab
+// does, so a bearer secret never outlives the visit that carried it.
+const CLAIM_KEY = 'notecase:pending-claim'
+
+let claimMemory: string | null = null
+// The offer is made once per page load; the claim itself stays until it is
+// actually received, so backing out of Receive does not destroy the note.
+let claimOffered = false
+
+const rememberClaim = (url: string | null): void => {
+  claimMemory = url
+  try {
+    if (url) sessionStorage.setItem(CLAIM_KEY, url)
+    else sessionStorage.removeItem(CLAIM_KEY)
+  } catch {
+    // private mode or storage disabled: the in-memory copy still works for
+    // an uninterrupted hand-off, which is the common case
+  }
+}
+
+const takeClaim = (): string | null => {
+  if (claimMemory) return claimMemory
+  try {
+    return sessionStorage.getItem(CLAIM_KEY)
+  } catch {
+    return null
+  }
+}
 
 const readClaimHash = (): void => {
   const match = location.hash.match(/^#\/claim\?(.+)$/)
@@ -77,10 +109,10 @@ const readClaimHash = (): void => {
   const k1 = params.get('k1')
   const amount = Number(params.get('a'))
   try {
-    if (u && k1) pendingClaim = buildNoteUrl(u, k1, Number.isSafeInteger(amount) && amount > 0 ? amount : undefined)
-    else if (u) pendingClaim = resolveNoteInput(u)
+    if (u && k1) rememberClaim(buildNoteUrl(u, k1, Number.isSafeInteger(amount) && amount > 0 ? amount : undefined))
+    else if (u) rememberClaim(resolveNoteInput(u))
   } catch {
-    pendingClaim = null
+    rememberClaim(null)
   }
   history.replaceState(null, '', location.pathname + location.search)
 }
@@ -941,9 +973,12 @@ const viewHome = (): void => {
     return view
   })
 
-  if (pendingClaim) {
-    const claim = pendingClaim
-    pendingClaim = null
+  // Offered once per load, but NOT consumed here: the claim survives until
+  // the receive actually lands, so backing out, locking, or reloading
+  // cannot strand the note.
+  const claim = takeClaim()
+  if (claim && !claimOffered) {
+    claimOffered = true
     viewReceive(claim)
     toast('A note arrived - check it and receive.', 'ok')
   }
@@ -1144,6 +1179,9 @@ const viewReceive = (prefill?: string): void => {
       busy(receiveButton, async () => {
         const result = await w.receive(input.value.trim())
         result.warnings.forEach(warning => toast(warning, 'err'))
+        // Safely in the store and rotated: only now is it safe to forget
+        // the incoming claim.
+        rememberClaim(null)
         burst(body)
         toast(`Received ${sats(result.note.amountMsat)} sat`, 'ok')
         setTimeout(viewHome, 650)
@@ -1789,6 +1827,10 @@ const viewProof = (): void => {
 
 const update = registerSW({
   onNeedRefresh() {
+    // Never interrupt a hand-off. An unreceived claim is a live secret that
+    // only this tab holds; a reload offered mid-claim is how a note gets
+    // lost, so the update waits until there is nothing in flight.
+    if (takeClaim()) return
     const node = el(
       `<div class="toast ok" style="pointer-events:auto;display:flex;gap:12px;align-items:center">A new version is ready<button class="btn" style="min-height:40px;width:auto;padding:0 14px">Reload</button></div>`
     )
@@ -1804,8 +1846,9 @@ if (location.hash === '#/proof') {
   viewProof()
 } else if (walletExists()) {
   void viewLocked()
-} else if (pendingClaim) {
-  // A claim link on a fresh device: set up first, the note is kept for after.
+} else if (takeClaim()) {
+  // A claim link on a fresh device: set up first, the note is kept for
+  // after - and now survives the reloads that setup tends to involve.
   viewWelcome()
   toast('A note is waiting - set up the wallet to receive it.', 'ok')
 } else {

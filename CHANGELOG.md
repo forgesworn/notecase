@@ -45,6 +45,14 @@ Initial implementation.
   tooltips on hover or keyboard focus, and the whole surface got a size-up
   pass for readability.
 
+A claim link no longer loses the note if the hand-off is interrupted. The
+secret is scrubbed from the address bar the instant it is read, so it used
+to live only in a variable - and a locked wallet, a first-run setup, or the
+service worker's own "new version - Reload" prompt would strand it. The
+claim now survives in sessionStorage until the receive actually lands, the
+update prompt holds its tongue while a claim is in flight, and backing out
+of Receive no longer destroys it.
+
 Security-review hardening:
 
 - A mint claim now persists its preimage with the claim BEFORE the receive
