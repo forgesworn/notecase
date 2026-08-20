@@ -108,9 +108,20 @@ const readClaimHash = (): void => {
   const u = params.get('u')
   const k1 = params.get('k1')
   const amount = Number(params.get('a'))
+  // `u` arrives schemeless - lnurl-vault writes "?u=mint.example/w" into the
+  // QR, spending no QR capacity on a scheme it can imply. buildNoteUrl wants
+  // a withdrawLink, and new URL('mint.example/w') throws, so handing it the
+  // raw param meant every scan from a vault landed in the catch below and
+  // silently claimed nothing.
+  //
+  // lnurlw:// rather than https:// because LUD-17 is what decides the scheme,
+  // and it does not always choose https: an .onion or a localhost endpoint
+  // resolves to http, and forcing https there breaks a mint that works.
+  const withdrawLink = u && /^[a-z]+:\/\//i.test(u) ? u : u && `lnurlw://${u}`
   try {
-    if (u && k1) rememberClaim(buildNoteUrl(u, k1, Number.isSafeInteger(amount) && amount > 0 ? amount : undefined))
-    else if (u) rememberClaim(resolveNoteInput(u))
+    if (withdrawLink && k1)
+      rememberClaim(buildNoteUrl(withdrawLink, k1, Number.isSafeInteger(amount) && amount > 0 ? amount : undefined))
+    else if (withdrawLink) rememberClaim(resolveNoteInput(withdrawLink))
   } catch {
     rememberClaim(null)
   }
