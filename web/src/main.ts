@@ -203,7 +203,16 @@ const show = (build: () => HTMLElement): void => {
   viewEpoch += 1
   app.replaceChildren(build())
   const view = app.firstElementChild as HTMLElement
-  animate(view, {opacity: [0, 1], y: [10, 0], duration: 320, ease: 'outCubic'})
+  // strip the transform once the entry settles: a transformed ancestor
+  // becomes the containing block for position:fixed, which would pin the
+  // scan FAB to the view's corner instead of the screen's
+  animate(view, {
+    opacity: [0, 1],
+    y: [10, 0],
+    duration: 320,
+    ease: 'outCubic',
+    onComplete: () => view.style.removeProperty('transform')
+  })
   const items = view.querySelectorAll('.tile, .step, .note-row, .hist-row, .kv')
   if (items.length) {
     animate(items, {opacity: [0, 1], y: [14, 0], delay: stagger(35), duration: 360, ease: 'outCubic'})
@@ -233,7 +242,7 @@ const busy = async <T>(button: HTMLButtonElement, work: () => Promise<T>): Promi
 
 const topBar = (title: string, onBack: () => void): HTMLElement => {
   const bar = el(`<div class="top">
-    <button class="btn-icon" data-back aria-label="Back">${icons.back}</button>
+    <button class="btn-icon" data-back data-hint="Back" aria-label="Back">${icons.back}</button>
     <div class="brand"></div>
     <span class="spacer"></span>
   </div>`)
@@ -815,18 +824,18 @@ const viewHome = (): void => {
       <div class="top">
         <div class="brand">${icons.logo}<span>NOTECASE</span></div>
         <span class="spacer"></span>
-        <button class="btn-icon" data-history aria-label="History">${icons.history}</button>
-        <button class="btn-icon" data-settings aria-label="Settings">${icons.settings}</button>
+        <button class="btn-icon" data-history data-hint="Everything that has happened" aria-label="History">${icons.history}</button>
+        <button class="btn-icon" data-settings data-hint="Mints, backup, security" aria-label="Settings">${icons.settings}</button>
       </div>
       <div class="hero burst-host">
         <div class="amount"><span data-balance>0</span><span class="unit">sat</span></div>
         <div class="mint-chips" data-sub></div>
       </div>
       <div class="actions">
-        <button class="tile" data-go="receive">${icons.receive}<b>Receive</b></button>
-        <button class="tile" data-go="send">${icons.send}<b>Send</b></button>
-        <button class="tile" data-go="mint">${icons.mint}<b>Mint</b></button>
-        <button class="tile" data-go="melt">${icons.melt}<b>Melt</b></button>
+        <button class="tile in" data-go="receive"><span class="roundel">${icons.receive}</span><b>Receive</b><small>Take a note you've been given</small></button>
+        <button class="tile out" data-go="send"><span class="roundel">${icons.send}</span><b>Send</b><small>Cut a note to hand to someone</small></button>
+        <button class="tile" data-go="mint"><span class="roundel">${icons.mint}</span><b>Mint</b><small>Pay Lightning, get a note</small></button>
+        <button class="tile hot" data-go="melt"><span class="roundel">${icons.melt}</span><b>Melt</b><small>Turn a note back into Lightning</small></button>
       </div>
       <div data-lists class="stack"></div>
     </div>`)
@@ -869,9 +878,32 @@ const viewHome = (): void => {
     const sent = w.sentNotes().sort((a, b) => b.updatedAt - a.updatedAt)
 
     if (live.length === 0 && sent.length === 0) {
-      lists.append(
-        el(`<div class="empty">${icons.note}<br/>No notes yet.<br/>Mint one with Lightning, or receive one from a friend.</div>`)
+      // First run: not an empty shrug but a ladder - each rung is the
+      // actual button that does it, and a done rung stays crossed off.
+      const hasMint = w.data.mints.length > 0
+      lists.append(el('<div class="rubric">Start here</div>'))
+      const guide = el('<div class="steps"></div>')
+      const stepMint = el(`<button class="step${hasMint ? ' done' : ''}">
+        <span class="n">${hasMint ? '✓' : 'I'}</span><b>Add a mint</b>
+        <p>${hasMint ? 'Done - your mint is ready below.' : 'A mint strikes and redeems notes. moneyer.dev is one tap away.'}</p>
+        <span class="go">${hasMint ? 'Manage mints' : 'Add one now'} ${icons.chevron}</span>
+      </button>`)
+      stepMint.addEventListener('click', () => viewMints())
+      const stepNote = el(`<button class="step">
+        <span class="n">${hasMint ? 'I' : 'II'}</span><b>Get a first note</b>
+        <p>Mint one by paying a Lightning invoice, or receive one a friend hands you.</p>
+        <span class="go">Mint a note ${icons.chevron}</span>
+      </button>`)
+      stepNote.addEventListener('click', () => viewMint())
+      guide.append(
+        stepMint,
+        stepNote,
+        el(`<div class="step">
+          <span class="n">${hasMint ? 'II' : 'III'}</span><b>Spend it anywhere</b>
+          <p>Hand a note to anyone, split it to the exact amount, or melt it back onto Lightning.</p>
+        </div>`)
       )
+      lists.append(guide)
     }
     if (live.length) {
       lists.append(el('<div class="rubric">The notes</div>'))
@@ -899,7 +931,7 @@ const viewHome = (): void => {
     )
 
     if (scanAvailable()) {
-      const fab = el(`<button class="fab" aria-label="Scan a QR">${icons.scan}</button>`)
+      const fab = el(`<button class="fab" data-hint="Scan anything - note, invoice or mint" aria-label="Scan a QR">${icons.scan}</button>`)
       fab.addEventListener('click', async () => {
         const value = await scanQr()
         if (value) classifyScan(value)
@@ -1089,14 +1121,13 @@ const viewReceive = (prefill?: string): void => {
     const view = el(`<div class="view"></div>`)
     view.append(topBar('Receive a note', viewHome))
     const body = el(`<div class="stack">
-      <div class="rubric">Present the note</div>
+      <div class="hint">${icons.info}<span><b>Someone handed you a note?</b> Paste or scan it here. Receiving locks it to this wallet under a fresh secret - the sender can no longer spend it.</span></div>
       <div class="field">
-        <label>Paste the note you were given</label>
+        <label>The note you were given</label>
         <textarea data-input placeholder="lnurlw://… or LNURL1…" autocomplete="off" spellcheck="false"></textarea>
       </div>
       <button class="btn btn-ghost" data-paste>${icons.paste}<span>Paste from clipboard</span></button>
       <button class="btn btn-silver" data-receive>${icons.receive}<span>Receive</span></button>
-      <p class="warn">Receiving rotates the note to a fresh secret straight away, so whoever sent it can no longer spend it.</p>
     </div>`)
     view.append(body)
     const input = body.querySelector('textarea')!
@@ -1131,12 +1162,12 @@ const viewSend = (): void => {
     view.append(topBar('Send', viewHome))
     const amount = amountField({presets: [500, 1000, 5000], maxMsat: w.balanceMsat()})
     const body = el('<div class="stack"></div>')
+    body.append(
+      el(`<div class="hint">${icons.info}<span><b>Handing money to someone?</b> Type the amount and notecase cuts a fresh note for exactly that. You can take it back any time until they receive it.</span></div>`)
+    )
     body.append(el('<div class="rubric">To be handed over</div>'))
     body.append(amount.node)
-    body.append(
-      el(`<button class="btn btn-silver" data-cut>${icons.send}<span>Cut a note</span></button>`),
-      el(`<p class="warn">notecase splits or merges your notes to the exact amount, then hands you a fresh bearer note to share.</p>`)
-    )
+    body.append(el(`<button class="btn btn-silver" data-cut>${icons.send}<span>Cut a note</span></button>`))
     view.append(body)
     const cut = body.querySelector('[data-cut]') as HTMLButtonElement
     cut.addEventListener('click', () =>
@@ -1196,12 +1227,14 @@ const viewMint = (): void => {
     view.append(topBar('Mint notes', viewHome))
     const amount = amountField({presets: [500, 1000, 5000, 21000]})
     const form = el('<div class="stack"></div>')
+    form.append(
+      el(`<div class="hint">${icons.info}<span><b>Turning Lightning into a note?</b> Type what the note should hold - any mint fee is added to the invoice and shown before you pay anything.</span></div>`)
+    )
     form.append(el('<div class="rubric">To be struck</div>'))
     form.append(mintPicker(w), amount.node)
     form.append(
       el(`<p class="warn" data-feenote>&nbsp;</p>`),
-      el(`<button class="btn btn-silver" data-mintgo>${icons.mint}<span>${w.data.settings.nwcUri ? 'Mint - pay with connected wallet' : 'Create the invoice'}</span></button>`),
-      el(`<p class="warn">You type what the note should hold; any mint fee is added to the invoice, shown before you pay.</p>`)
+      el(`<button class="btn btn-silver" data-mintgo>${icons.mint}<span>${w.data.settings.nwcUri ? 'Mint - pay with connected wallet' : 'Create the invoice'}</span></button>`)
     )
     view.append(form)
 
@@ -1306,6 +1339,7 @@ const viewMelt = (prefillPr?: string): void => {
     view.append(topBar('Melt to Lightning', viewHome))
     const hasNwc = Boolean(w.data.settings.nwcUri)
     const body = el(`<div class="stack">
+      <div class="hint">${icons.info}<span><b>Turning a note back into Lightning?</b> Paste an invoice to pay, send to a Lightning Address${hasNwc ? ', or cash straight into your connected wallet' : ''} - the mint burns the note and pays it out.</span></div>
       <div class="seg" role="tablist">
         <button class="on" data-tab="invoice">Invoice</button>
         <button data-tab="address">Address</button>
@@ -1313,7 +1347,7 @@ const viewMelt = (prefillPr?: string): void => {
       </div>
       <div data-pane></div>
       <button class="btn btn-silver" data-meltgo>${icons.melt}<span>Melt</span></button>
-      <p class="warn">Melting burns a note of exactly the invoice's amount; the mint pays the invoice. OK means in flight - the home chip confirms settlement.</p>
+      <p class="warn">OK means in flight - the home screen confirms settlement, and a failed melt returns the sats.</p>
     </div>`)
     view.append(body)
 
@@ -1411,6 +1445,9 @@ const viewMints = (prefillAdd?: string): void => {
     view.append(topBar('Mints', viewHome))
     const body = el('<div class="stack" style="gap:26px"></div>')
     view.append(body)
+    body.append(
+      el(`<div class="hint">${icons.info}<span><b>A mint strikes and redeems notes.</b> Add one by its address below - its signing key is pinned on first contact, so every note it signs can be checked forever.</span></div>`)
+    )
 
     const balances = w.balanceByMint()
     for (const entry of w.data.mints) {
@@ -1421,8 +1458,8 @@ const viewMints = (prefillAdd?: string): void => {
         <div class="kv" style="align-items:center">
           <b style="font-family:var(--display);letter-spacing:0.06em"></b>
           <span class="row" style="gap:8px;flex:none">
-            <button class="btn-icon" data-star aria-label="Make default" style="color:${isDefault ? 'var(--silver)' : 'var(--dim)'}">${icons.star}</button>
-            <button class="btn-icon" data-remove aria-label="Remove">${icons.trash}</button>
+            <button class="btn-icon" data-star data-hint="${isDefault ? 'This is the default mint' : 'Make this the default'}" aria-label="Make default" style="color:${isDefault ? 'var(--silver)' : 'var(--dim)'}">${icons.star}</button>
+            <button class="btn-icon" data-remove data-hint="Remove this mint" aria-label="Remove">${icons.trash}</button>
           </span>
         </div>
         <div class="kv"><span>holding</span><b>${sats(balances.get(entry.host) ?? 0)} sat</b></div>
@@ -1529,7 +1566,7 @@ const viewSettings = (): void => {
       const row = el(`<div class="stack" style="padding-top:14px">
         <div class="row" style="align-items:center">
           <input data-nwc type="password" placeholder="nostr+walletconnect://…" autocomplete="off" data-1p-ignore data-lpignore="true" />
-          <button class="btn-icon" data-reveal aria-label="Show the connection string" style="flex:none">${icons.eye}</button>
+          <button class="btn-icon" data-reveal data-hint="Show what you typed" aria-label="Show the connection string" style="flex:none">${icons.eye}</button>
         </div>
         <button class="btn">${icons.bolt}<span>Connect</span></button>
       </div>`)

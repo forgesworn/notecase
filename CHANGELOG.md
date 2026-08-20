@@ -38,6 +38,12 @@ Initial implementation.
   guilloché, dark and light paper; and a `#/proof` proofing press that
   prints the note with a constant secret so the plate can be checked
   without money.
+- Guidance throughout the web wallet: every flow opens with a plain-words
+  explainer of what it does, the four home offices carry colour-coded
+  roundels and captions, an empty wallet shows a start-here ladder whose
+  rungs are the buttons that do them, icon buttons explain themselves in
+  tooltips on hover or keyboard focus, and the whole surface got a size-up
+  pass for readability.
 
 Security-review hardening:
 

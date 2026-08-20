@@ -19,6 +19,8 @@
   --ok: #86b893;
   --bad: #c9705f;
   --warn: #c4a35e;
+  --blue: #8fb0cf;
+  --blue-deep: #33597d;
   --radius: 3px;
   --pad: clamp(14px, 4vw, 30px);
   --tap: 54px;
@@ -41,6 +43,8 @@
     --ok: #3e7a4f;
     --bad: #a04432;
     --warn: #8a6a25;
+    --blue: #33597d;
+    --blue-deep: #33597d;
   }
 }
 
@@ -50,7 +54,7 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--body);
-  font-size: 17px;
+  font-size: 17.5px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   overscroll-behavior: none;
@@ -142,8 +146,8 @@ body {
 /* per-mint holdings under the balance */
 .mint-chips { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .mint-chips .chip {
-  display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px;
-  font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: 0.1em;
+  display: inline-flex; align-items: center; gap: 8px; padding: 8px 15px;
+  font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: 0.1em;
   border: 1px solid var(--hair-strong); border-radius: 2px; color: var(--dim); background: var(--paper-2);
   cursor: pointer;
 }
@@ -153,15 +157,15 @@ body {
 /* ---------- buttons: engraved plates and ruled ghosts ---------- */
 button { font: inherit; color: inherit; border: none; background: none; cursor: pointer; touch-action: manipulation; }
 .btn {
-  min-height: var(--tap); width: 100%; padding: 0 20px; border-radius: var(--radius);
-  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
-  font-family: var(--mono); font-size: 14px; font-weight: 600;
-  letter-spacing: 0.18em; text-transform: uppercase; text-indent: 0.18em;
+  min-height: 56px; width: 100%; padding: 0 20px; border-radius: var(--radius);
+  display: inline-flex; align-items: center; justify-content: center; gap: 11px;
+  font-family: var(--mono); font-size: 14.5px; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase; text-indent: 0.16em;
   background: var(--paper-2); border: 1px solid var(--hair-strong); color: var(--ink);
-  transition: transform 0.06s ease, background 0.15s ease;
+  transition: transform 0.06s ease, background 0.15s ease, border-color 0.15s ease;
 }
 .btn:active { transform: translateY(1px); background: var(--paper-3); }
-.btn svg { width: 17px; height: 17px; flex: none; }
+.btn svg { width: 19px; height: 19px; flex: none; }
 .btn-silver {
   background: linear-gradient(180deg, var(--silver), var(--silver-deep));
   color: var(--on-plate); border: none;
@@ -181,8 +185,8 @@ button { font: inherit; color: inherit; border: none; background: none; cursor: 
 .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid var(--hair-strong); }
 @media (min-width: 640px) { .actions { grid-template-columns: repeat(4, 1fr); } }
 .tile {
-  padding: 22px 12px 18px; display: flex; flex-direction: column; align-items: center; gap: 9px;
-  background: var(--paper-2); transition: background 0.15s ease;
+  padding: 24px 14px 20px; display: flex; flex-direction: column; align-items: center; gap: 11px;
+  background: var(--paper-2); transition: background 0.15s ease, box-shadow 0.15s ease;
   border: 0 solid var(--hair-strong);
 }
 .tile:nth-child(2n) { border-left-width: 1px; }
@@ -192,10 +196,23 @@ button { font: inherit; color: inherit; border: none; background: none; cursor: 
   .tile + .tile { border-left-width: 1px; }
 }
 .tile:active { background: var(--paper-3); }
-.tile svg { width: 28px; height: 28px; color: var(--silver); stroke-width: 1.6; }
+.tile { --tile-c: var(--silver); }
+.tile.in { --tile-c: var(--ok); }
+.tile.out { --tile-c: var(--blue); }
+.tile.hot { --tile-c: var(--warn); }
+.tile .roundel {
+  width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center;
+  color: var(--tile-c); border: 1px solid color-mix(in srgb, var(--tile-c) 45%, transparent);
+  background: color-mix(in srgb, var(--tile-c) 10%, transparent);
+}
+.tile svg { width: 30px; height: 30px; stroke-width: 1.7; }
 .tile b {
-  font-family: var(--display); font-weight: 700; font-size: 14.5px;
-  letter-spacing: 0.14em; text-transform: uppercase;
+  font-family: var(--display); font-weight: 700; font-size: 16px;
+  letter-spacing: 0.12em; text-transform: uppercase;
+}
+.tile small {
+  font-family: var(--body); font-style: italic; color: var(--dim);
+  font-size: 14.5px; line-height: 1.45; text-align: center; max-width: 21ch;
 }
 .tile[disabled] { opacity: 0.45; pointer-events: none; }
 
@@ -218,9 +235,9 @@ button { font: inherit; color: inherit; border: none; background: none; cursor: 
 }
 .kv {
   display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
-  padding: 11px 0; border-bottom: 1px solid var(--hair); font-size: 16.5px;
+  padding: 12px 0; border-bottom: 1px solid var(--hair); font-size: 17px;
 }
-.kv span { color: var(--dim); font-style: italic; flex: none; font-size: 15.5px; }
+.kv span { color: var(--dim); font-style: italic; flex: none; font-size: 16px; }
 .kv b { font-weight: 600; text-align: right; }
 .kv code { font-family: var(--mono); font-size: 11px; word-break: break-all; text-align: right; color: var(--ink); max-width: 30ch; }
 .card .row { border-top: 1px solid var(--hair); padding-top: 12px; margin-top: 2px; }
@@ -233,11 +250,22 @@ button { font: inherit; color: inherit; border: none; background: none; cursor: 
 .step + .step { border-top: 1px solid var(--hair); }
 @media (min-width: 640px) { .step + .step { border-top: none; border-left: 1px solid var(--hair); } }
 .step .n {
-  font-family: var(--display); font-weight: 700; font-size: 20px; color: var(--silver);
+  font-family: var(--display); font-weight: 700; font-size: 22px; color: var(--blue);
   letter-spacing: 0.1em;
 }
-.step b { font-family: var(--display); font-size: 15.5px; letter-spacing: 0.08em; text-transform: uppercase; }
-.step p { color: var(--dim); font-size: 15.5px; line-height: 1.65; }
+.step b { font-family: var(--display); font-size: 16px; letter-spacing: 0.08em; text-transform: uppercase; }
+.step p { color: var(--dim); font-size: 16px; line-height: 1.65; }
+/* an actionable step: the whole plate is the button */
+button.step { text-align: left; transition: background 0.15s ease; }
+button.step:active { background: var(--paper-3); }
+button.step .go {
+  display: inline-flex; align-items: center; gap: 8px; margin-top: 4px;
+  font-family: var(--mono); font-size: 12.5px; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase; color: var(--blue);
+}
+button.step .go svg { width: 15px; height: 15px; }
+.step.done .n { color: var(--ok); }
+.step.done b { color: var(--dim); text-decoration: line-through; text-decoration-thickness: 1px; }
 
 /* ---------- the note ledger: each holding is a ruled line ---------- */
 .note-row {
@@ -253,9 +281,9 @@ button { font: inherit; color: inherit; border: none; background: none; cursor: 
 }
 .note-row .coin svg { width: 20px; height: 20px; stroke-width: 1.6; }
 .note-row .who { flex: 1; min-width: 0; }
-.note-row .who b { font-family: var(--display); font-weight: 700; font-size: 14px; letter-spacing: 0.1em; text-transform: uppercase; display: block; }
-.note-row .who small { display: block; color: var(--dim); font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.note-row .amt { font-family: var(--display); font-weight: 700; font-size: 17px; white-space: nowrap; }
+.note-row .who b { font-family: var(--display); font-weight: 700; font-size: 15px; letter-spacing: 0.1em; text-transform: uppercase; display: block; }
+.note-row .who small { display: block; color: var(--dim); font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-row .amt { font-family: var(--display); font-weight: 700; font-size: 18px; white-space: nowrap; }
 .note-row .amt .unit { font-family: var(--mono); font-size: 10px; color: var(--dim); letter-spacing: 0.14em; margin-left: 5px; }
 .note-row .chev { color: var(--dim); display: inline-flex; }
 .note-row .chev svg { width: 16px; height: 16px; }
@@ -273,7 +301,7 @@ button { font: inherit; color: inherit; border: none; background: none; cursor: 
 .hist-row.out .coin { color: var(--silver); }
 .hist-row .coin svg { width: 18px; height: 18px; stroke-width: 1.6; }
 .hist-row .who { flex: 1; min-width: 0; }
-.hist-row .who b { font-weight: 600; font-size: 15.5px; line-height: 1.5; display: block; }
+.hist-row .who b { font-weight: 600; font-size: 16px; line-height: 1.5; display: block; }
 .hist-row .who small { color: var(--dim); font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; }
 
 .empty { text-align: center; color: var(--dim); padding: 34px 12px; line-height: 1.7; font-style: italic; }
@@ -282,11 +310,11 @@ button { font: inherit; color: inherit; border: none; background: none; cursor: 
 /* ---------- forms ---------- */
 .field { display: flex; flex-direction: column; gap: 8px; }
 .field label {
-  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.26em;
+  font-family: var(--mono); font-size: 12px; letter-spacing: 0.26em;
   text-transform: uppercase; color: var(--dim);
 }
 input, textarea, select {
-  font-family: var(--mono); font-size: 15px; color: var(--ink);
+  font-family: var(--mono); font-size: 15.5px; color: var(--ink);
   background: var(--paper-2); border: 1px solid var(--hair-strong); border-radius: var(--radius);
   padding: 14px 16px; min-height: var(--tap); width: 100%;
 }
@@ -317,7 +345,7 @@ select { appearance: none; }
 /* segmented control (melt targets) */
 .seg { display: grid; grid-auto-flow: column; gap: 0; border: 1px solid var(--hair-strong); }
 .seg button {
-  min-height: 46px; font-family: var(--mono); font-size: 12px; font-weight: 600;
+  min-height: 48px; font-family: var(--mono); font-size: 13px; font-weight: 600;
   letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); background: var(--paper-2);
 }
 .seg button + button { border-left: 1px solid var(--hair-strong); }
@@ -491,8 +519,20 @@ a.qr { line-height: 0; }
 .badge.wait { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
 button.badge { cursor: pointer; }
 
-.warn { color: var(--dim); font-size: 16px; font-style: italic; line-height: 1.7; text-align: center; }
+.warn { color: var(--dim); font-size: 16.5px; font-style: italic; line-height: 1.7; text-align: center; }
 .warn strong { color: var(--warn); font-weight: 600; font-style: normal; }
+
+/* a plain-words explainer: what this screen does, in ink, not small print */
+.hint {
+  display: flex; gap: 14px; align-items: flex-start; text-align: left;
+  border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent);
+  border-left: 3px solid var(--blue);
+  background: color-mix(in srgb, var(--blue) 7%, transparent);
+  padding: 14px 16px; font-size: 16.5px; line-height: 1.65; color: var(--ink);
+  border-radius: var(--radius);
+}
+.hint svg { width: 22px; height: 22px; flex: none; color: var(--blue); margin-top: 3px; }
+.hint b { font-weight: 600; }
 .pulse { animation: pulse 1.8s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.45; } }
 .mono {
@@ -547,6 +587,42 @@ footer a:hover { color: var(--silver); }
 }
 .fab:active { transform: scale(0.94); }
 .fab svg { width: 26px; height: 26px; }
+
+/* ---------- pointers: hovers that lift, tooltips that explain ---------- */
+@media (hover: hover) {
+  .btn:hover { border-color: var(--silver); background: var(--paper-3); }
+  .btn-silver:hover { border: none; filter: brightness(1.07); }
+  .btn-icon:hover { border-color: var(--silver); background: var(--paper-2); }
+  .tile:hover { background: color-mix(in srgb, var(--tile-c) 7%, var(--paper-2)); box-shadow: inset 0 -2px 0 var(--tile-c); }
+  .tile:hover .roundel { background: color-mix(in srgb, var(--tile-c) 18%, transparent); }
+  .note-row:hover { background: var(--paper-3); border-color: var(--hair-strong); }
+  .note-row:hover .chev { color: var(--silver); }
+  .presets button:hover, .seg button:hover, .pad button:hover { background: var(--paper-3); }
+  .mint-chips .chip:hover { border-color: var(--silver); color: var(--ink); }
+  button.step:hover { background: color-mix(in srgb, var(--blue) 6%, var(--paper-2)); }
+  .fab:hover { filter: brightness(1.07); }
+  .plate-link:hover { color: var(--silver); }
+}
+
+/* small explanations on hover or keyboard focus, mono, letterpress-plain.
+   :where keeps specificity at zero so it can never beat a real position
+   (the FAB is fixed and still anchors its own tooltip). */
+:where([data-hint]) { position: relative; }
+@media (hover: hover) {
+  [data-hint]:hover::after, [data-hint]:focus-visible::after {
+    content: attr(data-hint);
+    position: absolute; top: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+    background: var(--paper-3); color: var(--ink); border: 1px solid var(--hair-strong);
+    font-family: var(--mono); font-size: 11.5px; font-weight: 500; letter-spacing: 0.08em;
+    padding: 7px 11px; white-space: nowrap; z-index: 60; pointer-events: none;
+    border-radius: 2px; box-shadow: 0 10px 28px -12px rgba(0, 0, 0, 0.55);
+  }
+  .fab[data-hint]:hover::after, .fab[data-hint]:focus-visible::after {
+    top: auto; bottom: calc(100% + 10px); left: auto; right: 0; transform: none;
+  }
+}
+
+button:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
 /* ---------- scanner overlay ---------- */
 .scanner {
