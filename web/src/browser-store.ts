@@ -1,6 +1,6 @@
 import {sha256} from '@noble/hashes/sha2.js'
 import {utf8ToBytes} from '@noble/hashes/utils.js'
-import {Keystore, browserStorage, browserWebAuthn} from 'keystore-kit'
+import {Keystore, browserStorage, browserWebAuthn, type BiometricSetupOptions, type SetupBiometricResult} from 'keystore-kit'
 import {sealWallet, unsealWallet} from '../../src/cryptobox.ts'
 import {emptyWallet, type WalletData} from '../../src/types.ts'
 
@@ -67,10 +67,17 @@ export const unlockWithPin = async (pin: string): Promise<BrowserStore | null> =
 
 export const biometricAvailable = (): Promise<boolean> => keystore().isBiometricAvailable()
 
-export const enableBiometric = async (storeKey: string): Promise<boolean> => {
-  const result = await keystore().enableBiometric(storeKey)
-  return result.ok
-}
+// True once a biometric wrap exists. method() reports the most recently
+// configured method, and nothing in this app re-configures the PIN after
+// biometric (no change-PIN or disable flow), so 'biometric' means a
+// credential is in place. Pre-0.2 single-slot data may lack the flag: the
+// enable button is then offered once more, and re-enabling migrates.
+export const biometricEnabled = (): boolean => keystore().method() === 'biometric'
+
+// The full result goes to the caller: the strong PRF wrap, the opt-in
+// device fallback and each failure reason need different words in the UI.
+export const enableBiometric = (storeKey: string, opts?: BiometricSetupOptions): Promise<SetupBiometricResult> =>
+  keystore().enableBiometric(storeKey, opts)
 
 export const unlockWithBiometric = async (): Promise<BrowserStore | null> => {
   const sealed = localStorage.getItem(WALLET_SLOT)

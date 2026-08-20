@@ -2,6 +2,7 @@ import './style.css'
 import {registerSW} from 'virtual:pwa-register'
 import {animate, stagger, utils} from 'animejs'
 import {renderSVG} from 'uqr'
+import type {SetupBiometricResult} from 'keystore-kit'
 import {
   buildNoteUrl,
   isBolt11Invoice,
@@ -16,6 +17,7 @@ import {payWithNwc, invoiceFromNwc, nwcStatus} from '../../src/nwc.ts'
 import type {NoteRecord, PendingMint} from '../../src/types.ts'
 import {
   biometricAvailable,
+  biometricEnabled,
   createBrowserWallet,
   enableBiometric,
   forgetBrowserWallet,
@@ -1238,20 +1240,83 @@ const viewSettings = (): void => {
 
     // security
     const security = el(`<div class="card"><div class="section-title" style="margin:0">Security</div></div>`)
-    const bio = el(`<button class="btn btn-ghost">${icons.face}<span>Enable biometric unlock</span></button>`)
-    bio.addEventListener('click', () =>
-      busy(bio as HTMLButtonElement, async () => {
-        const enabled = await enableBiometric(s.storeKey)
-        toast(enabled ? 'Biometric unlock enabled' : 'This device did not offer it', enabled ? 'ok' : 'err')
-      })
-    )
+    const bioArea = el('<div class="stack"></div>')
+
+    // A tap on Enable mints a WebAuthn credential, and the result is a
+    // discriminated union: each variant gets its own honest answer, and
+    // once a credential exists the button becomes a status line so another
+    // tap can never mint a duplicate.
+    const paintBio = (): void => {
+      bioArea.replaceChildren()
+      if (biometricEnabled()) {
+        const status = el(`<div class="kv"><span>biometric unlock</span><b></b></div>`)
+        status.querySelector('b')!.textContent = 'enabled - the PIN still works as a backup'
+        bioArea.append(status)
+        return
+      }
+      const bio = el(`<button class="btn btn-ghost">${icons.face}<span>Enable biometric unlock</span></button>`)
+      bio.addEventListener('click', () =>
+        busy(bio as HTMLButtonElement, async () => reportEnable(await enableBiometric(s.storeKey)))
+      )
+      bioArea.append(bio)
+    }
+
+    const reportEnable = (result: SetupBiometricResult): void => {
+      if (result.ok) {
+        toast(
+          result.prfSupported
+            ? `Biometric unlock enabled - your PIN still works as a backup.`
+            : `Biometric unlock is on, but only the weaker device-bound kind: it keeps out casual access, not someone who copies this browser's stored wallet data. Your PIN still works as a backup.`,
+          'ok'
+        )
+        paintBio()
+        return
+      }
+      if (result.reason === 'prf-unsupported') {
+        offerFallback()
+        return
+      }
+      // A cancelled prompt is the user backing out - restore quietly.
+      if (result.reason === 'cancelled') {
+        paintBio()
+        return
+      }
+      toast(
+        result.reason === 'no-provider'
+          ? `This device has no biometric authenticator.`
+          : `Biometric setup failed - try again.`,
+        'err'
+      )
+    }
+
+    // No PRF on this device: the weaker wrap is written only after an
+    // explicit second tap that spells out what it does and does not stop.
+    const offerFallback = (): void => {
+      bioArea.replaceChildren()
+      const warn = el('<p class="warn" style="text-align:left"></p>')
+      warn.textContent =
+        `This device can't do hardware-backed biometric unlock. It can still ask for your fingerprint or face, ` +
+        `but the protection is weaker: casual access is stopped, someone who copies this browser's stored wallet ` +
+        `data is not. Download a passphrase backup first, then decide.`
+      const use = el(`<button class="btn btn-ghost danger-text">${icons.face}<span>Use the weaker fallback</span></button>`)
+      use.addEventListener('click', () =>
+        busy(use as HTMLButtonElement, async () =>
+          reportEnable(await enableBiometric(s.storeKey, {allowDeviceFallback: true}))
+        )
+      )
+      const keep = el(`<button class="btn">Keep PIN only</button>`)
+      keep.addEventListener('click', paintBio)
+      bioArea.append(warn, use, keep)
+    }
+
     const lock = el(`<button class="btn">${icons.lock}<span>Lock now</span></button>`)
     lock.addEventListener('click', () => {
       store = null
       wallet = null
       void viewLocked()
     })
-    security.append(bio, lock)
+    security.append(bioArea, lock)
+    paintBio()
     body.append(security)
 
     // danger
