@@ -70,9 +70,30 @@ const fakeDevice = (relay: string) => {
     }
   }
 
+  // Live subscribers, so the fake behaves like a real relay for ephemeral
+  // kinds: a NIP-46 reply reaches whoever is listening when it is pushed.
+  const subs: {filter: Filter; onEvent: (e: Event) => void}[] = []
+  const emit = (event: Event) => {
+    // Kind 24133 is in the ephemeral range, so a real relay does NOT keep
+    // it: it reaches live subscribers and is then gone. Not storing it here
+    // is what makes this suite able to catch a client that publishes and
+    // then asks for history.
+    for (const sub of subs) if (matchFilter(sub.filter, event)) sub.onEvent(event)
+  }
+
   const transport: NostrTransport = {
     async query(_relays, filter: Filter) {
       return stored.filter(e => matchFilter(filter, e))
+    },
+    subscribe(_relays, filter, onEvent) {
+      const sub = {filter, onEvent}
+      subs.push(sub)
+      return {
+        close() {
+          const i = subs.indexOf(sub)
+          if (i >= 0) subs.splice(i, 1)
+        }
+      }
     },
     async publish(relays, event) {
       if (!relays.includes(relay)) return {ok: [], failed: relays}
@@ -84,12 +105,12 @@ const fakeDevice = (relay: string) => {
         if (req.method === 'connect') {
           if (req.params[1] === pairingSecret) {
             bound.add(event.pubkey)
-            stored.push(answer(event.pubkey, req.id, {result: 'ack'}))
+            emit(answer(event.pubkey, req.id, {result: 'ack'}))
           } else {
-            stored.push(answer(event.pubkey, req.id, {error: 'secret mismatch'}))
+            emit(answer(event.pubkey, req.id, {error: 'secret mismatch'}))
           }
         } else {
-          stored.push(answer(event.pubkey, req.id, noteCmd(event.pubkey, req.method, (req.params[0] ?? {}) as Record<string, unknown>) as {result?: unknown; error?: string}))
+          emit(answer(event.pubkey, req.id, noteCmd(event.pubkey, req.method, (req.params[0] ?? {}) as Record<string, unknown>) as {result?: unknown; error?: string}))
         }
       }
       return {ok: relays, failed: []}

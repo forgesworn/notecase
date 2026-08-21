@@ -29,6 +29,9 @@ const WRAP_BACKDATE_SECS = 2 * 24 * 60 * 60 + 3600
 // The bit of a relay pool this module needs, so tests run on a fake.
 export type NostrTransport = {
   query(relays: string[], filter: Filter): Promise<Event[]>
+  // A live subscription, for kinds relays do not store. `query` asks for
+  // history; this catches what arrives while it is open.
+  subscribe(relays: string[], filter: Filter, onEvent: (event: Event) => void): {close(): void}
   publish(relays: string[], event: Event): Promise<{ok: string[]; failed: string[]}>
   close(): void
 }
@@ -37,6 +40,7 @@ export const poolTransport = (): NostrTransport => {
   const pool = new SimplePool()
   return {
     query: (relays, filter) => pool.querySync(relays, filter, {maxWait: 8_000}),
+    subscribe: (relays, filter, onEvent) => pool.subscribe(relays, filter, {onevent: onEvent}),
     publish: async (relays, event) => {
       const ok: string[] = []
       const failed: string[] = []
