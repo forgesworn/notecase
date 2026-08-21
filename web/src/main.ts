@@ -1677,12 +1677,17 @@ const viewMelt = (prefillPr?: string): void => {
     const view = el('<div class="view"></div>')
     view.append(topBar('Melt to Lightning', viewHome))
     const hasNwc = Boolean(w.data.settings.nwcUri)
+    // A move is a melt at one mint paying a mint invoice at another, so it
+    // needs two mints on the list and something at one of them to melt.
+    const balances = w.balanceByMint()
+    const canMove = w.data.mints.length >= 2 && [...balances.values()].some(msat => msat > 0)
     const body = el(`<div class="stack">
-      <div class="hint">${icons.info}<span><b>Turning a note back into Lightning?</b> Paste an invoice to pay, send to a Lightning Address${hasNwc ? ', or cash straight into your connected wallet' : ''} - the mint burns the note and pays it out.</span></div>
+      <div class="hint">${icons.info}<span><b>Turning a note back into Lightning?</b> Paste an invoice to pay, send to a Lightning Address${hasNwc ? ', or cash straight into your connected wallet' : ''}${canMove ? ', or move sats to another of your mints' : ''} - the mint burns the note and pays it out.</span></div>
       <div class="seg" role="tablist">
         <button class="on" data-tab="invoice">Invoice</button>
         <button data-tab="address">Address</button>
         ${hasNwc ? '<button data-tab="nwc">My wallet</button>' : ''}
+        ${canMove ? '<button data-tab="move">Move</button>' : ''}
       </div>
       <div data-pane></div>
       <button class="btn btn-silver" data-meltgo>${icons.melt}<span>Melt</span></button>
@@ -1713,6 +1718,53 @@ const viewMelt = (prefillPr?: string): void => {
             <div class="amount-input"><input data-amount inputmode="numeric" placeholder="0" /><span class="unit">sat</span></div>
           </div>`)
         )
+      } else if (tab === 'move') {
+        const stack = el(`<div class="stack">
+          <p class="warn">Move sats from one of your mints to another. The source mint burns a note to pay the destination's invoice, and the new note lands here once it settles. Both mints take their usual fee.</p>
+          <div class="field"><label>From</label><select data-from></select></div>
+          <div class="field"><label>To</label><select data-to></select></div>
+          <div class="amount-input"><input data-amount inputmode="numeric" placeholder="0" /><span class="unit">sat</span></div>
+          <p class="warn" data-movenote>&nbsp;</p>
+        </div>`)
+        const from = stack.querySelector('[data-from]') as HTMLSelectElement
+        const to = stack.querySelector('[data-to]') as HTMLSelectElement
+        // mint hosts are persisted strings: build options, never interpolate
+        for (const mint of w.data.mints) {
+          const held = balances.get(mint.host) ?? 0
+          const source = document.createElement('option')
+          source.value = mint.host
+          source.textContent = `${mint.host} (${sats(held)} sat)`
+          source.disabled = held <= 0
+          from.append(source)
+          const dest = document.createElement('option')
+          dest.value = mint.host
+          dest.textContent = mint.host
+          to.append(dest)
+        }
+        const richest = [...balances.entries()].sort((a, b) => b[1] - a[1])[0]?.[0]
+        if (richest) from.value = richest
+        const other = w.data.mints.find(mint => mint.host !== from.value)
+        if (other) to.value = other.host
+        const note = stack.querySelector('[data-movenote]') as HTMLElement
+        const paintMove = () => {
+          const entry = w.data.mints.find(mint => mint.host === to.value)
+          const amount = Number((stack.querySelector('[data-amount]') as HTMLInputElement).value)
+          if (from.value === to.value) {
+            note.textContent = 'Pick two different mints.'
+            return
+          }
+          if (!entry?.mintFee || !Number.isSafeInteger(amount) || amount <= 0) {
+            note.textContent = entry?.mintFee ? '\u00a0' : `No known mint fee at ${to.value}.`
+            return
+          }
+          const net = amount * 1000 - entry.mintFee.baseFeeMsat - Math.ceil((amount * 1000 * entry.mintFee.feePpm) / 1_000_000)
+          note.textContent = `${to.value} withholds its fee: about ${sats(Math.max(net, 0))} sat lands for ${amount} sat sent, plus ${from.value}'s melt fee.`
+        }
+        from.addEventListener('change', paintMove)
+        to.addEventListener('change', paintMove)
+        stack.querySelector('[data-amount]')!.addEventListener('input', paintMove)
+        paintMove()
+        pane.replaceChildren(stack)
       } else {
         pane.replaceChildren(
           el(`<div class="stack">
@@ -1733,6 +1785,24 @@ const viewMelt = (prefillPr?: string): void => {
     const go = body.querySelector('[data-meltgo]') as HTMLButtonElement
     go.addEventListener('click', () =>
       busy(go, async () => {
+        if (tab === 'move') {
+          const amount = Number((pane.querySelector('[data-amount]') as HTMLInputElement).value)
+          if (!Number.isSafeInteger(amount) || amount <= 0) throw new WalletUsageError('Give an amount in whole sats.')
+          const from = (pane.querySelector('[data-from]') as HTMLSelectElement).value
+          const to = (pane.querySelector('[data-to]') as HTMLSelectElement).value
+          toast(`Moving ${amount} sat from ${from} to ${to}…`)
+          const moved = await w.transfer(amount * 1000, from, to, {timeoutMs: 120_000, intervalMs: 1_800})
+          if (moved.ambiguous) {
+            toast('The melt may be in flight - the home screen settles what happened at both ends.', 'ok')
+          } else if (!moved.result) {
+            toast(`Melted at ${from}, but ${to} has not settled yet - the home screen claims it once it does.`, 'ok')
+          } else {
+            moved.result.warnings.forEach(warning => toast(warning, 'err'))
+            toast(`Moved ${sats(moved.melt.amountMsat)} sat from ${from} to ${to} - ${sats(moved.result.note.amountMsat)} sat landed.`, 'ok')
+          }
+          viewHome()
+          return
+        }
         let pr: string
         let target: string
         if (tab === 'invoice') {

@@ -56,6 +56,17 @@ describe('the web wallet', () => {
     await until(onHome, 'the home screen')
   })
 
+  it('opens Melt: a wallet with no mints gets no Move tab', async () => {
+    document.querySelector<HTMLButtonElement>('[data-go="melt"]')!.click()
+    await until(() => document.querySelector('[data-meltgo]') !== null, 'the melt screen')
+    const tabs = [...document.querySelectorAll<HTMLButtonElement>('[data-tab]')].map(b => b.dataset.tab)
+    expect(tabs).toContain('invoice')
+    expect(tabs).toContain('address')
+    expect(tabs).not.toContain('move')
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(onHome, 'the home screen')
+  })
+
   it('opens the signer pairing screen from settings and comes back', async () => {
     document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
     await until(
