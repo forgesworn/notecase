@@ -209,6 +209,17 @@ describe('the web wallet', () => {
     expect(shareTargetInput('')).toBeNull()
   })
 
+  it('offers a lightning address in settings, and says a mint is needed first', async () => {
+    document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
+    await until(() => button('Lock now') !== undefined, 'the settings screen')
+    expect(document.body.textContent).toContain('Lightning address')
+    // no mints yet, so the form says so rather than offering a price
+    expect(document.body.textContent).toContain('Add a mint first')
+    expect(document.querySelector('[data-name]')).not.toBeNull()
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(onHome, 'home')
+  })
+
   it('locks and unlocks with the PIN', async () => {
     document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
     await until(

@@ -1,6 +1,7 @@
 import {SimplePool, finalizeEvent, generateSecretKey, getEventHash, getPublicKey, verifyEvent, type Event, type Filter, type UnsignedEvent} from 'nostr-tools'
 import {nip19, nip44, nip59} from 'nostr-tools'
-import {bytesToHex, hexToBytes} from '@noble/hashes/utils.js'
+import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
+import {sha256} from '@noble/hashes/sha2.js'
 import {resolveNoteInput, noteK1, noteDeclaredAmount} from 'lnurlcash-kit'
 
 // Bearer notes over Nostr. A note is one string - the LUD-25 URL - so it
@@ -120,6 +121,55 @@ export const resolveRecipient = async (
 
 export const npubOf = (pubkeyHex: string): string => nip19.npubEncode(pubkeyHex)
 
+export const NIP98_KIND = 27235
+
+const base64 = (text: string): string => {
+  const bytes = utf8ToBytes(text)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+// A NIP-98 Authorization header: a signed statement that this key is
+// making this request to this URL with this body, and made it just now.
+// The mint reads the pubkey off it and needs no account of its own.
+export const nip98Header = (identity: NostrIdentity, url: string, method: string, body?: string): string => {
+  const tags: string[][] = [
+    ['u', url],
+    ['method', method.toUpperCase()]
+  ]
+  if (body !== undefined) tags.push(['payload', bytesToHex(sha256(utf8ToBytes(body)))])
+  const event = finalizeEvent(
+    {kind: NIP98_KIND, created_at: Math.floor(Date.now() / 1000), content: '', tags},
+    identity.secret
+  )
+  return `Nostr ${base64(JSON.stringify(event))}`
+}
+
+// What a zap said, when a note was minted by one. The mint carries the
+// payer's own kind 9734 alongside the note, so the wallet can show who
+// sent it and what they wrote rather than "a note arrived".
+export type ZapDetail = {senderPubkey: string; content: string; amountMsat: number}
+
+const zapFromDescription = (tags: string[][]): ZapDetail | null => {
+  const description = tags.find(tag => tag[0] === 'description')?.[1]
+  if (!description) return null
+  try {
+    const request = JSON.parse(description) as Event
+    // The payer signed this, not the mint. A mint that made one up would
+    // have to forge a signature, and this is where that gets caught.
+    if (request.kind !== 9734 || !verifyEvent(request)) return null
+    const amount = Number(request.tags.find(tag => tag[0] === 'amount')?.[1])
+    return {
+      senderPubkey: request.pubkey,
+      content: typeof request.content === 'string' ? request.content : '',
+      amountMsat: Number.isSafeInteger(amount) && amount > 0 ? amount : 0
+    }
+  } catch {
+    return null
+  }
+}
+
 export type NoteRumor = {noteUrl: string; amountMsat: number; host: string}
 
 const hostOf = (noteUrl: string): string => {
@@ -146,7 +196,10 @@ export class NotANoteWrapError extends Error {}
 // seal must verify, and the rumor must claim the seal's signer as author -
 // otherwise anyone could forge "this came from X". Same gates as the
 // signer's nip59::unwrap.
-export const unwrapNote = (wrap: Event, recipient: NostrIdentity): {note: NoteRumor; sender: string; rumorCreatedAt: number} => {
+export const unwrapNote = (
+  wrap: Event,
+  recipient: NostrIdentity
+): {note: NoteRumor; sender: string; rumorCreatedAt: number; zap: ZapDetail | null} => {
   if (wrap.kind !== GIFT_WRAP_KIND) throw new NotANoteWrapError('not a gift wrap')
   if (!verifyEvent(wrap)) throw new NotANoteWrapError('wrap signature does not verify')
   const seal = JSON.parse(nip44.decrypt(wrap.content, nip44.getConversationKey(recipient.secret, wrap.pubkey))) as Event
@@ -160,7 +213,12 @@ export const unwrapNote = (wrap: Event, recipient: NostrIdentity): {note: NoteRu
   const fromUrl = noteDeclaredAmount(noteUrl)
   const fromTag = Number(rumor.tags.find(t => t[0] === 'amount')?.[1])
   const amountMsat = fromUrl ?? (Number.isSafeInteger(fromTag) && fromTag > 0 ? fromTag : 0)
-  return {note: {noteUrl, amountMsat, host: hostOf(noteUrl)}, sender: seal.pubkey, rumorCreatedAt: rumor.created_at}
+  return {
+    note: {noteUrl, amountMsat, host: hostOf(noteUrl)},
+    sender: seal.pubkey,
+    rumorCreatedAt: rumor.created_at,
+    zap: zapFromDescription(rumor.tags)
+  }
 }
 
 // A pubkey's NIP-17 inbox relays. Empty when none are published: the

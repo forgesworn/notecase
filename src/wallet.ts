@@ -42,6 +42,7 @@ import {
   identityFromSecret,
   inboxRelayListEvent,
   inboxRelays,
+  nip98Header,
   newIdentitySecretHex,
   resolveRecipient,
   unwrapNote,
@@ -280,20 +281,26 @@ export class Wallet {
   // The mint's own discovery document, for the fields the client library
   // does not model yet. Only a mint in the directory can be asked: the
   // endpoint is derived from its pay URL, and a note URL carries none.
-  private async retiredKeysAt(host: string): Promise<string[]> {
+  private async discoveryDocument(host: string): Promise<{url: string; body: Record<string, unknown>} | null> {
     const entry = this.data.mints.find(mint => mint.host === host)
-    if (!entry) return []
+    if (!entry) return null
     const url = mintAddressUrl(entry.payUrl)
-    if (!url) return []
+    if (!url) return null
+    const fetchImpl = this.opts.fetch ?? fetch
+    const response = await fetchImpl(url, {
+      headers: {accept: 'application/json'},
+      signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
+    })
+    const body = (await response.json()) as Record<string, unknown>
+    return {url, body: body ?? {}}
+  }
+
+  private async retiredKeysAt(host: string): Promise<string[]> {
     try {
-      const fetchImpl = this.opts.fetch ?? fetch
-      const response = await fetchImpl(url, {
-        headers: {accept: 'application/json'},
-        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
-      })
-      const body = (await response.json()) as {previousPubkeys?: unknown}
-      if (!Array.isArray(body?.previousPubkeys)) return []
-      return body.previousPubkeys
+      const discovery = await this.discoveryDocument(host)
+      const list = discovery?.body.previousPubkeys
+      if (!Array.isArray(list)) return []
+      return list
         .filter((value): value is string => typeof value === 'string' && /^0[23][0-9a-f]{64}$/i.test(value))
         .map(value => value.toLowerCase())
     } catch {
@@ -1042,6 +1049,89 @@ export class Wallet {
     return {note, recipientHex, relays: result.ok, failed: result.failed, inboxKnown, wrapId: wrap.id}
   }
 
+  // ---- a lightning address at a mint ----
+
+  lightningAddress(): string | null {
+    return this.data.settings.lightningAddress ?? null
+  }
+
+  // What a mint charges for a name, or null if it does not sell them.
+  async namePriceMsat(mintHost?: string): Promise<number | null> {
+    const entry = this.mintEntry(mintHost)
+    const discovery = await this.discoveryDocument(entry.host)
+    const price = discovery?.body.namePriceMsat
+    return typeof price === 'number' && Number.isSafeInteger(price) && price >= 0 ? price : null
+  }
+
+  // Claims `name@host` at a mint. The mint takes a note of its own as
+  // payment and burns it, and the only identity involved is this wallet's
+  // Nostr key: the request is signed with it (NIP-98), so the name belongs
+  // to the key and payouts arrive sealed to it.
+  //
+  // The note is marked handed over BEFORE the request goes out, as every
+  // other hand-over is. A mint that refuses without taking it leaves a
+  // note this wallet can simply take back, and that is attempted here.
+  async registerName(options: {name: string; mintHost?: string}): Promise<{address: string; paidMsat: number}> {
+    const name = options.name.trim().toLowerCase()
+    if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(name)) {
+      throw new WalletUsageError(
+        'A name is 3 to 32 characters of lower-case letters, numbers, dot, dash or underscore, starting with a letter or number.'
+      )
+    }
+    const entry = this.mintEntry(options.mintHost)
+    const discovery = await this.discoveryDocument(entry.host)
+    if (!discovery) throw new WalletUsageError(`${entry.host} does not publish what it charges for a name.`)
+    const price = discovery.body.namePriceMsat
+    if (typeof price !== 'number' || !Number.isSafeInteger(price) || price < 0) {
+      throw new WalletUsageError(`${entry.host} is not handing out lightning addresses.`)
+    }
+    const identity = await this.ensureNostrIdentity()
+
+    const note = price > 0 ? await this.prepareExact(price, entry.host) : null
+    if (note) {
+      note.sentTo = entry.host
+      this.touch(note, 'sent')
+      await this.persist()
+    }
+
+    const url = new URL('/names', discovery.url).toString()
+    const body = JSON.stringify({name, ...(note ? {note: this.noteUrlFor(note)} : {})})
+    let answer: {status?: string; reason?: string} = {}
+    try {
+      const fetchImpl = this.opts.fetch ?? fetch
+      const response = await fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: nip98Header(identity, url, 'POST', body)
+        },
+        body,
+        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
+      })
+      answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string}
+      if (!response.ok || answer.status === 'ERROR') {
+        throw new WalletUsageError(answer.reason ?? `${entry.host} refused the name (${response.status}).`)
+      }
+    } catch (err) {
+      // The mint did not take the name. If it did not take the note
+      // either, this brings it home under a fresh secret; if it did, the
+      // note stays listed as handed over and `reclaim` says so later.
+      if (note) {
+        try {
+          await this.reclaim(note)
+        } catch {
+          // left as sent on purpose - only the mint can settle it now
+        }
+      }
+      throw err
+    }
+
+    if (note) await this.markTaken(note)
+    this.data.settings.lightningAddress = `${name}@${entry.host}`
+    await this.persist()
+    return {address: this.data.settings.lightningAddress, paidMsat: note?.amountMsat ?? 0}
+  }
+
   // ---- a heartwood signer as a note locker ----
 
   heartwoodLink(): HeartwoodLink | null {
@@ -1234,6 +1324,7 @@ export class Wallet {
       try {
         const result = await this.receive(opened.note.noteUrl)
         result.note.receivedFrom = opened.sender
+        if (opened.zap) result.note.zap = opened.zap
         seen.add(wrap.id)
         received.push(result)
       } catch (err) {

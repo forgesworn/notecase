@@ -133,6 +133,8 @@ notecase mint 21                       # pay via NWC if set, else an invoice to 
 notecase balance
 notecase send 8                        # prints a bearer note URL + LNURL
 notecase send 8 --to npub1...          # seals it to their key, leaves it on their inbox relays
+notecase address claim donkey          # a lightning address at your mint, paid for with a note
+notecase address                       # what it is
 notecase inbox                         # opens what was sent to your npub, claims it at once
 notecase reclaim                       # takes back anything sent but not yet claimed
 notecase receive                       # prompts for the note, rotates it in
@@ -200,6 +202,25 @@ first, reconcile says so and files the note as spent.
 
 Offline mode is asked for and never inferred from connectivity: in the
 web wallet it is a switch in the header, and on the CLI it is `--offline`.
+
+### A lightning address
+
+`notecase address claim <name>` takes `name@mint.example` at a mint that
+hands them out. The mint charges for it in its own notes, so the wallet
+cuts one out of your balance and the mint burns it; where the price is
+zero, nothing is cut at all. The only identity involved is this wallet's
+Nostr key: the request is signed with it (NIP-98), the name belongs to the
+key, and there is no account anywhere.
+
+What arrives at the address is a bearer note sealed to that same key, so
+it is yours seconds after it is paid and the mint holds it for no longer
+than that. `notecase inbox` opens what has come in. A note that arrived as
+a zap carries the payer's own signed request with it, so the wallet can
+show who sent it and what they wrote - and it checks that signature, so a
+mint cannot invent a sender.
+
+If the mint refuses the name, the note that was going to pay for it comes
+straight home under a fresh secret.
 
 ### Notes on a tag
 
@@ -280,6 +301,9 @@ vite + anime.js) around the same engine - live at
   says exactly why; taking it anyway needs two deliberate taps.
 - Send to an npub, and an inbox check that opens and claims what was sent
   to yours; the wallet's Nostr identity and inbox relays live in settings.
+- Settings → Lightning address: pick a mint, see what it charges, claim
+  the name; the home screen then shows the address with a copy button, and
+  history shows who zapped it and what they wrote.
 - Camera QR scanning (BarcodeDetector, jsQR fallback) with one universal
   scan button that classifies notes, invoices and mint addresses itself.
 - History derived from the wallet's own records - nothing logged twice.

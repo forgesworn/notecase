@@ -1039,6 +1039,14 @@ const viewHome = (): void => {
       }
     }
 
+    const address = w.lightningAddress()
+    if (address) {
+      const chip = el(`<button class="chip" data-address style="margin-top:6px"><span></span><b>copy</b></button>`)
+      chip.querySelector('span')!.textContent = address
+      chip.addEventListener('click', () => void copyText(address, 'Your lightning address'))
+      sub.append(chip)
+    }
+
     const unrotated = w.unrotatedMsat()
     if (unrotated > 0) {
       sub.append(el(`<span class="fineline" style="margin-top:6px">of which ${sats(unrotated)} sat taken offline, not rotated yet</span>`))
@@ -1212,6 +1220,17 @@ const viewNote = (note: NoteRecord): void => {
     ledger.querySelector('.kv code')!.textContent = `${note.id.slice(0, 16)}…`
     if (note.sentTo) ledger.append(el(`<div class="kv"><span>sealed to</span><b>${esc(shortNpub(note.sentTo))}</b></div>`))
     if (note.receivedFrom) ledger.append(el(`<div class="kv"><span>from</span><b>${esc(shortNpub(note.receivedFrom))}</b></div>`))
+    if (note.zap) {
+      const zapper = el('<div class="kv"><span>zap from</span><b></b></div>')
+      zapper.querySelector('b')!.textContent = shortNpub(note.zap.senderPubkey)
+      ledger.append(zapper)
+      if (note.zap.content) {
+        // a stranger's words: text, never markup
+        const said = el('<div class="kv"><span>they wrote</span><b></b></div>')
+        said.querySelector('b')!.textContent = note.zap.content
+        ledger.append(said)
+      }
+    }
     body.append(ledger)
     view.append(body)
 
@@ -1274,7 +1293,17 @@ const historyEvents = (w: Wallet): HistoryEvent[] => {
       events.push({at: note.createdAt, icon: icons.mint, text: `Minted ${sats(note.amountMsat)} sat at ${note.mintHost}.`, kind: 'in'})
     }
     if (note.origin === 'receive') {
-      events.push({at: note.createdAt, icon: icons.receive, text: `Received ${sats(note.amountMsat)} sat (${note.mintHost}).`, kind: 'in'})
+      events.push(
+        note.zap
+          ? {
+              at: note.createdAt,
+              icon: icons.bolt,
+              // who and what they wrote, off the payer's own signed request
+              text: `Zap of ${sats(note.amountMsat)} sat from ${shortNpub(note.zap.senderPubkey)}${note.zap.content ? `: ${note.zap.content}` : ''}`,
+              kind: 'in'
+            }
+          : {at: note.createdAt, icon: icons.receive, text: `Received ${sats(note.amountMsat)} sat (${note.mintHost}).`, kind: 'in'}
+      )
     }
     if (note.origin === 'recovered') {
       events.push({at: note.createdAt, icon: icons.undo, text: `${sats(note.amountMsat)} sat came back after a failed melt.`, kind: 'in'})
@@ -2581,6 +2610,78 @@ const viewSettings = (): void => {
     )
     nostr.append(publish)
     body.append(nostr)
+
+    // lightning address
+    const address = el(`<div class="card"><h3>Lightning address</h3>
+      <p class="warn" style="text-align:left;padding-top:12px">An address anyone can pay from any Lightning wallet. What arrives is a note sealed to this wallet's Nostr key, so it is yours seconds after it is paid, and the mint holds it for no longer than that.</p>
+    </div>`)
+    const claimed = w.lightningAddress()
+    if (claimed) {
+      const row = el(`<div class="kv"><span>yours</span><b></b></div>`)
+      row.querySelector('b')!.textContent = claimed
+      address.append(row)
+      const copyAddress = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy address</span></button>`)
+      copyAddress.addEventListener('click', () => void copyText(claimed, 'Your lightning address'))
+      address.append(copyAddress)
+    } else {
+      const form = el(`<div class="stack" style="padding-top:14px">
+        <div class="field">
+          <label>The name you want <span class="fineline">letters, numbers, dot, dash or underscore</span></label>
+          <input data-name type="text" placeholder="yourname" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="field" data-mintfield>
+          <label>At which mint</label>
+          <select data-mintpick></select>
+        </div>
+        <div data-price class="stack" style="gap:12px"></div>
+        <button class="btn" data-price-check>${icons.bolt}<span>What does it cost?</span></button>
+      </div>`)
+      const picker = form.querySelector('[data-mintpick]') as HTMLSelectElement
+      for (const mint of w.data.mints) {
+        const option = document.createElement('option')
+        option.value = mint.host
+        option.textContent = mint.host
+        if (mint.host === w.data.settings.defaultMintHost) option.selected = true
+        picker.append(option)
+      }
+      if (!w.data.mints.length) {
+        form.querySelector('[data-mintfield]')!.remove()
+        form.querySelector('[data-price-check]')!.replaceWith(
+          el('<p class="warn" style="text-align:left">Add a mint first, then come back.</p>')
+        )
+      }
+      const priceArea = form.querySelector('[data-price]') as HTMLElement
+      const ask = form.querySelector('[data-price-check]') as HTMLButtonElement | null
+      ask?.addEventListener('click', () =>
+        busy(ask, async () => {
+          priceArea.replaceChildren()
+          const wanted = (form.querySelector('[data-name]') as HTMLInputElement).value.trim()
+          if (!wanted) throw new WalletUsageError('Pick a name first.')
+          const host = picker.value
+          const price = await w.namePriceMsat(host)
+          if (price === null) {
+            priceArea.append(el(`<p class="warn" style="text-align:left">That mint is not handing out addresses.</p>`))
+            return
+          }
+          const cost = el('<p class="warn" style="text-align:left"></p>')
+          cost.textContent =
+            price > 0
+              ? `${wanted}@${host} costs ${sats(price)} sat, paid with one of that mint's own notes out of your balance.`
+              : `${wanted}@${host} is free at that mint.`
+          const confirm = el(`<button class="btn btn-silver">${icons.check}<span>${price > 0 ? `Claim it for ${sats(price)} sat` : 'Claim it'}</span></button>`)
+          confirm.addEventListener('click', () =>
+            busy(confirm as HTMLButtonElement, async () => {
+              const got = await w.registerName({name: wanted, mintHost: host})
+              toast(`${got.address} is yours. Anyone can pay you at it now.`, 'ok')
+              viewSettings()
+            })
+          )
+          priceArea.append(cost, confirm)
+        })
+      )
+      address.append(form)
+    }
+    body.append(address)
 
     // backup
     const backup = el(`<div class="card"><h3>Backup</h3>

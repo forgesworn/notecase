@@ -45,6 +45,9 @@ export type NoteRecord = {
   // Handed over offline. No mint saw it happen, so nothing confirms the
   // recipient took it until a check sweep or a reclaim asks.
   sentOffline?: boolean
+  // What a zap said, when this note was minted by one: who sent it and
+  // what they wrote, off the payer's own signed request.
+  zap?: {senderPubkey: string; content: string; amountMsat: number}
   // Why this record is in the state it is, when the state alone does not
   // say. Set by the check sweep when a mint disowns a note: 'spent' is the
   // safe filing, but "the mint has never heard of it" is a different story
@@ -133,6 +136,9 @@ export type WalletData = {
     // Wrap ids already opened or refused, so a relay replay is idle.
     nostrSeenWrapIds?: string[]
     nostrLastCheck?: number
+    // A lightning address claimed at a mint, as name@host. Payments to it
+    // arrive as notes sealed to this wallet's Nostr key.
+    lightningAddress?: string
     // A paired heartwood signer holding notes of its own (heartwood.ts).
     // The client key is what the device bound; the store guards it.
     heartwood?: {uri: string; devicePubkey: string; relays: string[]; clientSecretHex: string}
