@@ -50,7 +50,7 @@ export const poolTransport = (): NostrTransport => {
       )
       return {ok, failed}
     },
-    close: () => pool.close([])
+    close: () => pool.destroy()
   }
 }
 
