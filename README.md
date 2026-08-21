@@ -107,7 +107,10 @@ its own notes so the secret never leaves the chip. `heartwood collect`
 brings received notes here and rotates them, because the device cannot.
 `heartwood inbox` publishes the device's kind 10050 in its own name, signed
 on the device; without it nobody who resolves its npub knows where to
-leave a note.
+leave a note. `heartwood trust <npub>` names a sender (a mint's zap key)
+whose notes the device stores without a hold. The web wallet has the same
+under Settings → Hardware signer: pair by bunker URI or QR, collect, trust,
+publish.
 
 Amounts are sats (`--msat` for precision). The PIN comes from the prompt
 or `$NOTECASE_PIN`. `NOTECASE_HOME` moves the store; `NOTECASE_ALLOW_PRIVATE=1`
