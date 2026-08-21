@@ -976,10 +976,10 @@ const viewLocked = async (): Promise<void> => {
 // ---------- home ----------
 
 const signedOk = (w: Wallet, note: NoteRecord): boolean => {
-  const pinned = w.data.pubkeyPins[note.mintHost]
-  return Boolean(
-    note.signature && pinned && verifyNoteSignature(note.k1, note.amountMsat, note.signature, pinned)
-  )
+  if (!note.signature) return false
+  const keys = [w.data.pubkeyPins[note.mintHost], ...w.pubkeyHistoryFor(note.mintHost)]
+  // a key the mint has since retired still proves where the note came from
+  return keys.some(key => Boolean(key) && verifyNoteSignature(note.k1, note.amountMsat, note.signature!, key!))
 }
 
 const noteRow = (w: Wallet, note: NoteRecord): HTMLElement => {
@@ -2263,6 +2263,11 @@ const viewMints = (prefillAdd?: string): void => {
             : 'none advertised'
         }</b></div>
         <div class="kv"><span>key pinned</span>${pin ? '<code></code>' : '<b>not yet - first receive pins it</b>'}</div>
+        ${
+          entry.keyRotatedAt
+            ? `<div class="kv"><span>signing key</span><b>rotated on ${when(entry.keyRotatedAt)} · ${w.pubkeyHistoryFor(entry.host).length} old key(s) kept so older notes still verify</b></div>`
+            : ''
+        }
         ${isDefault ? `<div class="kv"><span>default</span><b>new mints and sends start here</b></div>` : ''}
       </div>`)
       // host and pin are persisted strings: text, never markup
@@ -2349,7 +2354,11 @@ const viewCheck = (): void => {
     const paint = (found: CheckReport, applied: boolean): void => {
       report.replaceChildren()
       const changes =
-        found.spent.length + found.unknown.length + found.pending.length + found.valueChanged.length
+        found.spent.length +
+        found.unknown.length +
+        found.pending.length +
+        found.valueChanged.length +
+        found.staleSignature.length
 
       const summary = el(`<div class="card">
         <h3>${applied ? 'Written down' : 'What the mints said'}</h3>
@@ -2387,6 +2396,25 @@ const viewCheck = (): void => {
         }
         report.append(card)
       }
+      if (found.staleSignature.length) {
+        const card = el(`<div class="card"><h3>Signed with an old key</h3>
+          <p class="warn" style="text-align:left;padding-top:12px">This mint has rotated its signing key since these were made. They are still good, and re-signing them under the current key costs nothing.</p></div>`)
+        found.staleSignature.forEach(note => card.append(noteLine(note)))
+        const resign = el(`<button class="btn btn-ghost">${icons.shield}<span>Re-sign them</span></button>`)
+        resign.addEventListener('click', () =>
+          busy(resign as HTMLButtonElement, async () => {
+            let done = 0
+            for (const note of found.staleSignature) {
+              await w.rotateLive(note)
+              done += 1
+            }
+            toast(`Re-signed ${done} note${done === 1 ? '' : 's'} under the current key.`, 'ok')
+            paint(await w.checkNotes(), applied)
+          })
+        )
+        card.append(resign)
+        report.append(card)
+      }
       if (found.unreachable.length) {
         const card = el(`<div class="card"><h3>Did not answer</h3>
           <p class="warn" style="text-align:left;padding-top:12px">These mints were not reachable, so their notes were left exactly as they are. Try again later.</p></div>`)
@@ -2404,6 +2432,11 @@ const viewCheck = (): void => {
         return
       }
       if (applied) return
+      // A stale signature is not something Apply writes down: it has its
+      // own button, on its own card.
+      const applyable =
+        found.spent.length + found.unknown.length + found.pending.length + found.valueChanged.length
+      if (applyable === 0) return
 
       const apply = el(`<button class="btn btn-silver">${icons.check}<span>Apply what the mints said</span></button>`)
       apply.addEventListener('click', () =>

@@ -48,6 +48,17 @@ A bearer note is lost the moment its secret exists nowhere durable. So:
   sender - or anyone who saw the mint invoice - still knows the old secret.
 - **Never print a k1** unless you asked to send. Balances, lists and logs
   show note ids (hashes) only.
+- **A pin can move, but only where the mint says so.** A mint's signing
+  key is pinned on first contact and a change is refused - unless the mint
+  itself already publishes the old key as retired on its discovery
+  endpoint, in which case the old key moves to a kept history, the new one
+  is pinned, and the change is reported rather than thrown. That is not
+  much of a proof, and it is not meant to be: whoever controls the host
+  controls the pin either way, which is trust-on-first-use's own argument.
+  What the history buys is that a mint doing the right thing stops looking
+  exactly like an attack, which is what teaches people to click through
+  warnings. Notes signed by a retired key keep verifying, and
+  `notecase check --resign` rotates them under the current key for nothing.
 - **A signature that fails is a refusal.** A note carrying a `sig` that
   does not verify against the key pinned for its mint is rejected before
   any record is written: the amount may have been altered, or the note may
@@ -127,6 +138,7 @@ notecase reclaim                       # takes back anything sent but not yet cl
 notecase receive                       # prompts for the note, rotates it in
 notecase check                         # asks every mint whether your notes are still good
 notecase check --apply                 # and writes down what it found
+notecase check --resign                # re-signs notes under a mint's new key
 notecase ladder                        # the cash drawer at your mint, and what it still wants
 notecase ladder set 100,500,1000 --copies 2
 notecase prepare --apply               # cuts the small notes an offline payment needs

@@ -111,6 +111,11 @@ export type MintEntry = {
   // mint; a ladder is how it keeps change in its pocket.
   ladder?: number[]
   ladderCopies?: number
+  // When this mint was seen to rotate its signing key, and whether that
+  // has been reported once. A rotation is noticed during a receive, and
+  // the holder deserves to hear about it from the next reconcile.
+  keyRotatedAt?: number
+  keyRotationReported?: boolean
   addedAt: number
 }
 
@@ -133,9 +138,12 @@ export type WalletData = {
     heartwood?: {uri: string; devicePubkey: string; relays: string[]; clientSecretHex: string}
   }
   mints: MintEntry[]
-  // Trust-on-first-use pins: mint host -> the mintPubkey first observed
-  // there. A later mismatch is surfaced hard, never silently accepted.
+  // Trust-on-first-use pins: mint host -> the mintPubkey currently in use
+  // there. A later mismatch is surfaced hard unless the mint itself
+  // publishes the old key as retired, in which case the old one moves to
+  // the history below and older notes keep verifying against it.
   pubkeyPins: Record<string, string>
+  pubkeyHistory?: Record<string, string[]>
   notes: NoteRecord[]
   pendingMints: PendingMint[]
   melts: MeltRecord[]
@@ -146,6 +154,7 @@ export const emptyWallet = (): WalletData => ({
   settings: {},
   mints: [],
   pubkeyPins: {},
+  pubkeyHistory: {},
   notes: [],
   pendingMints: [],
   melts: []
