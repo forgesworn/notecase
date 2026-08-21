@@ -138,6 +138,26 @@ describe('transfer between two mints', () => {
     expect(moved.melt.amountMsat).toBe(50_000)
   })
 
+  it('leaves no pending mint behind when the source cannot pay', async () => {
+    let destination: Mint | null = null
+    const source = await startMint({}, peeredWith(() => destination))
+    destination = await startMint()
+
+    const wallet = makeWallet()
+    await wallet.wallet.addMint(source.address)
+    await wallet.wallet.addMint(destination.address)
+
+    // Nothing at the source, so the melt refuses definitively and burns
+    // nothing. The invoice we asked the destination for can then never be
+    // paid, and a pending mint left 'awaiting' would make the wallet
+    // report an unresolved outcome that reconcile has no answer for.
+    await expect(
+      wallet.wallet.transfer(10_000, source.host, destination.host)
+    ).rejects.toThrow()
+    expect(wallet.data.pendingMints).toEqual([])
+    expect(wallet.wallet.needsReconcile()).toBe(false)
+  })
+
   it('refuses a transfer to the mint it came from', async () => {
     const only = await startMint()
     const wallet = makeWallet()

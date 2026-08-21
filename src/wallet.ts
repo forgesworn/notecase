@@ -821,7 +821,21 @@ export class Wallet {
       )
     }
 
-    const {melt, ambiguous} = await this.melt(pending.pr, `mint@${to.host}`, from.host)
+    let melt: MeltRecord
+    let ambiguous: boolean
+    try {
+      ;({melt, ambiguous} = await this.melt(pending.pr, `mint@${to.host}`, from.host))
+    } catch (err) {
+      // A definitive refusal means melt() burned nothing and the source
+      // note is untouched, so the invoice we just asked the destination
+      // for will never be paid. Drop it rather than leave a pending mint
+      // sitting 'awaiting' forever: it cannot resolve, and it makes the
+      // wallet report unresolved outcomes that reconcile has no answer
+      // for. An ambiguous melt is the opposite case and keeps its pending.
+      this.data.pendingMints = this.data.pendingMints.filter(record => record !== pending)
+      await this.persist()
+      throw err
+    }
     if (ambiguous) return {pending, melt, fee, result: null, ambiguous: true}
 
     const result = await this.awaitMint(pending, options)
