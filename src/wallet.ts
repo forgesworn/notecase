@@ -26,6 +26,7 @@ import {
   splitNoteWithHash,
   fromLud17,
   lightningAddressUsername,
+  mintAddressUrl,
   verifyNoteSignature,
   withNewK1,
   type LnurlcashOptions,
@@ -80,6 +81,9 @@ export type CheckReport = {
   pending: NoteRecord[]
   valueChanged: Array<{note: NoteRecord; amountMsat: number}>
   unreachable: string[]
+  // Notes signed by a key their mint has since retired. Still good, and a
+  // rotate re-signs them under the current key at no cost.
+  staleSignature: NoteRecord[]
 }
 
 // How many notes at one mint are asked about at a time. Enough to make a
@@ -251,17 +255,90 @@ export class Wallet {
     await this.persist()
   }
 
-  // Trust on first use. A changed key is surfaced hard: it is either a mint
-  // rotating its identity or something standing between the wallet and it.
-  private pinPubkey(host: string, observed: string | undefined): void {
-    if (!observed) return
+  // Keys this mint used to sign with and has since retired. Old notes stay
+  // verifiable against them; nothing new is ever accepted on one.
+  pubkeyHistoryFor(host: string): string[] {
+    return this.data.pubkeyHistory?.[host] ?? []
+  }
+
+  // Whether a signature on a note from this mint checks out against any key
+  // the wallet knows the mint to have used, and which one it was.
+  private verifyAgainstKnownKeys(
+    host: string,
+    k1: string,
+    amountMsat: number,
+    signature: string
+  ): {valid: boolean; historic: boolean} {
     const pinned = this.data.pubkeyPins[host]
-    if (pinned && pinned !== observed) {
+    if (pinned && verifyNoteSignature(k1, amountMsat, signature, pinned)) return {valid: true, historic: false}
+    for (const retired of this.pubkeyHistoryFor(host)) {
+      if (verifyNoteSignature(k1, amountMsat, signature, retired)) return {valid: true, historic: true}
+    }
+    return {valid: false, historic: false}
+  }
+
+  // The mint's own discovery document, for the fields the client library
+  // does not model yet. Only a mint in the directory can be asked: the
+  // endpoint is derived from its pay URL, and a note URL carries none.
+  private async retiredKeysAt(host: string): Promise<string[]> {
+    const entry = this.data.mints.find(mint => mint.host === host)
+    if (!entry) return []
+    const url = mintAddressUrl(entry.payUrl)
+    if (!url) return []
+    try {
+      const fetchImpl = this.opts.fetch ?? fetch
+      const response = await fetchImpl(url, {
+        headers: {accept: 'application/json'},
+        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
+      })
+      const body = (await response.json()) as {previousPubkeys?: unknown}
+      if (!Array.isArray(body?.previousPubkeys)) return []
+      return body.previousPubkeys
+        .filter((value): value is string => typeof value === 'string' && /^0[23][0-9a-f]{64}$/i.test(value))
+        .map(value => value.toLowerCase())
+    } catch {
+      // A mint that cannot be asked has said nothing, and silence is not
+      // permission: the caller falls through to the mismatch.
+      return []
+    }
+  }
+
+  // Trust on first use, with one door in it.
+  //
+  // A changed key is either the mint rotating its own signing key or
+  // something standing between the wallet and the mint - and from the note
+  // alone those look identical. The door is that the MINT must already
+  // have published the old key as retired on its own discovery endpoint.
+  // That is not much of a proof, and it is not meant to be: whoever
+  // controls the host controls the pin either way, which is TOFU's own
+  // argument. What the history buys is that a mint doing the right thing -
+  // rotating a key and saying so - stops looking exactly like an attack,
+  // which is the thing that makes holders click through warnings.
+  private async pinPubkey(host: string, observed: string | undefined): Promise<{rotated: boolean}> {
+    if (!observed) return {rotated: false}
+    const pinned = this.data.pubkeyPins[host]
+    if (!pinned) {
+      this.data.pubkeyPins[host] = observed
+      return {rotated: false}
+    }
+    if (pinned === observed) return {rotated: false}
+    const retired = await this.retiredKeysAt(host)
+    if (!retired.includes(pinned.toLowerCase())) {
       throw new PinMismatchError(
         `${host} now presents mint pubkey ${observed.slice(0, 16)}… but was pinned to ${pinned.slice(0, 16)}…`
       )
     }
-    if (!pinned) this.data.pubkeyPins[host] = observed
+    this.data.pubkeyHistory ??= {}
+    const history = this.data.pubkeyHistory[host] ?? []
+    if (!history.includes(pinned)) history.push(pinned)
+    this.data.pubkeyHistory[host] = history
+    this.data.pubkeyPins[host] = observed
+    const entry = this.data.mints.find(mint => mint.host === host)
+    if (entry) {
+      entry.keyRotatedAt = now()
+      entry.keyRotationReported = false
+    }
+    return {rotated: true}
   }
 
   // ---- the staging engine ----
@@ -432,7 +509,12 @@ export class Wallet {
       return `${parsed.origin}${parsed.pathname}`
     })()
     const mintHost = serverOf(baseUrl)
-    this.pinPubkey(mintHost, info.mintPubkey)
+    const pin = await this.pinPubkey(mintHost, info.mintPubkey)
+    if (pin.rotated) {
+      warnings.push(
+        `${mintHost} has rotated its signing key and says so - the old key is kept, so notes it signed still verify`
+      )
+    }
 
     const declared = noteDeclaredAmount(url)
     if (declared !== null && declared !== info.maxWithdrawable) {
@@ -448,7 +530,7 @@ export class Wallet {
     // above: the mint's number is authoritative either way.
     const signature = noteSignature(url)
     const pinned = this.data.pubkeyPins[mintHost]
-    if (signature && pinned && !verifyNoteSignature(k1, info.maxWithdrawable, signature, pinned)) {
+    if (signature && pinned && !this.verifyAgainstKnownKeys(mintHost, k1, info.maxWithdrawable, signature).valid) {
       if (!options.acceptBadSignature) {
         throw new BadSignatureError(
           `the signature on this note does not verify against the key pinned for ${mintHost} - the note may have been altered, or it may not come from that mint`
@@ -861,9 +943,9 @@ export class Wallet {
         'A note taken offline has to carry both its amount and the mint\'s signature, and this one does not. Take it while you have a connection instead.'
       )
     }
-    if (!verifyNoteSignature(k1, declared, signature, pinned)) {
+    if (!this.verifyAgainstKnownKeys(mintHost, k1, declared, signature).valid) {
       throw new BadSignatureError(
-        `the signature on this note does not verify against the key pinned for ${mintHost} - the note may have been altered, or it may not come from that mint`
+        `the signature on this note does not verify against any key ${mintHost} is known to sign with - the note may have been altered, or it may not come from that mint`
       )
     }
     if (this.data.notes.some(note => note.id === hashK1(k1) && note.state !== 'spent' && note.state !== 'sent')) {
@@ -1539,6 +1621,17 @@ export class Wallet {
       }
     }
 
+    // A mint that rotated its signing key and published the old one as
+    // retired. Nothing to fix, but the holder should hear it once.
+    for (const entry of this.data.mints) {
+      if (!entry.keyRotatedAt || entry.keyRotationReported) continue
+      entry.keyRotationReported = true
+      events.push({
+        kind: 'mint-key-rotated',
+        detail: `${entry.host} rotated its signing key on ${new Date(entry.keyRotatedAt).toISOString().slice(0, 10)} - the old one is kept, so notes it signed still verify`
+      })
+    }
+
     // Notes taken offline on a signature alone. The person who handed one
     // over still knows its secret, so the first thing a connection is good
     // for is rotating it out from under them.
@@ -1599,7 +1692,15 @@ export class Wallet {
   // A dry run by default: the report is the whole point, and marking money
   // spent is the caller's decision to take with it in front of them.
   async checkNotes(options: {apply?: boolean; mintHost?: string} = {}): Promise<CheckReport> {
-    const report: CheckReport = {checked: 0, spent: [], unknown: [], pending: [], valueChanged: [], unreachable: []}
+    const report: CheckReport = {
+      checked: 0,
+      spent: [],
+      unknown: [],
+      pending: [],
+      valueChanged: [],
+      unreachable: [],
+      staleSignature: []
+    }
 
     const byHost = new Map<string, NoteRecord[]>()
     for (const note of this.checkableNotes(options.mintHost)) {
@@ -1611,12 +1712,20 @@ export class Wallet {
       // answered. A mint that goes quiet halfway through has told us
       // nothing about the notes it did not answer for, and a partial
       // sweep must never look like a complete one.
-      const found: Omit<CheckReport, 'unreachable'> = {
+      const found: Omit<CheckReport, 'unreachable' | 'staleSignature'> = {
         checked: 0,
         spent: [],
         unknown: [],
         pending: [],
         valueChanged: []
+      }
+      // Purely local, and worth knowing whether the mint answers or not:
+      // a note still signed by a key this mint has retired.
+      for (const note of notes) {
+        if (!note.signature) continue
+        if (this.verifyAgainstKnownKeys(host, note.k1, note.amountMsat, note.signature).historic) {
+          report.staleSignature.push(note)
+        }
       }
       let reachable = true
       let next = 0
@@ -1698,9 +1807,16 @@ export class Wallet {
     const host = serverOf(url)
     const pinned = this.data.pubkeyPins[host]
     if (!pinned) return {valid: false, reason: `no pinned mint pubkey for ${host} - receive from it once first`}
-    return verifyNoteSignature(k1, amount, signature, pinned)
-      ? {valid: true, reason: `signed by the pinned key for ${host}`}
-      : {valid: false, reason: 'the signature does not verify against the pinned mint pubkey'}
+    const verdict = this.verifyAgainstKnownKeys(host, k1, amount, signature)
+    if (!verdict.valid) {
+      return {valid: false, reason: `the signature does not verify against any key ${host} is known to sign with`}
+    }
+    return {
+      valid: true,
+      reason: verdict.historic
+        ? `signed by a key ${host} has since retired - still good, and a rotate re-signs it under the current one`
+        : `signed by the pinned key for ${host}`
+    }
   }
 
   mintUsername(entry: MintEntry): string {

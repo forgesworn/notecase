@@ -28,9 +28,12 @@ Draft spec: https://github.com/lnurl/luds/pull/301
    (or anyone who saw the invoice) still knows the old secret.
 5. maxWithdrawable from the informational GET is the note's value; the
    URL's amount parameter is an unverified claim.
-6. Pin mint pubkeys on first use; refuse hard on a change. A `sig` that
-   does not verify against the pin is a REFUSAL (BadSignatureError), not a
-   warning - overridable only per receive. No `sig` at all is a warning.
+6. Pin mint pubkeys on first use; refuse hard on a change, UNLESS the
+   mint's own discovery lists the pinned key in `previousPubkeys` - then
+   retire the old key to a kept history, pin the new one, and report it.
+   Verification accepts the pin or any retired key. A `sig` that verifies
+   against none of them is a REFUSAL (BadSignatureError), not a warning -
+   overridable only per receive. No `sig` at all is a warning.
 7. Verify NWC payments by preimage against the invoice's payment hash -
    a successful-looking response is not evidence money moved.
 8. Never print, log or echo a k1 except on explicit send/export.
@@ -48,7 +51,7 @@ notecase init [--insecure-plaintext]
 notecase mints add <address|lnurl> / list / use <host>
 notecase mint <sats> [--manual] [--mint <host>]
 notecase receive <note> [--force] | send <sats> | melt <bolt11 | sats --to <addr> | sats --to-nwc>
-notecase check [--apply] [--mint <host>]
+notecase check [--apply] [--resign] [--mint <host>]
 notecase ladder [set <sats,...>] [--copies n] | prepare [--apply]
 notecase send <sats> --offline [--overpay] | receive --offline
 notecase balance | list [--all] | reconcile | verify <note>

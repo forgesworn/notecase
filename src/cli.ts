@@ -22,7 +22,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase list [--all]
   notecase mint <sats> [--mint <host>] [--manual] [--wait <seconds>]
   notecase receive [note] [--force] [--offline]
-  notecase check [--apply] [--mint <host>]
+  notecase check [--apply] [--resign] [--mint <host>]
   notecase ladder [set <sats,sats,...>] [--copies <n>] [--mint <host>]
   notecase prepare [--apply] [--mint <host>]
   notecase send <sats> [--mint <host>] [--offline] [--overpay]
@@ -139,6 +139,7 @@ const main = async (): Promise<void> => {
       all: {type: 'boolean', default: false},
       apply: {type: 'boolean', default: false},
       force: {type: 'boolean', default: false},
+      resign: {type: 'boolean', default: false},
       offline: {type: 'boolean', default: false},
       overpay: {type: 'boolean', default: false},
       copies: {type: 'string'},
@@ -178,6 +179,12 @@ const main = async (): Promise<void> => {
           const marker = mint.host === store.data.settings.defaultMintHost ? '*' : ' '
           const pin = store.data.pubkeyPins[mint.host]
           console.log(`${marker} ${mint.host}${mint.label ? ` (${mint.label})` : ''}${pin ? ` pinned ${pin.slice(0, 16)}…` : ''}`)
+          if (mint.keyRotatedAt) {
+            const retired = wallet.pubkeyHistoryFor(mint.host).length
+            console.log(
+              `    signing key rotated on ${new Date(mint.keyRotatedAt).toISOString().slice(0, 10)}; ${retired} retired key${retired === 1 ? '' : 's'} kept so older notes still verify`
+            )
+          }
         }
         if (store.data.mints.length === 0) console.log('No mints yet - `notecase mints add <address>`.')
       } else if (sub === 'use' && arg) {
@@ -282,8 +289,27 @@ const main = async (): Promise<void> => {
       for (const host of report.unreachable) {
         console.log(`  ${host} did not answer - its notes were left alone.`)
       }
+      if (report.staleSignature.length) {
+        console.log(
+          `  signed by a key the mint has retired: ${report.staleSignature.length}${values.resign ? '' : ' - `notecase check --resign` re-signs them, which costs nothing'}`
+        )
+        if (values.resign) {
+          for (const note of report.staleSignature) {
+            try {
+              const fresh = await wallet.rotateLive(note)
+              console.log(`    re-signed ${shortId(note)} -> ${shortId(fresh)}`)
+            } catch (err) {
+              console.log(`    ${shortId(note)} could not be re-signed: ${(err as Error).message}`)
+            }
+          }
+        }
+      }
       const findings =
-        report.spent.length + report.unknown.length + report.pending.length + report.valueChanged.length
+        report.spent.length +
+        report.unknown.length +
+        report.pending.length +
+        report.valueChanged.length +
+        report.staleSignature.length
       if (findings === 0 && report.unreachable.length === 0) console.log('Everything is where you left it.')
       else if (!values.apply && findings > 0) console.log('Run `notecase check --apply` to write this down.')
       // Asking costs nothing away: the mint issued these notes to this

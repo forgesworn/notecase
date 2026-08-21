@@ -6,6 +6,21 @@ While LUD-25 is a draft, a `0.x` minor bump may be breaking. This one is:
 `receive` now refuses a note whose signature does not verify, where it
 used to warn and take it.
 
+- **A mint that rotates its signing key is no longer mistaken for an
+  attack.** Rotating a signing key invalidates every outstanding signature
+  at once, and the wallet used to throw `PinMismatchError` at the mint it
+  had banked with for months. Now, where the mint's own discovery endpoint
+  already lists the pinned key in `previousPubkeys`, the old key moves to a
+  kept history, the new one is pinned, and the change is reported: as a
+  warning on the receive that noticed it and as a `mint-key-rotated` event
+  on the next reconcile, once. Anything else is still a hard refusal.
+  Verification - on receive, offline, and in the check sweep - accepts the
+  pinned key or any retired one, so notes signed before the rotation keep
+  proving where they came from. The check sweep lists them as signed with
+  an old key, and `notecase check --resign` rotates them under the current
+  one, which costs nothing. The trust argument is trust-on-first-use's own:
+  whoever controls the host controls the pin either way, and the history
+  only stops a mint doing the right thing from looking like an attack.
 - **A "What the mint knows" section in the README.** A mint is not blind,
   and a wallet that lets you think otherwise has told you a lie about your
   own money. It sets out what every LUD-25 mint sees - every note it
