@@ -279,4 +279,36 @@ describe('interop with the signer', () => {
     expect(opened.note.amountMsat).toBe(fixture.amount_msat)
     expect(opened.note.host).toBe('mint.example/w')
   })
+
+  // The other direction. heartwood's note_wrap_interop.rs opens a wrap this
+  // wallet produced, from a fixture frozen in that repo - so if this side's
+  // wrap format ever drifts, that test keeps passing against bytes this
+  // wallet no longer writes, and the mismatch surfaces on a bench instead
+  // of in CI. Asserting the same fixture here is what makes the drift loud.
+  it('still writes the wrap the firmware tests itself against', async () => {
+    const fixture = (await import('./fixtures/note_wrap_from_wallet.json', {with: {type: 'json'}})).default as {
+      wrap: Event
+      sender: string
+      recipient_secret: string
+      url: string
+    }
+    const bob = identityFromSecret(fixture.recipient_secret)
+    const opened = unwrapNote(fixture.wrap, bob)
+    expect(opened.sender).toBe(fixture.sender)
+    expect(opened.note.noteUrl).toBe(resolveNoteInput(fixture.url))
+    expect(noteK1(opened.note.noteUrl)).toBe('ab'.repeat(32))
+    expect(opened.note.amountMsat).toBe(21_000)
+    expect(opened.note.host).toBe('mint.example/w')
+
+    // And a wrap written now, from the same keys, is one this wallet still
+    // reads back identically. The bytes cannot match - a gift wrap is
+    // sealed under an ephemeral key with a fuzzed timestamp - so the
+    // fixture pins the format and this pins that we still emit it.
+    const alice = identityFromSecret('11'.repeat(32))
+    const fresh = wrapNote(fixture.url, 21_000, bob.pubkey, alice)
+    expect(fresh.kind).toBe(GIFT_WRAP_KIND)
+    const reopened = unwrapNote(fresh, bob)
+    expect(reopened.sender).toBe(alice.pubkey)
+    expect(reopened.note).toEqual(opened.note)
+  })
 })
