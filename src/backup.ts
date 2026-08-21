@@ -66,7 +66,11 @@ const isWalletData = (data: unknown): data is WalletData => {
     if (typeof note.id !== 'string' || !HEX64.test(note.id)) return false
     if (typeof note.k1 !== 'string' || !HEX64.test(note.k1)) return false
     if (!isAmount(note.amountMsat)) return false
-    if (!isHttpUrl(note.baseUrl) || !isHttpUrl(note.callback)) return false
+    if (!isHttpUrl(note.baseUrl)) return false
+    // A note taken offline has no callback until it has met its mint: the
+    // mint publishes one, and a note URL does not carry it. Empty is the
+    // only other thing it may ever be.
+    if (note.callback !== '' && !isHttpUrl(note.callback)) return false
     if (!isHost(note.mintHost)) return false
     if (typeof note.state !== 'string' || !NOTE_STATES.has(note.state)) return false
     if (typeof note.origin !== 'string' || !NOTE_ORIGINS.has(note.origin)) return false
