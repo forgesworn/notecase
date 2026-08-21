@@ -583,6 +583,14 @@ export class Wallet {
     return this.heartwoodClient(transport).listNotes()
   }
 
+  // Tell senders where the device's wraps go: its kind 10050, signed by
+  // the device (one hold), on its relays, ours, and the indexers.
+  async publishHeartwoodInbox(transport: NostrTransport): Promise<{relays: string[]; ok: string[]; failed: string[]}> {
+    const client = this.heartwoodClient(transport)
+    const result = await client.publishInbox([...this.nostrRelays(), ...BOOTSTRAP_RELAYS])
+    return {relays: client.link.relays, ok: result.ok, failed: result.failed}
+  }
+
   // Bring in what arrived at the device by gift wrap. The device cannot
   // rotate, so until this runs those notes are only as safe as the wrap on
   // the relay; each one is exported (a hold on the device), claimed here

@@ -1,7 +1,7 @@
-import {finalizeEvent, generateSecretKey, getPublicKey, type Event} from 'nostr-tools'
+import {finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type Event} from 'nostr-tools'
 import {nip44} from 'nostr-tools'
 import {bytesToHex, hexToBytes, randomBytes} from '@noble/hashes/utils.js'
-import type {NostrTransport} from './nostr.ts'
+import {INBOX_RELAYS_KIND, type NostrTransport} from './nostr.ts'
 
 // A heartwood signer as a note locker, reached over NIP-46. The device holds
 // its own bearer notes behind a button; this is the client side of the
@@ -170,6 +170,33 @@ export class HeartwoodClient {
   async sendNote(id: string, recipientHex: string): Promise<Event> {
     const res = await this.note<{event: Event}>('heartwood_note_send', {id, to: recipientHex}, true)
     return res.event
+  }
+
+  // Plain NIP-46 sign_event, as the device's own identity. Gated unless
+  // the device's policy for this client allows the kind.
+  async signEvent(unsigned: {kind: number; created_at: number; tags: string[][]; content: string}): Promise<Event> {
+    const raw = await this.rpc<string>('sign_event', [JSON.stringify({...unsigned, pubkey: this.link.devicePubkey})], GATED_TIMEOUT_MS)
+    const event = (typeof raw === 'string' ? JSON.parse(raw) : raw) as Event
+    if (event.pubkey !== this.link.devicePubkey || !verifyEvent(event)) {
+      throw new HeartwoodError('The device returned an event it did not sign.')
+    }
+    return event
+  }
+
+  // Where the device listens, as a kind 10050 in its own name: the relays
+  // from the bunker URI, which are exactly the ones its gift-wrap
+  // subscription is on. Without this a sender who resolves the device's
+  // npub has nowhere to leave a note. Published to the device's relays and
+  // wherever else the caller says (the indexers, typically).
+  async publishInbox(alsoOn: string[] = []): Promise<{event: Event; ok: string[]; failed: string[]}> {
+    const event = await this.signEvent({
+      kind: INBOX_RELAYS_KIND,
+      created_at: Math.floor(this.now() / 1000),
+      tags: this.link.relays.map(r => ['relay', r]),
+      content: ''
+    })
+    const result = await this.transport.publish([...new Set([...this.link.relays, ...alsoOn])], event)
+    return {event, ok: result.ok, failed: result.failed}
   }
 }
 

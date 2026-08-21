@@ -450,6 +450,12 @@ const main = async (): Promise<void> => {
             const who = n.from ? ` from ${npubOf(n.from).slice(0, 16)}…` : n.sent_to ? ` sent to ${npubOf(n.sent_to).slice(0, 16)}…` : ''
             console.log(`${n.id}  ${n.state.padEnd(9)} ${sats(n.amount_msat).padStart(12)}  ${n.host}${who}`)
           }
+        } else if (sub === 'inbox') {
+          console.log('  hold the device button to sign its inbox list')
+          const result = await wallet.publishHeartwoodInbox(transport)
+          console.log(`Device inbox (kind 10050) lists ${result.relays.join(', ')}.`)
+          if (result.ok.length) console.log(`  published on: ${result.ok.join(', ')}`)
+          if (result.failed.length) console.log(`  failed: ${result.failed.join(', ')}`)
         } else if (sub === 'collect') {
           const result = await wallet.collectFromHeartwood(transport, step => console.log(`  ${step}`))
           for (const r of result.collected) {
@@ -466,7 +472,7 @@ const main = async (): Promise<void> => {
           if (sent.relays.length) console.log(`  on: ${sent.relays.join(', ')}`)
           if (sent.failed.length) console.log(`  failed: ${sent.failed.join(', ')}`)
         } else {
-          console.log('heartwood link <bunker://...> | notes | collect | send <id> --to <npub> | unlink')
+          console.log('heartwood link <bunker://...> | inbox | notes | collect | send <id> --to <npub> | unlink')
         }
       } finally {
         transport.close()
