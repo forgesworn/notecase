@@ -34,7 +34,12 @@ A bearer note is lost the moment its secret exists nowhere durable. So:
 - **Ambiguity is a state, not a guess.** A timeout or dropped connection
   parks the mutation as `ambiguous`; `notecase reconcile` learns the truth
   by probing the mint and either promotes the staged secrets or unwinds
-  them. Never both, never neither.
+  them. Never both, never neither. A mutation is a GET, and HTTP stacks
+  retry a GET whose connection dropped, so a mint answering "already
+  spent" about a note that was live moments ago is parked too: that is
+  exactly what a mint says to a byte-identical repeat of a request that
+  already went through, and discarding the staged secret there would
+  destroy the only copy of a note the mint really did mint.
 - **Melt OK means in flight.** The note locks as `melting`; reconcile
   confirms settlement through LUD-21 verify, or recovers a restored note
   under a fresh secret via a rotate probe - the one operation that is safe

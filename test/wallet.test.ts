@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
-import {AmbiguousMintError, PendingNoteError, ProtocolError, hashK1} from 'lnurlcash-kit'
+import {AmbiguousMintError, PendingNoteError, ProtocolError, ServiceRejectedError, hashK1} from 'lnurlcash-kit'
 import {fakeBolt11} from '@forgesworn/moneyer'
 import {BadSignatureError, InsufficientFundsError, Wallet} from '../src/wallet.ts'
 import type {PendingMint, WalletData} from '../src/types.ts'
@@ -120,6 +120,88 @@ describe('the crash window', () => {
     expect(wallet.balanceMsat()).toBe(21_000)
     const recovered = data.notes.find(record => record.id === staged!.id)
     expect(recovered?.state).toBe('live')
+  })
+
+  // A mutation is a GET, and HTTP stacks retry a GET whose connection was
+  // dropped. The retry is byte-identical, so a mint that does not
+  // recognise a repeat answers "already spent" about a mutation that
+  // landed - and that answer is indistinguishable from a genuine double
+  // spend. Discarding the staged secret on it would destroy the only copy
+  // of a note the mint really did mint.
+  const answeringCallback = (reason: string, options: {land: boolean}) => {
+    let on = false
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
+      if (!on || url.pathname !== '/w/cb') return fetch(input, init)
+      // land: let the real request through and throw its answer away, the
+      // way a dropped connection and a retry does
+      if (options.land) await (await fetch(input, init)).arrayBuffer()
+      return new Response(JSON.stringify({status: 'ERROR', reason}), {
+        headers: {'content-type': 'application/json'}
+      })
+    }
+    return {fetchImpl, arm: () => (on = true), disarm: () => (on = false)}
+  }
+
+  it('keeps the staged secret when an already-spent refusal could be a landed retry', async () => {
+    const theMint = await start()
+    const stub = answeringCallback('Invalid or already spent k1.', {land: true})
+    const {wallet, data} = makeWallet({fetch: stub.fetchImpl})
+    const received = await wallet.receive(fund(theMint, 21_000).url)
+    expect(wallet.balanceMsat()).toBe(21_000)
+
+    stub.arm()
+    await expect(wallet.rotateLive(received.note)).rejects.toThrow(AmbiguousMintError)
+    stub.disarm()
+
+    // the rotate really did land, so the staged secret is the money
+    const staged = data.notes.find(
+      record => record.state === 'ambiguous' && record.replaces?.includes(received.note.id)
+    )
+    expect(staged).toBeDefined()
+    expect(wallet.noteById(received.note.id)?.state).toBe('ambiguous')
+    // and nothing uncertain is counted as spendable
+    expect(wallet.balanceMsat()).toBe(0)
+
+    const events = await wallet.reconcile()
+    expect(events.some(event => event.kind === 'output-recovered')).toBe(true)
+    expect(wallet.noteById(staged!.id)?.state).toBe('live')
+    expect(wallet.balanceMsat()).toBe(21_000)
+  })
+
+  it('unwinds when that refusal really did refuse and the input is still there', async () => {
+    const theMint = await start()
+    const stub = answeringCallback('Invalid or already spent k1.', {land: false})
+    const {wallet, data} = makeWallet({fetch: stub.fetchImpl})
+    const received = await wallet.receive(fund(theMint, 21_000).url)
+
+    stub.arm()
+    await expect(wallet.rotateLive(received.note)).rejects.toThrow(AmbiguousMintError)
+    stub.disarm()
+    expect(wallet.balanceMsat()).toBe(0)
+
+    const events = await wallet.reconcile()
+    expect(events.some(event => event.kind === 'mutation-unwound')).toBe(true)
+    expect(wallet.noteById(received.note.id)?.state).toBe('live')
+    expect(data.notes.filter(record => record.state === 'ambiguous')).toEqual([])
+    expect(wallet.balanceMsat()).toBe(21_000)
+  })
+
+  it('still discards the staged secret at once when the refusal cannot be a landed mutation', async () => {
+    const theMint = await start()
+    const stub = answeringCallback('missing h', {land: false})
+    const {wallet, data} = makeWallet({fetch: stub.fetchImpl})
+    const received = await wallet.receive(fund(theMint, 21_000).url)
+
+    stub.arm()
+    await expect(wallet.rotateLive(received.note)).rejects.toThrow(ServiceRejectedError)
+    stub.disarm()
+
+    // no reconcile round trip: a malformed hash cannot have minted anything
+    expect(data.notes.filter(record => record.state === 'ambiguous')).toEqual([])
+    expect(wallet.noteById(received.note.id)?.state).toBe('live')
+    expect(wallet.needsReconcile()).toBe(false)
+    expect(wallet.balanceMsat()).toBe(21_000)
   })
 
   it('unwinds cleanly when the mutation never landed at all', async () => {

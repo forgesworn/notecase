@@ -301,6 +301,12 @@ export class Wallet {
     const template = inputs[0]!
     const inputIds = inputs.map(note => note.id)
     const origin: NoteOrigin = plan.kind === 'rotate' ? 'rotate' : plan.kind
+    // Whether every input was spendable when this request went out. It
+    // decides how an "already spent" refusal is read below: against a live
+    // input that answer is also what a landed mutation looks like on a
+    // retry, while against a melting one it is the melt machinery's own
+    // answer and means exactly what it says.
+    const inputsWereLive = inputs.every(note => note.state === 'live')
 
     // LUD-25 fee algebra, priced from the cached advertisement: the flat
     // base fee comes out of a split's CHANGE (never the requested amount),
@@ -378,16 +384,33 @@ export class Wallet {
       }
       return staged
     } catch (err) {
-      if (err instanceof AmbiguousMintError) {
+      // A mutation is a GET, and HTTP stacks retry a GET whose connection
+      // was dropped. The retry is byte-identical, and by the time it
+      // arrives the input is burned, so a mint that does not recognise a
+      // repeat answers "already spent" about a mutation that LANDED. From
+      // the reason string alone that is indistinguishable from a genuine
+      // double spend - so it is not read as either. Where the inputs were
+      // live when the request went out, an already-spent or unknown-input
+      // refusal is ambiguous, and the staged secrets, which may be the
+      // only copy of notes the mint really did mint, are kept until
+      // reconcile asks what they are worth.
+      const mayHaveLanded =
+        inputsWereLive && (err instanceof NoteSpentError || err instanceof NoteUnknownError)
+      if (err instanceof AmbiguousMintError || mayHaveLanded) {
         // The mutation MAY have landed. The staged secrets are then the
         // only copy of the outputs - everything holds until reconcile.
         for (const note of staged) this.touch(note, 'ambiguous')
         for (const input of inputs) this.touch(input, 'ambiguous')
         await this.persist()
-        throw err
+        if (!mayHaveLanded) throw err
+        throw new AmbiguousMintError(
+          `${template.mintHost} refused this ${plan.kind} because the note was already spent, which is also what it would say to a repeat of a request that had already gone through. The outcome is unknown until \`reconcile\` asks the mint what the new secrets are worth.`
+        )
       }
       // Definitive refusal or nothing-sent: the mutation did not happen,
-      // the staged secrets minted nothing, the inputs are untouched.
+      // the staged secrets minted nothing, the inputs are untouched. A
+      // missing or malformed hash, a dust or fee refusal, a sunsetting
+      // mint: none of those can be a mutation that landed.
       this.data.notes = this.data.notes.filter(note => !staged.includes(note))
       await this.persist()
       throw err
