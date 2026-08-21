@@ -204,3 +204,53 @@ describe('a linked heartwood', () => {
     await expect(wallet.heartwoodNotes(device.transport)).rejects.toThrow('No heartwood is linked')
   })
 })
+
+// One hold should answer a whole collect, not one hold per note. The device
+// coalesces asks sharing a client, identity and method onto a single card -
+// but only those that arrive while that card is still open. A wallet that
+// awaits each reply before sending the next never gives it the chance, so
+// four notes cost eight holds. Asserting the request ORDER is how that shows
+// up here: batched, every export precedes every mark; serialised, they
+// interleave one note at a time.
+describe('a collect of several notes', () => {
+  it('asks for every secret before marking any spent, so one hold covers the batch', async () => {
+    mint = await createMockMint({})
+    const device = fakeDevice('wss://dev.example')
+    const {wallet} = makeWallet()
+    await wallet.linkHeartwood(device.transport, device.uri)
+
+    const live = mint!
+    const host = `${new URL(live.url).host}/w`
+    const k1s = [freshK1(), freshK1(), freshK1()]
+    k1s.forEach((k1, i) => {
+      live.state.creditNote(k1, 3_000)
+      device.notes.push({
+        id: `note${i}`.padEnd(8, '0'),
+        k1,
+        state: 'confirmed',
+        amount_msat: 3_000,
+        host,
+        from: 'dd'.repeat(32)
+      })
+    })
+
+    device.log.length = 0
+    const steps: string[] = []
+    const result = await wallet.collectFromHeartwood(device.transport, s => steps.push(s))
+    expect(result.failed).toEqual([])
+    expect(result.collected).toHaveLength(3)
+
+    const gated = device.log.filter(m => m === 'heartwood_note_export' || m === 'heartwood_note_spent')
+    expect(gated).toEqual([
+      'heartwood_note_export',
+      'heartwood_note_export',
+      'heartwood_note_export',
+      'heartwood_note_spent',
+      'heartwood_note_spent',
+      'heartwood_note_spent'
+    ])
+    // Two prompts for three notes, not six.
+    expect(steps).toHaveLength(2)
+    expect(steps[0]).toContain('all 3 notes')
+  })
+})
