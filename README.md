@@ -84,6 +84,7 @@ notecase reconcile                     # resolves anything uncertain
 notecase nwc set                       # prompts for the connection URI
 notecase nostr init                    # your npub + publishes your inbox relays (kind 10050)
 notecase heartwood link bunker://...   # a heartwood signer as a note locker
+notecase heartwood inbox               # publishes the device's inbox relays (kind 10050), one hold
 notecase heartwood collect             # brings in what arrived at the device by wrap
 notecase backup shares --threshold 2 --count 3
 ```
@@ -103,6 +104,9 @@ the same from hardware: it receives wraps while your laptop is shut
 (RECEIVE card, hold to accept), and `heartwood send` asks it to seal one of
 its own notes so the secret never leaves the chip. `heartwood collect`
 brings received notes here and rotates them, because the device cannot.
+`heartwood inbox` publishes the device's kind 10050 in its own name, signed
+on the device; without it nobody who resolves its npub knows where to
+leave a note.
 
 Amounts are sats (`--msat` for precision). The PIN comes from the prompt
 or `$NOTECASE_PIN`. `NOTECASE_HOME` moves the store; `NOTECASE_ALLOW_PRIVATE=1`

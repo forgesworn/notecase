@@ -5,7 +5,7 @@ import {nip44} from 'nostr-tools'
 import {bytesToHex} from '@noble/hashes/utils.js'
 import {Wallet} from '../src/wallet.ts'
 import {HeartwoodError, NIP46_KIND, parseBunkerUri} from '../src/heartwood.ts'
-import {GIFT_WRAP_KIND, identityFromSecret, newIdentitySecretHex, unwrapNote, wrapNote, type NostrTransport} from '../src/nostr.ts'
+import {GIFT_WRAP_KIND, INBOX_RELAYS_KIND, identityFromSecret, inboxRelays, newIdentitySecretHex, unwrapNote, wrapNote, type NostrTransport} from '../src/nostr.ts'
 import {freshK1, makeWallet} from './helpers.ts'
 
 // A heartwood that lives on the relay: it answers heartwood_note_* the way
@@ -30,6 +30,7 @@ const fakeDevice = (relay: string) => {
   const pairingSecret = 'pairingsecret'
   const stored: Event[] = []
   const log: string[] = []
+  const signer = {key: secret}
 
   const answer = (to: string, id: string, body: {result?: unknown; error?: string}): Event =>
     finalizeEvent(
@@ -109,6 +110,14 @@ const fakeDevice = (relay: string) => {
           } else {
             emit(answer(event.pubkey, req.id, {error: 'secret mismatch'}))
           }
+        } else if (req.method === 'sign_event') {
+          // The real device puts a card up here; this one holds at once.
+          if (!bound.has(event.pubkey)) {
+            emit(answer(event.pubkey, req.id, {error: 'unauthorised'}))
+          } else {
+            const unsigned = JSON.parse(String(req.params[0])) as {kind: number; created_at: number; tags: string[][]; content: string}
+            emit(answer(event.pubkey, req.id, {result: JSON.stringify(finalizeEvent(unsigned, signer.key))}))
+          }
         } else {
           emit(answer(event.pubkey, req.id, noteCmd(event.pubkey, req.method, (req.params[0] ?? {}) as Record<string, unknown>) as {result?: unknown; error?: string}))
         }
@@ -123,6 +132,9 @@ const fakeDevice = (relay: string) => {
     log,
     stored,
     pubkey,
+    signWith(key: Uint8Array) {
+      signer.key = key
+    },
     uri: `bunker://${pubkey}?relay=${encodeURIComponent(relay)}&secret=${pairingSecret}`
   }
 }
@@ -194,6 +206,36 @@ describe('a linked heartwood', () => {
     expect(device.notes[0]!.sent_to).toBe(bob.pubkey)
     // Once only.
     await expect(wallet.heartwoodSend(device.transport, 'cccc3333', bob.npub)).rejects.toThrow('invalid_state')
+  })
+
+  it('publishes the device\'s inbox list in the device\'s own name, so a sender can find it', async () => {
+    const device = fakeDevice('wss://dev.example')
+    const {wallet} = makeWallet()
+    await wallet.linkHeartwood(device.transport, device.uri)
+
+    const result = await wallet.publishHeartwoodInbox(device.transport)
+    expect(result.relays).toEqual(['wss://dev.example'])
+    expect(result.ok).toContain('wss://dev.example')
+    expect(device.log).toContain('sign_event')
+
+    const inbox = device.stored.filter(e => e.kind === INBOX_RELAYS_KIND)
+    expect(inbox).toHaveLength(1)
+    expect(inbox[0]!.pubkey).toBe(device.pubkey)
+    expect(inbox[0]!.tags).toEqual([['relay', 'wss://dev.example']])
+
+    // A sender who only knows the npub now knows where to leave a note.
+    expect(await inboxRelays(device.transport, device.pubkey, ['wss://dev.example'])).toEqual(['wss://dev.example'])
+  })
+
+  it('refuses an inbox list the device did not actually sign', async () => {
+    const device = fakeDevice('wss://dev.example')
+    const {wallet} = makeWallet()
+    await wallet.linkHeartwood(device.transport, device.uri)
+    // A relay in the middle, or a device with a bug, handing back someone
+    // else's signature: a 10050 not in the device's name must not go out.
+    device.signWith(generateSecretKey())
+    await expect(wallet.publishHeartwoodInbox(device.transport)).rejects.toThrow(HeartwoodError)
+    expect(device.stored.filter(e => e.kind === INBOX_RELAYS_KIND)).toHaveLength(0)
   })
 
   it('refuses to link on a wrong pairing secret and does not store the link', async () => {
