@@ -4,11 +4,12 @@ import {createInterface} from 'node:readline/promises'
 import {Writable} from 'node:stream'
 import {utf8ToBytes} from '@noble/hashes/utils.js'
 import {splitSecret, shareToWords, wordsToShare, reconstructSecret} from '@forgesworn/shamir-words'
-import {toBech32Lnurl} from 'lnurlcash-kit'
+import {NoteSpentError, NoteUnknownError, toBech32Lnurl} from 'lnurlcash-kit'
 import {initWallet, openWallet, NoWalletError, WrongPinError, type WalletStore} from './store.ts'
 import {Wallet, InsufficientFundsError, PinMismatchError, WalletUsageError} from './wallet.ts'
 import {createWalletFetch} from './fetchguard.ts'
 import {invoiceFromNwc, nwcStatus, payWithNwc} from './nwc.ts'
+import {npubOf, poolTransport} from './nostr.ts'
 import type {NoteRecord} from './types.ts'
 
 const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
@@ -22,12 +23,18 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase mint <sats> [--mint <host>] [--manual] [--wait <seconds>]
   notecase receive [note]
   notecase send <sats> [--mint <host>]
+  notecase send <sats> --to <npub>
+  notecase inbox
+  notecase reclaim [id]
   notecase melt <bolt11>
   notecase melt <sats> --to <lightning-address>
   notecase melt <sats> --to-nwc
   notecase reconcile
   notecase verify <note>
   notecase nwc set [uri] | nwc status | nwc clear
+  notecase nostr init | nostr show | nostr relays [set <url>...]
+  notecase heartwood link <bunker://...> | heartwood notes | heartwood collect
+  notecase heartwood send <id> --to <npub> | heartwood unlink
   notecase backup export | backup shares [--threshold N --count M] | backup recover-key
 
 Amounts are sats; add --msat for milli-satoshi precision. The PIN is read
@@ -35,7 +42,11 @@ from $NOTECASE_PIN or prompted. Omit the argument to receive or nwc set
 and you are prompted for it instead - prefer that: whatever goes on the
 command line lands in your shell history, and these two are live secrets.
 Notes are bearer money: whoever sees a k1 owns it, which is why this tool
-never prints one unless you ask it to send.`
+never prints one unless you ask it to send.
+
+Sending to an npub seals the note to that key and leaves it on their inbox
+relays; they need no wallet yet to be paid. \`inbox\` opens what was sent to
+you and claims it at once, which burns the copy on the relay.`
 
 const sats = (msat: number): string =>
   msat % 1000 === 0 ? `${msat / 1000} sat` : `${(msat / 1000).toFixed(3)} sat`
@@ -225,6 +236,23 @@ const main = async (): Promise<void> => {
 
     case 'send': {
       const amountMsat = parseAmountMsat(rest[0], values.msat)
+      if (values.to) {
+        const transport = poolTransport()
+        try {
+          const sent = await wallet.sendToNostr(transport, amountMsat, values.to, values.mint)
+          console.log(`Sent ${sats(sent.note.amountMsat)} to ${npubOf(sent.recipientHex)} (${shortId(sent.note)}).`)
+          if (!sent.inboxKnown) {
+            console.log('  warning: they publish no inbox relays (kind 10050) - the wrap went to your relays and they may not look there.')
+          }
+          if (sent.relays.length) console.log(`  on: ${sent.relays.join(', ')}`)
+          if (sent.failed.length) console.log(`  failed: ${sent.failed.join(', ')}`)
+          if (!sent.relays.length) console.log('  No relay took it. The note is still yours: `notecase reclaim` takes it back.')
+          else console.log('  If they never claim it, `notecase reclaim` rotates it back to you.')
+        } finally {
+          transport.close()
+        }
+        return
+      }
       const note = await wallet.send(amountMsat, values.mint)
       const url = wallet.noteUrlFor(note)
       console.log(`A bearer note for ${sats(note.amountMsat)} - whoever sees this owns it:\n`)
@@ -283,6 +311,122 @@ const main = async (): Promise<void> => {
       const verdict = wallet.verifyNoteOffline(rest[0])
       console.log(`${verdict.valid ? 'VALID' : 'NOT VERIFIED'} - ${verdict.reason}`)
       process.exitCode = verdict.valid ? 0 : 1
+      return
+    }
+
+    case 'inbox': {
+      const transport = poolTransport()
+      try {
+        const result = await wallet.receiveFromNostr(transport)
+        for (const r of result.received) {
+          for (const warning of r.warnings) console.log(`  warning: ${warning}`)
+          console.log(`Received ${sats(r.note.amountMsat)} at ${r.note.mintHost} (${shortId(r.note)})${r.note.receivedFrom ? ` from ${npubOf(r.note.receivedFrom)}` : ''}.`)
+        }
+        for (const s of result.skipped) console.log(`  skipped ${s.wrapId.slice(0, 8)}: ${s.reason}`)
+        if (!result.received.length && !result.skipped.length) console.log('Nothing new.')
+      } finally {
+        transport.close()
+      }
+      return
+    }
+
+    case 'reclaim': {
+      const sent = wallet.sentNotes()
+      const pick = rest[0] ? sent.filter(n => n.id.startsWith(rest[0]!)) : sent
+      if (!pick.length) throw new WalletUsageError(rest[0] ? 'No sent note with that id.' : 'Nothing is out on loan.')
+      for (const note of pick) {
+        try {
+          const back = await wallet.reclaim(note)
+          console.log(`Reclaimed ${sats(back.note.amountMsat)} (${shortId(note)} -> ${shortId(back.note)}).`)
+        } catch (err) {
+          // Only the mint saying "gone" settles it; a network failure
+          // leaves the note on loan for the next try.
+          if (err instanceof NoteSpentError || err instanceof NoteUnknownError) {
+            await wallet.markTaken(note)
+            console.log(`${shortId(note)} was claimed by the recipient; marked taken.`)
+          } else {
+            console.log(`${shortId(note)} could not be reclaimed right now: ${(err as Error).message}`)
+          }
+        }
+      }
+      return
+    }
+
+    case 'nostr': {
+      const [sub, ...args] = rest
+      if (sub === 'init' || sub === 'show') {
+        const identity = await wallet.ensureNostrIdentity()
+        console.log(`npub:   ${identity.npub}`)
+        console.log(`relays: ${wallet.nostrRelays().join(', ')}`)
+        if (sub === 'init') {
+          const transport = poolTransport()
+          try {
+            const published = await wallet.publishInbox(transport)
+            console.log(`inbox list published to ${published.ok.length} relay(s)${published.failed.length ? `, failed: ${published.failed.join(', ')}` : ''}.`)
+          } finally {
+            transport.close()
+          }
+        }
+      } else if (sub === 'relays') {
+        if (args[0] === 'set') {
+          const relays = args.slice(1).filter(r => /^wss?:\/\//.test(r))
+          if (!relays.length) throw new WalletUsageError('Give one or more wss:// relay URLs.')
+          await wallet.setNostrRelays(relays)
+          const transport = poolTransport()
+          try {
+            const published = await wallet.publishInbox(transport)
+            console.log(`relays set; inbox list published to ${published.ok.length} relay(s).`)
+          } finally {
+            transport.close()
+          }
+        } else {
+          console.log(wallet.nostrRelays().join('\n'))
+        }
+      } else {
+        console.log('nostr init | nostr show | nostr relays [set <url>...]')
+      }
+      return
+    }
+
+    case 'heartwood': {
+      const [sub, arg] = rest
+      const transport = poolTransport()
+      try {
+        if (sub === 'link') {
+          const uri = (arg ?? (await promptHidden('bunker URI: '))).trim()
+          const link = await wallet.linkHeartwood(transport, uri)
+          console.log(`Linked to ${npubOf(link.devicePubkey)} via ${link.relays.join(', ')}.`)
+        } else if (sub === 'unlink') {
+          await wallet.unlinkHeartwood()
+          console.log('Unlinked.')
+        } else if (sub === 'notes') {
+          const notes = await wallet.heartwoodNotes(transport)
+          if (!notes.length) console.log('The device holds no notes.')
+          for (const n of notes) {
+            const who = n.from ? ` from ${npubOf(n.from).slice(0, 16)}…` : n.sent_to ? ` sent to ${npubOf(n.sent_to).slice(0, 16)}…` : ''
+            console.log(`${n.id}  ${n.state.padEnd(9)} ${sats(n.amount_msat).padStart(12)}  ${n.host}${who}`)
+          }
+        } else if (sub === 'collect') {
+          const result = await wallet.collectFromHeartwood(transport, step => console.log(`  ${step}`))
+          for (const r of result.collected) {
+            console.log(`Collected ${sats(r.note.amountMsat)} at ${r.note.mintHost} (${shortId(r.note)}).`)
+          }
+          for (const f of result.failed) console.log(`  ${f.id}: ${f.reason}`)
+          if (!result.collected.length && !result.failed.length) console.log('Nothing waiting on the device.')
+        } else if (sub === 'send') {
+          if (!arg || !values.to) throw new WalletUsageError('heartwood send <id> --to <npub>')
+          console.log('  hold the device button to send')
+          const sent = await wallet.heartwoodSend(transport, arg, values.to)
+          console.log(`Sent ${arg} to ${npubOf(sent.recipientHex)}.`)
+          if (!sent.inboxKnown) console.log('  warning: they publish no inbox relays (kind 10050) - the wrap went to your relays.')
+          if (sent.relays.length) console.log(`  on: ${sent.relays.join(', ')}`)
+          if (sent.failed.length) console.log(`  failed: ${sent.failed.join(', ')}`)
+        } else {
+          console.log('heartwood link <bunker://...> | notes | collect | send <id> --to <npub> | unlink')
+        }
+      } finally {
+        transport.close()
+      }
       return
     }
 

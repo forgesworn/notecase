@@ -32,6 +32,21 @@ import {
 import {tryDecodeBolt11} from 'farrier-kit/bolt11'
 import {verifyPreimage} from 'farrier-kit/preimage'
 import type {MeltRecord, MintEntry, NoteOrigin, NoteRecord, PendingMint, WalletData} from './types.ts'
+import {
+  BOOTSTRAP_RELAYS,
+  NotANoteWrapError,
+  fetchWraps,
+  identityFromSecret,
+  inboxRelayListEvent,
+  inboxRelays,
+  newIdentitySecretHex,
+  recipientPubkey,
+  unwrapNote,
+  wrapNote,
+  type NostrIdentity,
+  type NostrTransport
+} from './nostr.ts'
+import {HeartwoodClient, HeartwoodError, newHeartwoodLink, type DeviceNote, type HeartwoodLink} from './heartwood.ts'
 
 // The ordering rule this whole module is built around: a fresh secret is
 // PERSISTED before its hash goes on the wire, and nothing is deleted until
@@ -473,6 +488,209 @@ export class Wallet {
 
   noteUrlFor(note: NoteRecord): string {
     return buildNoteUrl(note.baseUrl, note.k1, note.amountMsat)
+  }
+
+  // ---- notes over Nostr ----
+
+  nostrIdentity(): NostrIdentity | null {
+    const secret = this.data.settings.nostrSecretHex
+    return secret ? identityFromSecret(secret) : null
+  }
+
+  async ensureNostrIdentity(): Promise<NostrIdentity> {
+    const existing = this.nostrIdentity()
+    if (existing) return existing
+    this.data.settings.nostrSecretHex = newIdentitySecretHex()
+    await this.persist()
+    return this.nostrIdentity()!
+  }
+
+  nostrRelays(): string[] {
+    return this.data.settings.nostrRelays ?? BOOTSTRAP_RELAYS
+  }
+
+  async setNostrRelays(relays: string[]): Promise<void> {
+    this.data.settings.nostrRelays = relays
+    await this.persist()
+  }
+
+  // Tell senders where to put our wraps (kind 10050). Without this a
+  // sender falls back to guessing, and guesses miss.
+  async publishInbox(transport: NostrTransport): Promise<{ok: string[]; failed: string[]}> {
+    const identity = await this.ensureNostrIdentity()
+    const relays = this.nostrRelays()
+    return transport.publish([...new Set([...relays, ...BOOTSTRAP_RELAYS])], inboxRelayListEvent(identity, relays))
+  }
+
+  // A note out of this wallet's balance, sealed to `recipient` and left on
+  // their inbox relays. The record goes to 'sent' with the recipient on it
+  // BEFORE the wrap exists, so a crash mid-publish leaves a note that can
+  // be reclaimed, never one that can be wrapped twice. `inboxKnown` false
+  // means the recipient has no kind 10050 and the wrap went to our own
+  // relays instead - it may sit unread there.
+  async sendToNostr(
+    transport: NostrTransport,
+    amountMsat: number,
+    recipient: string,
+    mintHost?: string
+  ): Promise<{note: NoteRecord; recipientHex: string; relays: string[]; failed: string[]; inboxKnown: boolean; wrapId: string}> {
+    const recipientHex = recipientPubkey(recipient)
+    const identity = await this.ensureNostrIdentity()
+    // Their kind 10050 lives on the indexers as well as wherever they put
+    // it; look on both, the same set publishInbox() writes to.
+    const inbox = await inboxRelays(transport, recipientHex, [...new Set([...this.nostrRelays(), ...BOOTSTRAP_RELAYS])])
+    const inboxKnown = inbox.length > 0
+    const relays = inboxKnown ? inbox : this.nostrRelays()
+
+    const note = await this.send(amountMsat, mintHost)
+    note.sentTo = recipientHex
+    note.updatedAt = now()
+    await this.persist()
+
+    const wrap = wrapNote(this.noteUrlFor(note), note.amountMsat, recipientHex, identity)
+    const result = await transport.publish(relays, wrap)
+    return {note, recipientHex, relays: result.ok, failed: result.failed, inboxKnown, wrapId: wrap.id}
+  }
+
+  // ---- a heartwood signer as a note locker ----
+
+  heartwoodLink(): HeartwoodLink | null {
+    return this.data.settings.heartwood ?? null
+  }
+
+  async linkHeartwood(transport: NostrTransport, bunkerUri: string): Promise<HeartwoodLink> {
+    const {link, secret} = newHeartwoodLink(bunkerUri)
+    if (!secret) throw new HeartwoodError('The bunker URI carries no secret; the device binds clients by it.')
+    await new HeartwoodClient(transport, link).connect(secret)
+    this.data.settings.heartwood = link
+    await this.persist()
+    return link
+  }
+
+  async unlinkHeartwood(): Promise<void> {
+    delete this.data.settings.heartwood
+    await this.persist()
+  }
+
+  private heartwoodClient(transport: NostrTransport): HeartwoodClient {
+    const link = this.heartwoodLink()
+    if (!link) throw new WalletUsageError('No heartwood is linked. `notecase heartwood link <bunker://...>` first.')
+    return new HeartwoodClient(transport, link)
+  }
+
+  async heartwoodNotes(transport: NostrTransport): Promise<DeviceNote[]> {
+    return this.heartwoodClient(transport).listNotes()
+  }
+
+  // Bring in what arrived at the device by gift wrap. The device cannot
+  // rotate, so until this runs those notes are only as safe as the wrap on
+  // the relay; each one is exported (a hold on the device), claimed here
+  // (which rotates it), then marked spent there (a second hold). A note the
+  // mint reports spent is marked spent on the device too - that is the
+  // truth, however it got that way.
+  async collectFromHeartwood(
+    transport: NostrTransport,
+    onProgress: (step: string) => void = () => {}
+  ): Promise<{collected: ReceiveResult[]; failed: {id: string; reason: string}[]}> {
+    const client = this.heartwoodClient(transport)
+    const held = (await client.listNotes()).filter(n => n.state === 'confirmed' && n.from)
+    const collected: ReceiveResult[] = []
+    const failed: {id: string; reason: string}[] = []
+    for (const note of held) {
+      onProgress(`hold the device button to release ${note.id}`)
+      let k1: string
+      try {
+        k1 = await client.exportSecret(note.id)
+      } catch (err) {
+        failed.push({id: note.id, reason: (err as Error).message})
+        continue
+      }
+      const url = buildNoteUrl(`lnurlw://${note.host}`, k1, note.amount_msat)
+      let result: ReceiveResult | null = null
+      try {
+        result = await this.receive(url)
+        if (note.from) result.note.receivedFrom = note.from
+        collected.push(result)
+      } catch (err) {
+        if (!(err instanceof NoteSpentError || err instanceof WalletUsageError)) {
+          failed.push({id: note.id, reason: (err as Error).message})
+          continue
+        }
+        // Already burned, or already ours: the device copy is history.
+      }
+      onProgress(`hold again to mark ${note.id} spent on the device`)
+      try {
+        await client.markSpent(note.id)
+      } catch (err) {
+        failed.push({id: note.id, reason: `claimed here but not marked spent on the device: ${(err as Error).message}`})
+      }
+    }
+    await this.persist()
+    return {collected, failed}
+  }
+
+  // Ask the device to seal one of ITS notes to an npub. The wrap comes back
+  // opaque and goes to the recipient's inbox relays; the secret stayed on
+  // the chip throughout.
+  async heartwoodSend(
+    transport: NostrTransport,
+    noteId: string,
+    recipient: string
+  ): Promise<{recipientHex: string; relays: string[]; failed: string[]; inboxKnown: boolean; wrapId: string}> {
+    const recipientHex = recipientPubkey(recipient)
+    const client = this.heartwoodClient(transport)
+    const inbox = await inboxRelays(transport, recipientHex, [...new Set([...this.nostrRelays(), ...BOOTSTRAP_RELAYS])])
+    const inboxKnown = inbox.length > 0
+    const relays = inboxKnown ? inbox : this.nostrRelays()
+    const wrap = await client.sendNote(noteId, recipientHex)
+    const result = await transport.publish(relays, wrap)
+    return {recipientHex, relays: result.ok, failed: result.failed, inboxKnown, wrapId: wrap.id}
+  }
+
+  // Open every wrap addressed to us since the last look and claim what is
+  // inside. Claiming IS rotating: the mint burns the wrapped secret and
+  // hands back a fresh one, so the copy on the relay is dead the moment
+  // this returns. A wrap that fails for a reason that will not change
+  // (not a note, already spent, already ours) is remembered and not
+  // reopened; a network failure is not, so the next pass retries it.
+  async receiveFromNostr(transport: NostrTransport): Promise<{received: ReceiveResult[]; skipped: {wrapId: string; reason: string}[]}> {
+    const identity = await this.ensureNostrIdentity()
+    const since = this.data.settings.nostrLastCheck ?? 0
+    const seen = new Set(this.data.settings.nostrSeenWrapIds ?? [])
+    const wraps = await fetchWraps(transport, this.nostrRelays(), identity.pubkey, since)
+    const received: ReceiveResult[] = []
+    const skipped: {wrapId: string; reason: string}[] = []
+    let newestSeen = since
+    for (const wrap of wraps) {
+      if (seen.has(wrap.id)) continue
+      let opened
+      try {
+        opened = unwrapNote(wrap, identity)
+      } catch (err) {
+        // Not ours to open, or not a note: nothing will change on retry.
+        seen.add(wrap.id)
+        if (err instanceof NotANoteWrapError) skipped.push({wrapId: wrap.id, reason: err.message})
+        continue
+      }
+      try {
+        const result = await this.receive(opened.note.noteUrl)
+        result.note.receivedFrom = opened.sender
+        seen.add(wrap.id)
+        received.push(result)
+      } catch (err) {
+        if (err instanceof WalletUsageError || err instanceof NoteSpentError || err instanceof NoteUnknownError) {
+          seen.add(wrap.id)
+          skipped.push({wrapId: wrap.id, reason: err.message})
+        } else {
+          throw err
+        }
+      }
+      newestSeen = Math.max(newestSeen, wrap.created_at)
+    }
+    this.data.settings.nostrSeenWrapIds = [...seen].slice(-500)
+    this.data.settings.nostrLastCheck = Math.max(newestSeen, Math.floor(now() / 1000))
+    await this.persist()
+    return {received, skipped}
   }
 
   // ---- minting ----
