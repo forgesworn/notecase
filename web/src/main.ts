@@ -1489,6 +1489,31 @@ const viewSigner = (): void => {
     )
     void paintTrusted()
 
+    // ---- pair another device ----
+    const pairCard = el(`<div class="card"><h3>Pair another device</h3>
+      <p class="warn" style="text-align:left;padding-top:12px">This wallet is bound to the signer, so it can ask for a slot for another one: your phone, say. One hold on the device; the code is shown once and is one-time.</p>
+      <div class="field"><label>Name it</label><input data-label type="text" placeholder="phone" autocomplete="off" spellcheck="false" /></div>
+      <div data-pair-out></div></div>`)
+    body.append(pairCard)
+    const pairLabel = pairCard.querySelector('[data-label]') as HTMLInputElement
+    const pairOut = pairCard.querySelector('[data-pair-out]') as HTMLElement
+    const mint = el(`<button class="btn">${icons.qr}<span>Mint a pairing code (one hold)</span></button>`) as HTMLButtonElement
+    pairCard.append(mint)
+    mint.addEventListener('click', () =>
+      busy(mint, async () => {
+        toast('Hold the device button to mint the slot.')
+        const minted = await withRelays(t => w.heartwoodPairWallet(t, pairLabel.value.trim() || 'another wallet'))
+        pairOut.innerHTML = ''
+        pairOut.append(qrCard(minted.uri))
+        const copy = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy bunker URI</span></button>`)
+        copy.addEventListener('click', () => void copyText(minted.uri, 'Bunker URI', true))
+        pairOut.append(
+          copy,
+          el(`<p class="warn">Scan or paste into the other wallet's <b>Pair a signer</b> now. It works once; if it is lost, mint another and this slot stays empty.</p>`)
+        )
+      })
+    )
+
     // ---- inbox and unlink ----
     const more = el(`<div class="card"><h3>Where senders find it</h3>
       <p class="warn" style="text-align:left;padding-top:12px">The device's inbox list (kind 10050) names the relays above, signed by the device. Without it nobody who resolves its npub knows where to leave a note.</p></div>`)

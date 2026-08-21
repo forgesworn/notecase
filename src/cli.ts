@@ -459,6 +459,11 @@ const main = async (): Promise<void> => {
               ? `${npubOf(result.pubkeyHex)} is ${result.trusted ? 'now trusted: its notes are stored without a hold.' : 'no longer trusted.'}`
               : `${npubOf(result.pubkeyHex)} was already ${result.trusted ? 'trusted' : 'untrusted'}.`
           )
+        } else if (sub === 'pair') {
+          console.log('  hold the device button to mint a slot for another wallet')
+          const result = await wallet.heartwoodPairWallet(transport, arg ?? 'another wallet')
+          console.log(`Slot ${result.slotIndex} ("${result.label}"). Paste this into the other wallet once; the secret is one-time:`)
+          console.log(result.uri)
         } else if (sub === 'trusted') {
           const trusted = await wallet.heartwoodTrusted(transport)
           if (!trusted.length) console.log('The device trusts no senders; every note needs a hold.')
@@ -485,7 +490,7 @@ const main = async (): Promise<void> => {
           if (sent.relays.length) console.log(`  on: ${sent.relays.join(', ')}`)
           if (sent.failed.length) console.log(`  failed: ${sent.failed.join(', ')}`)
         } else {
-          console.log('heartwood link <bunker://...> | inbox | notes | collect | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | unlink')
+          console.log('heartwood link <bunker://...> | inbox | notes | collect | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | pair [label] | unlink')
         }
       } finally {
         transport.close()
