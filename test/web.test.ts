@@ -85,6 +85,31 @@ describe('the web wallet', () => {
     await until(onHome, 'home')
   })
 
+  it('opens the check screen from settings and comes back', async () => {
+    document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
+    await until(
+      () => [...document.querySelectorAll('button')].some(button => button.textContent?.includes('Check your notes')),
+      'the settings screen'
+    )
+    ;[...document.querySelectorAll<HTMLButtonElement>('button')]
+      .find(b => b.textContent?.includes('Check your notes'))!
+      .click()
+    await until(() => document.querySelector('[data-run]') !== null, 'the check screen')
+    expect(document.body.textContent).toContain('It costs you no privacy')
+    document.querySelector<HTMLButtonElement>('[data-run]')!.click()
+    await until(
+      () => [...document.querySelectorAll('.toast')].some(t => t.textContent?.includes('no notes to check')),
+      'the empty-case answer'
+    )
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(
+      () => [...document.querySelectorAll('button')].some(button => button.textContent?.includes('Lock now')),
+      'settings again'
+    )
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(onHome, 'home')
+  })
+
   it('locks and unlocks with the PIN', async () => {
     document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
     await until(

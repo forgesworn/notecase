@@ -23,17 +23,23 @@ Draft spec: https://github.com/lnurl/luds/pull/301
    (or anyone who saw the invoice) still knows the old secret.
 5. maxWithdrawable from the informational GET is the note's value; the
    URL's amount parameter is an unverified claim.
-6. Pin mint pubkeys on first use; refuse hard on a change.
+6. Pin mint pubkeys on first use; refuse hard on a change. A `sig` that
+   does not verify against the pin is a REFUSAL (BadSignatureError), not a
+   warning - overridable only per receive. No `sig` at all is a warning.
 7. Verify NWC payments by preimage against the invoice's payment hash -
    a successful-looking response is not evidence money moved.
 8. Never print, log or echo a k1 except on explicit send/export.
+9. Sweep every note against its mint from time to time: a bearer note has
+   copies, and one burned out of band stays listed as money until asked
+   about. A mint that does not answer is never marked on.
 
 ## CLI
 
 notecase init [--insecure-plaintext]
 notecase mints add <address|lnurl> / list / use <host>
 notecase mint <sats> [--manual] [--mint <host>]
-notecase receive <note> | send <sats> | melt <bolt11 | sats --to <addr> | sats --to-nwc>
+notecase receive <note> [--force] | send <sats> | melt <bolt11 | sats --to <addr> | sats --to-nwc>
+notecase check [--apply] [--mint <host>]
 notecase balance | list [--all] | reconcile | verify <note>
 notecase nwc set <uri> / status / clear
 notecase backup export | shares [--threshold N --count M] | recover-key
@@ -45,9 +51,10 @@ NOTECASE_HOME relocates the store; NOTECASE_ALLOW_PRIVATE=1 admits LAN mints.
 
 openWallet({pin?, home?}) / initWallet(...) -> {data, save, encrypted, storeKey}
 new Wallet(data, save, {fetch?, timeoutMs?}) ->
-  receive(input), send(amountMsat), prepareExact(amountMsat), melt(pr, target),
-  startMint(grossMsat), claimMint(pending, preimage), awaitMint(pending),
-  reconcile(), balanceMsat(), verifyNoteOffline(input), addMint(input)
+  receive(input, {acceptBadSignature?}), send(amountMsat), prepareExact(amountMsat),
+  melt(pr, target), startMint(grossMsat), claimMint(pending, preimage),
+  awaitMint(pending), reconcile(), checkNotes({apply?, mintHost?}) -> CheckReport,
+  balanceMsat(), verifyNoteOffline(input), addMint(input)
 createWalletFetch({allowPrivate?}) - DNS-pinned fetch, loopback passthrough
 payWithNwc(uri, pr) / invoiceFromNwc(uri, amountMsat, desc) / nwcStatus(uri)
 

@@ -2,7 +2,7 @@ import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
 import {AmbiguousMintError, PendingNoteError, ProtocolError, hashK1} from 'lnurlcash-kit'
 import {fakeBolt11} from '@forgesworn/moneyer'
-import {InsufficientFundsError, Wallet} from '../src/wallet.ts'
+import {BadSignatureError, InsufficientFundsError, Wallet} from '../src/wallet.ts'
 import type {PendingMint, WalletData} from '../src/types.ts'
 import {freshK1, makeWallet, waitMs} from './helpers.ts'
 
@@ -503,5 +503,158 @@ describe('the mint fee band', () => {
     expect((await claimCrediting(38_961)).warnings).toEqual([
       'expected 38000-38960 msat net but the mint credited 38961 msat'
     ])
+  })
+})
+
+// Every note against the mint that issued it. A bearer note has copies by
+// design, so a wallet that never asks will keep counting money someone
+// else already spent.
+describe('checking notes against their mints', () => {
+  it('finds a note burned out of band, and changes nothing until asked', async () => {
+    const theMint = await start()
+    const {wallet} = makeWallet()
+    const kept = await wallet.receive(fund(theMint, 21_000).url)
+    const gone = await wallet.receive(fund(theMint, 5_000).url)
+    // somebody else redeemed their copy
+    theMint.state.settleMelt(gone.note.k1)
+
+    const dry = await wallet.checkNotes()
+    expect(dry.checked).toBe(2)
+    expect(dry.spent.map(note => note.id)).toEqual([gone.note.id])
+    expect(wallet.balanceMsat()).toBe(26_000)
+    expect(gone.note.state).toBe('live')
+
+    const applied = await wallet.checkNotes({apply: true})
+    expect(applied.spent.map(note => note.id)).toEqual([gone.note.id])
+    expect(gone.note.state).toBe('spent')
+    expect(kept.note.state).toBe('live')
+    expect(wallet.balanceMsat()).toBe(21_000)
+  })
+
+  it('files a note the mint has never heard of as spent, and keeps the reason', async () => {
+    const theMint = await start()
+    const {wallet} = makeWallet()
+    const note = await wallet.receive(fund(theMint, 21_000).url)
+    theMint.state.notes.delete(hashK1(note.note.k1))
+
+    const report = await wallet.checkNotes({apply: true})
+    expect(report.unknown.map(record => record.id)).toEqual([note.note.id])
+    expect(report.spent).toEqual([])
+    expect(note.note.state).toBe('spent')
+    expect(note.note.detail).toContain('does not know this note')
+    expect(wallet.balanceMsat()).toBe(0)
+  })
+
+  it('corrects a note the mint says is worth something else', async () => {
+    const theMint = await start()
+    const {wallet} = makeWallet()
+    const note = await wallet.receive(fund(theMint, 21_000).url)
+    // the mint's answer is the authority on value, whenever it changes
+    theMint.state.opts.lieAboutValue = -1_000
+
+    const dry = await wallet.checkNotes()
+    expect(dry.valueChanged).toEqual([{note: note.note, amountMsat: 20_000}])
+    expect(wallet.balanceMsat()).toBe(21_000)
+
+    await wallet.checkNotes({apply: true})
+    expect(note.note.amountMsat).toBe(20_000)
+    expect(wallet.balanceMsat()).toBe(20_000)
+  })
+
+  it('reads a mint holding a note for something in flight as pending, not gone', async () => {
+    const theMint = await start()
+    let held: string | null = null
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
+      if (held && url.pathname === '/w' && url.searchParams.get('k1') === held) {
+        return new Response(JSON.stringify({status: 'ERROR', reason: 'pending'}), {
+          headers: {'content-type': 'application/json'}
+        })
+      }
+      return fetch(input, init)
+    }
+    const {wallet} = makeWallet({fetch: fetchImpl})
+    const note = await wallet.receive(fund(theMint, 21_000).url)
+    held = note.note.k1
+
+    const report = await wallet.checkNotes({apply: true})
+    expect(report.pending.map(record => record.id)).toEqual([note.note.id])
+    expect(report.spent).toEqual([])
+    expect(note.note.state).toBe('ambiguous')
+  })
+
+  it('leaves every note alone at a mint that will not answer, and names it', async () => {
+    const theMint = await start()
+    let offline = false
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      if (offline) throw new TypeError('fetch failed')
+      return fetch(input, init)
+    }
+    const {wallet} = makeWallet({fetch: fetchImpl})
+    const note = await wallet.receive(fund(theMint, 21_000).url)
+    offline = true
+
+    const report = await wallet.checkNotes({apply: true})
+    expect(report.unreachable).toEqual([new URL(theMint.url).host])
+    expect(report.checked).toBe(0)
+    expect(report.spent).toEqual([])
+    expect(note.note.state).toBe('live')
+    expect(wallet.balanceMsat()).toBe(21_000)
+  })
+
+  it('only asks about the mint it was pointed at', async () => {
+    const theMint = await start()
+    const {wallet} = makeWallet()
+    await wallet.receive(fund(theMint, 21_000).url)
+    const report = await wallet.checkNotes({mintHost: 'somewhere.else.example'})
+    expect(report.checked).toBe(0)
+    expect(report.unreachable).toEqual([])
+  })
+})
+
+// The offline signature is the one claim on a note a holder can test
+// without trusting anybody. A failure is a refusal.
+describe('a note whose signature does not verify', () => {
+  const tampered = (signature: string): string =>
+    `${signature.slice(0, -2)}${signature.slice(-2) === 'ff' ? '00' : 'ff'}`
+
+  it('is refused before any record exists, and taken on an explicit override', async () => {
+    const theMint = await start()
+    const {wallet, data} = makeWallet()
+    // one clean receive pins the mint's key; without a pin there is
+    // nothing to check a signature against
+    await wallet.receive(fund(theMint, 21_000).url)
+
+    const k1 = freshK1()
+    const signature = theMint.state.creditNote(k1, 5_000)!
+    const url = `${theMint.url}/w?k1=${k1}&amount=5000&sig=${tampered(signature)}`
+
+    await expect(wallet.receive(url)).rejects.toThrow(BadSignatureError)
+    expect(data.notes.some(note => note.k1 === k1)).toBe(false)
+    expect(wallet.balanceMsat()).toBe(21_000)
+    expect(theMint.state.noteState(k1)).toBe('outstanding')
+
+    const forced = await wallet.receive(url, {acceptBadSignature: true})
+    expect(forced.note.amountMsat).toBe(5_000)
+    expect(forced.warnings.some(warning => warning.includes('your say-so'))).toBe(true)
+    expect(wallet.balanceMsat()).toBe(26_000)
+  })
+
+  it('is a warning, not a refusal, when the mint signs nothing at all', async () => {
+    const theMint = await start({signatures: false})
+    const {wallet} = makeWallet()
+    const result = await wallet.receive(fund(theMint, 21_000).url)
+    expect(result.warnings).toEqual([])
+    expect(wallet.balanceMsat()).toBe(21_000)
+  })
+
+  it('still lets a sent note be reclaimed', async () => {
+    const theMint = await start()
+    const {wallet} = makeWallet()
+    await wallet.receive(fund(theMint, 100_000).url)
+    const sent = await wallet.send(30_000)
+    const back = await wallet.reclaim(sent)
+    expect(back.note.amountMsat).toBe(30_000)
+    expect(wallet.balanceMsat()).toBe(100_000)
   })
 })

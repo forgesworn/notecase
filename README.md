@@ -43,6 +43,12 @@ A bearer note is lost the moment its secret exists nowhere durable. So:
   sender - or anyone who saw the mint invoice - still knows the old secret.
 - **Never print a k1** unless you asked to send. Balances, lists and logs
   show note ids (hashes) only.
+- **A signature that fails is a refusal.** A note carrying a `sig` that
+  does not verify against the key pinned for its mint is rejected before
+  any record is written: the amount may have been altered, or the note may
+  not come from that mint at all. `receive --force` takes it anyway, and
+  says so afterwards. A note with no signature at all stays a warning -
+  mints with no funding source legitimately issue unsigned notes.
 - **A transfer is two mints, never one.** `transfer` mints at the
   destination and melts at the source to pay for it, so it inherits every
   rule above: the melt is in flight until proven otherwise, the arriving
@@ -78,6 +84,8 @@ notecase send 8 --to npub1...          # seals it to their key, leaves it on the
 notecase inbox                         # opens what was sent to your npub, claims it at once
 notecase reclaim                       # takes back anything sent but not yet claimed
 notecase receive                       # prompts for the note, rotates it in
+notecase check                         # asks every mint whether your notes are still good
+notecase check --apply                 # and writes down what it found
 notecase melt 21 --to you@wallet.com   # or a raw bolt11, or --to-nwc
 notecase transfer 50 --from a.example --to b.example   # move between mints
 notecase reconcile                     # resolves anything uncertain
@@ -90,6 +98,22 @@ notecase heartwood pair [label]        # mints a bunker URI for another wallet, 
 notecase heartwood collect             # brings in what arrived at the device by wrap
 notecase backup shares --threshold 2 --count 3
 ```
+
+### Checking your notes
+
+A bearer note has copies by design, so a wallet that never asks can go on
+counting money somebody else already spent: the other copy redeemed first,
+a melt whose answer never arrived, a rotate that finished without the
+wallet hearing. `notecase check` asks every mint about every note it
+issued to this wallet and prints what it found - already spent, unknown to
+the mint, locked by something in flight, or worth a different amount than
+the wallet thought. It is a dry run; `--apply` writes the answers down,
+and `--mint <host>` limits it to one mint.
+
+This costs no privacy. The mint made these notes for this wallet and sees
+each one the moment it is spent, so asking after them tells it nothing it
+does not already hold. A mint that does not answer has its notes left
+exactly as they are and is named in the report - never marked.
 
 ### Notes over Nostr
 
@@ -143,6 +167,11 @@ vite + anime.js) around the same engine - live at
 - A note detail view per note: verified-signature badge, panic rotate,
   copy/share/QR - and handed-over notes stay listed until taken, with
   one-tap reclaim.
+- Settings → Check your notes: the same sweep as the CLI, with a plain
+  reading of what each mint said and an Apply button that asks again
+  before writing anything down.
+- A note whose signature does not verify is refused with a red card that
+  says exactly why; taking it anyway needs two deliberate taps.
 - Send to an npub, and an inbox check that opens and claims what was sent
   to yours; the wallet's Nostr identity and inbox relays live in settings.
 - Camera QR scanning (BarcodeDetector, jsQR fallback) with one universal
