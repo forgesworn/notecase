@@ -29,6 +29,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase melt <bolt11>
   notecase melt <sats> --to <lightning-address>
   notecase melt <sats> --to-nwc
+  notecase transfer <sats> --from <host> --to <host> [--wait <seconds>]
   notecase reconcile
   notecase verify <note>
   notecase nwc set [uri] | nwc status | nwc clear
@@ -43,6 +44,11 @@ and you are prompted for it instead - prefer that: whatever goes on the
 command line lands in your shell history, and these two are live secrets.
 Notes are bearer money: whoever sees a k1 owns it, which is why this tool
 never prints one unless you ask it to send.
+
+A transfer moves value between two mints you already hold notes at: the
+destination issues an invoice, the source melts a note to pay it, and the
+payment preimage becomes the note that lands. Both mints charge for it, so
+you always receive less than you send.
 
 Sending to an npub seals the note to that key and leaves it on their inbox
 relays; they need no wallet yet to be paid. \`inbox\` opens what was sent to
@@ -118,6 +124,7 @@ const main = async (): Promise<void> => {
       wait: {type: 'string'},
       msat: {type: 'boolean', default: false},
       to: {type: 'string'},
+      from: {type: 'string'},
       'to-nwc': {type: 'boolean', default: false},
       threshold: {type: 'string'},
       count: {type: 'string'},
@@ -295,6 +302,43 @@ const main = async (): Promise<void> => {
         ambiguous
           ? 'The melt may be in flight - `notecase reconcile` will settle what happened.'
           : `Melting ${sats(melt.amountMsat)} to ${target} - OK means in flight, \`notecase reconcile\` confirms.`
+      )
+      return
+    }
+
+    case 'transfer': {
+      const grossMsat = parseAmountMsat(rest[0], values.msat)
+      if (!values.from || !values.to) {
+        throw new WalletUsageError('A transfer needs --from <host> and --to <host>.')
+      }
+      let waitMs = 300_000
+      if (values.wait !== undefined) {
+        const seconds = Number(values.wait)
+        if (!Number.isFinite(seconds) || seconds <= 0) {
+          throw new WalletUsageError('--wait takes a positive number of seconds.')
+        }
+        waitMs = seconds * 1000
+      }
+      console.log(`Minting ${sats(grossMsat)} at ${values.to}, paid by melting at ${values.from}\u2026`)
+      const moved = await wallet.transfer(grossMsat, values.from, values.to, {timeoutMs: waitMs})
+      if (moved.fee) {
+        console.log(`  ${values.to} withholds a fee - expect ${sats(moved.pending.expectedNetMsat)} net.`)
+      }
+      if (moved.ambiguous) {
+        console.log(
+          'The melt may be in flight - `notecase reconcile` will settle what happened at both ends.'
+        )
+        return
+      }
+      if (!moved.result) {
+        console.log(
+          `\nMelted at ${values.from}, but ${values.to} has not settled yet - \`notecase reconcile\` will claim it once it does.`
+        )
+        return
+      }
+      for (const warning of moved.result.warnings) console.log(`  warning: ${warning}`)
+      console.log(
+        `\nMoved ${sats(moved.melt.amountMsat)} from ${values.from} to ${values.to}, landing ${sats(moved.result.note.amountMsat)} (${shortId(moved.result.note)}).`
       )
       return
     }

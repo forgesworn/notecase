@@ -43,6 +43,12 @@ A bearer note is lost the moment its secret exists nowhere durable. So:
   sender - or anyone who saw the mint invoice - still knows the old secret.
 - **Never print a k1** unless you asked to send. Balances, lists and logs
   show note ids (hashes) only.
+- **A transfer is two mints, never one.** `transfer` mints at the
+  destination and melts at the source to pay for it, so it inherits every
+  rule above: the melt is in flight until proven otherwise, the arriving
+  note is rotated on claim, and a destination with no LUD-21 verify is
+  refused before anything is burned - nothing could ever learn the preimage
+  there, and the preimage is the money.
 
 ## Use
 
@@ -73,6 +79,7 @@ notecase inbox                         # opens what was sent to your npub, claim
 notecase reclaim                       # takes back anything sent but not yet claimed
 notecase receive                       # prompts for the note, rotates it in
 notecase melt 21 --to you@wallet.com   # or a raw bolt11, or --to-nwc
+notecase transfer 50 --from a.example --to b.example   # move between mints
 notecase reconcile                     # resolves anything uncertain
 notecase nwc set                       # prompts for the connection URI
 notecase nostr init                    # your npub + publishes your inbox relays (kind 10050)
