@@ -56,7 +56,10 @@ notecase nwc set <uri> / status / clear
 notecase backup export | shares [--threshold N --count M] | recover-key
 
 Amounts are sats (--msat for msat). PIN via prompt or $NOTECASE_PIN.
-NOTECASE_HOME relocates the store; NOTECASE_ALLOW_PRIVATE=1 admits LAN mints.
+NOTECASE_HOME relocates the store; NOTECASE_ALLOW_PRIVATE=1 admits LAN mints;
+NOTECASE_PROXY=socks5://host:port routes every call through SOCKS5 (Tor). A
+proxy turns DNS pinning OFF on purpose: the hostname is resolved at the far
+end, so the local resolver never learns which mint the wallet banks with.
 
 ## Library API
 
@@ -69,7 +72,8 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   ladderFor(host), setLadder(host, sats[], copies), ladderPlan(host) -> LadderPlan,
   prepareOffline(host), planOfflineSend(msat, host?) -> OfflineSelection,
   sendOffline(msat, host?, {acceptOverpay?}), receiveOffline(input)
-createWalletFetch({allowPrivate?}) - DNS-pinned fetch, loopback passthrough
+createWalletFetch({allowPrivate?, proxy?}) - DNS-pinned fetch, loopback
+  passthrough; with a socks5:// proxy it tunnels instead and resolves remotely
 payWithNwc(uri, pr) / invoiceFromNwc(uri, amountMsat, desc) / nwcStatus(uri)
 
 All amounts are integer milli-satoshis in the engine; the CLI speaks sats.

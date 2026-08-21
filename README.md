@@ -61,6 +61,42 @@ A bearer note is lost the moment its secret exists nowhere durable. So:
   refused before anything is burned - nothing could ever learn the preimage
   there, and the preimage is the money.
 
+## What the mint knows
+
+A mint is not blind, and a wallet that lets you think otherwise has told
+you a lie about your own money. Everything below is true of every LUD-25
+mint, including ours.
+
+The mint knows every note it ever issued. It knows every rotate, split and
+merge, and it knows the links between them: which note became which, and
+when. It knows the IP address that asked for each of those, and it knows
+the invoice a melt paid.
+
+The mint does not know who holds a note between one operation and the
+next, and a note handed over offline leaves no trace at the mint at all
+until somebody rotates it.
+
+**What this wallet does about it, and how little that is.** notecase
+speaks to a mint on exactly six occasions: minting a note, rotating one,
+splitting one, merging some, melting one, and a check sweep. It says
+nothing to anybody during an offline hand-over. Beyond that, the
+mitigations are weak and should be described as weak:
+
+- `NOTECASE_PROXY=socks5://127.0.0.1:9050` sends every call through a
+  SOCKS5 proxy, which is how you point this at Tor. The mint then sees the
+  exit, not you. It still sees every link between your notes. Setting a
+  proxy turns off the DNS pinning the wallet otherwise does, deliberately:
+  pinning resolves the mint's hostname on your machine, and telling your
+  resolver which mint you bank with defeats the point. That is a swap, not
+  an upgrade - you give up the rebinding guard to get the network privacy.
+- Not rotating at predictable times helps a little, and is on you.
+
+**Why the design is like this anyway.** A bearer note needs no new
+cryptography, any LUD-03 wallet in existence can cash one out without
+knowing what LNURLcash is, and checking one offline needs nothing but a
+signature. Blinding buys privacy from the mint and costs all three. That
+is the trade, stated plainly, so you can decide whether you like it.
+
 ## Use
 
 Not on npm yet - build from source, with the sibling repos it links
@@ -191,7 +227,9 @@ publish.
 
 Amounts are sats (`--msat` for precision). The PIN comes from the prompt
 or `$NOTECASE_PIN`. `NOTECASE_HOME` moves the store; `NOTECASE_ALLOW_PRIVATE=1`
-admits LAN mints through the SSRF guard. `receive` and `nwc set` still
+admits LAN mints through the SSRF guard; `NOTECASE_PROXY=socks5://127.0.0.1:9050`
+sends every call through a SOCKS5 proxy, which is how you point this at Tor
+(see "What the mint knows" above for what that does and does not buy). `receive` and `nwc set` still
 accept their argument on the command line, but prefer the prompted form:
 whatever goes on the command line lands in your shell history, and these
 two are live secrets.
