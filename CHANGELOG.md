@@ -80,6 +80,19 @@ used to warn and take it.
   that pages through several notes one secret at a time, and an offline
   receive whose refusal offers no override - offline the signature is the
   only thing there is to check.
+- **Tap and share in the web wallet.** A note written to an NFC tag is a
+  physical coin: the send and hand-over screens can write one, and the
+  receive screen can read one, both feeding the same classifier the camera
+  does. The convention is a single NDEF URI record holding the note URL
+  with its signature, documented in the README so other wallets read the
+  same tags. Web NFC is Chrome on Android, so the controls do not render
+  anywhere else.
+- The PWA is now a share target: "Share → notecase" from any app hands
+  over a note URL, a bolt11 invoice or a mint address, including one
+  buried in a sentence. The payload is stashed and scrubbed out of the
+  address bar exactly the way a claim fragment is, because a shared note
+  URL is a live secret too, and nothing is ever accepted automatically -
+  it lands on the screen that asks.
 - The web wallet gains Settings → Check your notes: the same sweep, a plain
   reading of what each mint said, and an Apply button that asks the mints
   again before writing anything down.
