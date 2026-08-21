@@ -11,6 +11,8 @@ import {
   identityFromSecret,
   newIdentitySecretHex,
   recipientPubkey,
+  resolveRecipient,
+  npubOf,
   unwrapNote,
   wrapNote,
   type NostrTransport
@@ -315,5 +317,43 @@ describe('interop with the signer', () => {
     const reopened = unwrapNote(fresh, bob)
     expect(reopened.sender).toBe(alice.pubkey)
     expect(reopened.note).toEqual(opened.note)
+  })
+})
+
+// A NIP-05 address is a better thing to hand someone than 63 characters of
+// npub, and unlike an npub it can be pointed at a new key later.
+describe('resolving a recipient', () => {
+  const wellKnown = (names: Record<string, string>): typeof fetch =>
+    (async (url: string | URL) => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        const name = new URL(String(url)).searchParams.get('name')
+        return {names: name && names[name] ? {[name]: names[name]} : {}}
+      }
+    })) as unknown as typeof fetch
+
+  const KEY = 'da19f1cd34beca44be74da4b306d9d1dd86b6343cef94ce22c49c6f59816e5bd'
+
+  it('takes an npub, hex or NIP-05', async () => {
+    expect(await resolveRecipient(KEY)).toBe(KEY)
+    expect(await resolveRecipient(npubOf(KEY))).toBe(KEY)
+    expect(await resolveRecipient('alice@example.com', wellKnown({alice: KEY}))).toBe(KEY)
+  })
+
+  it('lowercases the address before asking, as NIP-05 requires', async () => {
+    expect(await resolveRecipient('ALICE@EXAMPLE.COM', wellKnown({alice: KEY}))).toBe(KEY)
+  })
+
+  it('says which part failed rather than a bare throw', async () => {
+    await expect(resolveRecipient('nobody@example.com', wellKnown({}))).rejects.toThrow(
+      /lists no key for nobody/
+    )
+    await expect(resolveRecipient('not-an-address')).rejects.toThrow(/npub, a 64-hex/)
+  })
+
+  it('refuses a host that answers with something that is not a key', async () => {
+    const bad = wellKnown({alice: 'not-hex'})
+    await expect(resolveRecipient('alice@example.com', bad)).rejects.toThrow(/lists no key/)
   })
 })

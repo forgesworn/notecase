@@ -23,7 +23,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase mint <sats> [--mint <host>] [--manual] [--wait <seconds>]
   notecase receive [note]
   notecase send <sats> [--mint <host>]
-  notecase send <sats> --to <npub>
+  notecase send <sats> --to <npub|nip05>
   notecase inbox
   notecase reclaim [id]
   notecase melt <bolt11>
@@ -50,8 +50,8 @@ destination issues an invoice, the source melts a note to pay it, and the
 payment preimage becomes the note that lands. Both mints charge for it, so
 you always receive less than you send.
 
-Sending to an npub seals the note to that key and leaves it on their inbox
-relays; they need no wallet yet to be paid. \`inbox\` opens what was sent to
+Sending to an npub or a NIP-05 address (name@host) seals the note to that
+key and leaves it on their inbox relays; they need no wallet yet to be paid. \`inbox\` opens what was sent to
 you and claims it at once, which burns the copy on the relay.`
 
 const sats = (msat: number): string =>

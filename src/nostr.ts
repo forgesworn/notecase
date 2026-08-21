@@ -77,8 +77,46 @@ export const recipientPubkey = (input: string): string => {
     const decoded = nip19.decode(trimmed)
     if (decoded.type === 'npub') return decoded.data
   }
-  throw new Error('Give the recipient as an npub or a 64-hex pubkey.')
+  throw new Error('Give the recipient as an npub, a 64-hex pubkey, or a NIP-05 address.')
 }
+
+// A NIP-05 address looks like a Lightning one and resolves the same way, but
+// it is a different well-known and a different answer: `name@host` maps to a
+// pubkey via /.well-known/nostr.json. Worth supporting because telling
+// someone to send money to a 63-character npub is a worse story than telling
+// them an address - and an address can be moved to a new key later, which an
+// npub written on a card cannot.
+export const isNip05 = (input: string): boolean =>
+  /^[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(input.trim())
+
+export const resolveNip05 = async (
+  address: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<string> => {
+  const [name, host] = address.trim().toLowerCase().split('@')
+  if (!name || !host) throw new Error(`${address} is not a NIP-05 address.`)
+  const url = `https://${host}/.well-known/nostr.json?name=${encodeURIComponent(name)}`
+  let body: {names?: Record<string, string>}
+  try {
+    const res = await fetchImpl(url)
+    if (!res.ok) throw new Error(`${host} answered ${res.status}`)
+    body = (await res.json()) as {names?: Record<string, string>}
+  } catch (err) {
+    throw new Error(`Could not resolve ${address}: ${(err as Error).message}`)
+  }
+  const hex = body.names?.[name]
+  if (!hex || !/^[0-9a-f]{64}$/i.test(hex)) {
+    throw new Error(`${host} lists no key for ${name}.`)
+  }
+  return hex.toLowerCase()
+}
+
+// The one call a caller wants: npub, hex or NIP-05, whichever they were given.
+export const resolveRecipient = async (
+  input: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<string> =>
+  isNip05(input) ? resolveNip05(input, fetchImpl) : recipientPubkey(input)
 
 export const npubOf = (pubkeyHex: string): string => nip19.npubEncode(pubkeyHex)
 
