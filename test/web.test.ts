@@ -27,6 +27,31 @@ const until = async (predicate: () => boolean, what: string, timeoutMs = 10_000)
 
 const onHome = () => document.querySelectorAll('.tile').length === 4
 
+const button = (label: string): HTMLButtonElement | undefined =>
+  [...document.querySelectorAll<HTMLButtonElement>('button')].find(candidate =>
+    candidate.textContent?.includes(label)
+  )
+
+// Web NFC is Chrome on Android only, so the tests bring their own reader.
+// A tap hands back one URI record; a write records what it was given.
+const TAG_NOTE = 'lnurlw://mint.example/w?k1=' + 'ab'.repeat(32) + '&amount=21000'
+
+class FakeNDEFReader {
+  static written: {records: Array<{recordType: string; data: string}>} | null = null
+  onreading: ((event: {message: {records: unknown[]}}) => void) | null = null
+  onreadingerror: (() => void) | null = null
+  async scan(): Promise<void> {
+    setTimeout(() => {
+      this.onreading?.({
+        message: {records: [{recordType: 'url', data: new DataView(new TextEncoder().encode(TAG_NOTE).buffer)}]}
+      })
+    }, 10)
+  }
+  async write(message: {records: Array<{recordType: string; data: string}>}): Promise<void> {
+    FakeNDEFReader.written = message
+  }
+}
+
 beforeAll(async () => {
   document.body.innerHTML = '<div id="app"></div><div id="toasts"></div>'
   await import('../web/src/main.ts')
@@ -128,6 +153,60 @@ describe('the web wallet', () => {
     )
     document.querySelector<HTMLButtonElement>('[data-back]')!.click()
     await until(onHome, 'home')
+  })
+
+  it('reads a note off a tag into the receive screen', async () => {
+    ;(globalThis as {NDEFReader?: unknown}).NDEFReader = FakeNDEFReader
+    try {
+      document.querySelector<HTMLButtonElement>('[data-go="receive"]')!.click()
+      await until(() => document.querySelector('textarea') !== null, 'the receive screen')
+      const tap = button('Tap a tag')
+      expect(tap).toBeDefined()
+      tap!.click()
+      await until(() => document.body.textContent?.includes('Hold the tag') ?? false, 'the tag prompt')
+      await until(
+        () => document.querySelector('textarea')!.value === TAG_NOTE,
+        'the note off the tag'
+      )
+      expect(document.querySelector('.scanner')).toBeNull()
+      document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+      await until(onHome, 'the home screen')
+    } finally {
+      delete (globalThis as {NDEFReader?: unknown}).NDEFReader
+    }
+  })
+
+  it('shows no tag controls on a browser without Web NFC', async () => {
+    document.querySelector<HTMLButtonElement>('[data-go="receive"]')!.click()
+    await until(() => document.querySelector('textarea') !== null, 'the receive screen')
+    expect(button('Tap a tag')).toBeUndefined()
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(onHome, 'the home screen')
+  })
+
+  it('writes a note to a tag as a single URI record', async () => {
+    ;(globalThis as {NDEFReader?: unknown}).NDEFReader = FakeNDEFReader
+    try {
+      const {writeNfc} = await import('../web/src/scanner.ts')
+      const written = await writeNfc(TAG_NOTE)
+      expect(written).toBe(true)
+      // the convention other wallets read: one URI record, the note URL
+      expect(FakeNDEFReader.written).toEqual({records: [{recordType: 'url', data: TAG_NOTE}]})
+    } finally {
+      delete (globalThis as {NDEFReader?: unknown}).NDEFReader
+    }
+  })
+
+  it('picks a note, an invoice or a mint out of what was shared in', async () => {
+    const {shareTargetInput} = await import('../web/src/main.ts')
+    expect(shareTargetInput(`?text=${encodeURIComponent(TAG_NOTE)}`)).toBe(TAG_NOTE)
+    expect(shareTargetInput(`?url=${encodeURIComponent(TAG_NOTE)}`)).toBe(TAG_NOTE)
+    // a sentence with the link inside it, which is how apps really share
+    expect(shareTargetInput(`?text=${encodeURIComponent(`here you go ${TAG_NOTE} enjoy`)}`)).toBe(TAG_NOTE)
+    expect(shareTargetInput(`?text=${encodeURIComponent(`lightning:${TAG_NOTE}`)}`)).toBe(TAG_NOTE)
+    expect(shareTargetInput('?text=' + encodeURIComponent('mint@mint.example'))).toBe('mint@mint.example')
+    expect(shareTargetInput('?text=just%20a%20message')).toBeNull()
+    expect(shareTargetInput('')).toBeNull()
   })
 
   it('locks and unlocks with the PIN', async () => {

@@ -153,6 +153,20 @@ first, reconcile says so and files the note as spent.
 Offline mode is asked for and never inferred from connectivity: in the
 web wallet it is a switch in the header, and on the CLI it is `--offline`.
 
+### Notes on a tag
+
+A note is one URL, so it fits in an NDEF URI record and a tag becomes a
+coin: tap it and the receive screen opens with the note in it. The
+convention is the plainest one available, so other wallets can read the
+same tags:
+
+> **a single NDEF URI record holding the note URL**, signature included
+> (`lnurlw://mint.example/w?k1=…&amount=…&sig=…`)
+
+Nothing else on the tag, and nothing implied about it. A tag is worse than
+a clipboard for secrecy - anyone who taps it owns the sats - so the wallet
+says so both when it writes one and when it reads one.
+
 ### Notes over Nostr
 
 A note is one URL, so it fits inside a NIP-59 gift wrap. `send --to` cuts
@@ -227,6 +241,12 @@ vite + anime.js) around the same engine - live at
 - A `#/claim?u=…` route other sites can link notes into - the fragment
   never reaches a server, and the wallet prefills rather than
   auto-accepts.
+- Tap to pay: a note written to an NFC tag is a physical coin, and a tag
+  tapped against the phone opens the receive screen with it. Chrome on
+  Android only, so the controls simply do not appear elsewhere.
+- A share target, so "Share → notecase" from any app hands a note URL,
+  an invoice or a mint address to the wallet. Nothing is ever accepted
+  automatically: it lands on the screen that asks.
 - Installable PWA whose service worker asks before updating and caches no
   protocol call: money answers are live or visibly absent, never stale.
 

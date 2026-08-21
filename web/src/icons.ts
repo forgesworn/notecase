@@ -40,6 +40,7 @@ export const icons = {
   wallet: svg('<rect x="2.5" y="6" width="19" height="13" rx="3.5"/><path d="M2.5 10h12"/><rect x="15" y="11.5" width="4.5" height="3.5" rx="1.75" fill="currentColor" stroke="none"/>'),
   undo: svg('<path d="M8.5 5 4 9.5 8.5 14"/><path d="M4 9.5h9.5a6 6 0 0 1 0 12H9"/>'),
   hourglass: svg('<path d="M6.5 3h11"/><path d="M6.5 21h11"/><path d="M8 3v3.5c0 2.5 4 4 4 5.5s-4 3-4 5.5V21"/><path d="M16 3v3.5c0 2.5-4 4-4 5.5s4 3 4 5.5V21"/>'),
+  tag: svg('<path d="M20.5 12.5 12.5 20.5a2.5 2.5 0 0 1-3.5 0l-5.5-5.5a2.5 2.5 0 0 1 0-3.5l8-8H19a2 2 0 0 1 2 2v6.5z"/><circle cx="16.5" cy="7.5" r="1.2"/>'),
   offline: svg('<path d="M13 2 4.5 13.5H11L9.5 22 18 10.5h-6.5L13 2z"/><path d="m3 3 18 18"/>'),
   drawer: svg('<rect x="3" y="5" width="18" height="6" rx="1.5"/><rect x="3" y="13" width="18" height="6" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/>'),
   info: svg('<circle cx="12" cy="12" r="8.5"/><path d="M12 11.2V16"/><path d="M12 8v.01"/>')

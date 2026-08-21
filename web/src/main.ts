@@ -38,7 +38,7 @@ import {
   walletExists,
   type BrowserStore
 } from './browser-store.ts'
-import {scanAvailable, scanQr} from './scanner.ts'
+import {nfcAvailable, scanAvailable, scanNfc, scanQr, writeNfc} from './scanner.ts'
 import {icons} from './icons.ts'
 import {rosette} from './guilloche.ts'
 import {banknote} from './banknote.ts'
@@ -128,6 +128,63 @@ const readClaimHash = (): void => {
     rememberClaim(null)
   }
   history.replaceState(null, '', location.pathname + location.search)
+}
+
+// ---------- the share target ----------
+// "Share to notecase" from any app lands on /share?text=… The payload can
+// be a live note URL, so it gets the same handling the claim fragment
+// gets: stashed in sessionStorage, scrubbed out of the address bar at
+// once, and never accepted on its own - it goes to the screen that asks.
+
+const SHARE_KEY = 'notecase:pending-share'
+
+// Android puts a shared URL in `text` about as often as in `url`, and some
+// apps share a sentence with the link inside it. Take the first thing that
+// looks like something this wallet understands.
+export const shareTargetInput = (search: string): string | null => {
+  const params = new URLSearchParams(search)
+  const fields = [params.get('url'), params.get('text'), params.get('title')].filter(
+    (value): value is string => Boolean(value)
+  )
+  for (const field of fields) {
+    const whole = field.trim()
+    if (!whole) continue
+    const candidates = [whole, ...whole.split(/\s+/)]
+    for (const candidate of candidates) {
+      const value = candidate.replace(/^lightning:/i, '').trim()
+      if (!value) continue
+      if (resolveNoteInput(value) || isBolt11Invoice(value) || resolveMintInput(value)) return value
+    }
+  }
+  return null
+}
+
+let shareMemory: string | null = null
+let shareOffered = false
+
+const rememberShare = (value: string | null): void => {
+  shareMemory = value
+  try {
+    if (value) sessionStorage.setItem(SHARE_KEY, value)
+    else sessionStorage.removeItem(SHARE_KEY)
+  } catch {
+    // private mode: the in-memory copy still serves this visit
+  }
+}
+
+const takeShare = (): string | null => {
+  if (shareMemory) return shareMemory
+  try {
+    return sessionStorage.getItem(SHARE_KEY)
+  } catch {
+    return null
+  }
+}
+
+const readShareTarget = (): void => {
+  if (!location.pathname.startsWith('/share')) return
+  rememberShare(shareTargetInput(location.search))
+  history.replaceState(null, '', '/')
 }
 
 // ---------- offline mode ----------
@@ -640,6 +697,37 @@ const amountField = (options: {presets?: number[]; maxMsat?: number} = {}): {nod
   }
 }
 
+// Reading a tag: the same shape as the camera button, and it renders only
+// where Web NFC exists at all, which is Chrome on Android.
+const tapButton = (onRead: (value: string) => void): HTMLElement | null => {
+  if (!nfcAvailable()) return null
+  const button = el(`<button class="btn btn-ghost">${icons.tag}<span>Tap a tag</span></button>`)
+  button.addEventListener('click', async () => {
+    const value = await scanNfc()
+    if (value) onRead(value)
+    else if (value === null) toast('Nothing readable on that tag.', '')
+  })
+  return button
+}
+
+// Writing one: a note URL in a single URI record, which is all a tag needs
+// to be a coin. The warning is the clipboard's, because a tag is worse -
+// it can be read by anybody who taps it.
+const writeTagButton = (url: string): HTMLElement | null => {
+  if (!nfcAvailable()) return null
+  const button = el(`<button class="btn btn-ghost">${icons.tag}<span>Write to a tag</span></button>`)
+  button.addEventListener('click', async () => {
+    const written = await writeNfc(url)
+    if (written) {
+      toast(
+        'Written. That tag is now the money: anyone who taps it owns the sats, so hand it to exactly one person.',
+        'ok'
+      )
+    }
+  })
+  return button
+}
+
 const scanButton = (onScan: (value: string) => void): HTMLElement | null => {
   if (!scanAvailable()) return null
   const button = el(`<button class="btn btn-ghost">${icons.scan}<span>Scan a QR</span></button>`)
@@ -1062,6 +1150,17 @@ const viewHome = (): void => {
     claimOffered = true
     viewReceive(claim)
     toast('A note arrived - check it and receive.', 'ok')
+    return
+  }
+
+  // Something shared into the wallet from another app. Routed by what it
+  // is, never accepted on its own.
+  const shared = takeShare()
+  if (shared && !shareOffered) {
+    shareOffered = true
+    rememberShare(null)
+    classifyScan(shared)
+    toast('Shared into notecase - check it before you take it.', 'ok')
   }
 }
 
@@ -1280,10 +1379,13 @@ const viewReceive = (prefill?: string): void => {
     body.querySelector('[data-paste]')!.addEventListener('click', async () => {
       input.value = await navigator.clipboard.readText().catch(() => input.value)
     })
-    const scan = scanButton(value => {
+    const fill = (value: string): void => {
       input.value = value.replace(/^lightning:/i, '')
-    })
+    }
+    const scan = scanButton(fill)
     if (scan) body.insertBefore(scan, body.querySelector('[data-receive]'))
+    const tap = tapButton(fill)
+    if (tap) body.insertBefore(tap, body.querySelector('[data-receive]'))
     const receiveButton = body.querySelector('[data-receive]') as HTMLButtonElement
     // Where a refused note explains itself. Sits directly above the button
     // that was pressed, so the answer is where the eye already is.
@@ -1399,6 +1501,8 @@ const handedOver = (handed: OfflineHandover): void => {
       inner.append(copyUrl)
       const share = shareButton(url)
       if (share) inner.append(share)
+      const tag = writeTagButton(url)
+      if (tag) inner.append(tag)
       if (handed.notes.length > 1) {
         const pager = el('<div class="row" style="gap:12px;border:none"></div>')
         const back = el(`<button class="btn btn-ghost" style="flex:1">Previous</button>`)
@@ -1530,6 +1634,8 @@ const viewSend = (): void => {
           inner.append(copyMessage)
           const share = shareButton(message)
           if (share) inner.append(share)
+          const tag = writeTagButton(url)
+          if (tag) inner.append(tag)
           done.append(inner)
           strikeIn(print, note.amountMsat, inner)
           return done
@@ -2654,6 +2760,7 @@ const update = registerSW({
 // ---------- boot ----------
 
 readClaimHash()
+readShareTarget()
 if (location.hash === '#/proof') {
   viewProof()
 } else if (walletExists()) {

@@ -100,3 +100,91 @@ export const scanQr = (): Promise<string | null> =>
       void tick()
     })()
   })
+
+// ---------- NFC ----------
+// A note URL in an NDEF URI record is a physical coin: tap it and the sats
+// are in your hand. The convention is deliberately the plainest one there
+// is, a single URI record holding the note URL with its signature, so any
+// other wallet can read a tag this one writes and the other way round.
+//
+// Web NFC is Chrome on Android and nowhere else, so every entry point is
+// feature-detected and simply does not appear elsewhere.
+
+type NdefRecord = {recordType: string; mediaType?: string; encoding?: string; data?: DataView}
+type NdefMessage = {records: NdefRecord[]}
+type NdefWriteRecord = {recordType: string; data: string}
+
+declare global {
+  var NDEFReader:
+    | {
+        new (): {
+          scan(options?: {signal?: AbortSignal}): Promise<void>
+          write(message: {records: NdefWriteRecord[]}, options?: {signal?: AbortSignal}): Promise<void>
+          onreading: ((event: {message: NdefMessage}) => void) | null
+          onreadingerror: (() => void) | null
+        }
+      }
+    | undefined
+}
+
+export const nfcAvailable = (): boolean => typeof globalThis.NDEFReader !== 'undefined'
+
+// The first URL or text record of a tag, as plain text.
+const firstPayload = (message: NdefMessage): string | null => {
+  for (const record of message.records) {
+    if (record.recordType !== 'url' && record.recordType !== 'text') continue
+    if (!record.data) continue
+    const value = new TextDecoder(record.encoding ?? 'utf-8').decode(record.data).trim()
+    if (value) return value
+  }
+  return null
+}
+
+// A full-screen prompt while the phone waits for a tag. Resolves with what
+// was read, or null if it was cancelled or the tag held nothing useful.
+const tagPrompt = (
+  message: string,
+  work: (signal: AbortSignal, done: (value: string | null) => void) => Promise<void>
+): Promise<string | null> =>
+  new Promise(resolve => {
+    const overlay = document.createElement('div')
+    overlay.className = 'scanner'
+    overlay.innerHTML = `
+      <div class="scanner-frame" aria-hidden="true"></div>
+      <p></p>
+      <button class="btn scanner-close">Cancel</button>`
+    overlay.querySelector('p')!.textContent = message
+    document.body.append(overlay)
+    const controller = new AbortController()
+    let settled = false
+    const finish = (value: string | null): void => {
+      if (settled) return
+      settled = true
+      controller.abort()
+      overlay.remove()
+      resolve(value)
+    }
+    overlay.querySelector('.scanner-close')!.addEventListener('click', () => finish(null))
+    void work(controller.signal, finish).catch(() => {
+      overlay.querySelector('p')!.textContent = 'This phone would not start NFC - use the QR instead.'
+      setTimeout(() => finish(null), 1600)
+    })
+  })
+
+// Reads a tag. Same callback shape as the camera scanner, so both feed the
+// one classifier.
+export const scanNfc = (): Promise<string | null> =>
+  tagPrompt('Hold the tag against the back of your phone', async (signal, done) => {
+    const reader = new globalThis.NDEFReader!()
+    reader.onreadingerror = () => done(null)
+    reader.onreading = event => done(firstPayload(event.message))
+    await reader.scan({signal})
+  })
+
+// Writes one URI record. Resolves true once a tag took it.
+export const writeNfc = (url: string): Promise<boolean> =>
+  tagPrompt('Hold a blank tag against the back of your phone', async (signal, done) => {
+    const writer = new globalThis.NDEFReader!()
+    await writer.write({records: [{recordType: 'url', data: url}]}, {signal})
+    done('written')
+  }).then(result => result === 'written')

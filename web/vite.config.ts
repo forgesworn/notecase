@@ -23,7 +23,17 @@ export default defineConfig({
           {src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png'},
           {src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png'},
           {src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable'}
-        ]
+        ],
+        // "Share to notecase" from any app. A GET target, so the payload
+        // arrives in the query string and is scrubbed out of the address
+        // bar the moment it is read - the same handling the claim fragment
+        // gets, because a shared note URL is a live secret too. Nothing is
+        // ever accepted automatically: it lands in the receive screen.
+        share_target: {
+          action: '/share',
+          method: 'GET',
+          params: {text: 'text', url: 'url'}
+        }
       },
       workbox: {
         navigateFallback: 'index.html',
