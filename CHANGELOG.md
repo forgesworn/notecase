@@ -6,6 +6,11 @@ While LUD-25 is a draft, a `0.x` minor bump may be breaking. This one is:
 `receive` now refuses a note whose signature does not verify, where it
 used to warn and take it.
 
+- A backup holding a note taken offline can be restored again. The
+  portable backup's validator required every note to carry its mint's
+  callback URL, and a note taken offline has none until reconcile has
+  asked the mint for one, so exporting and re-importing such a wallet
+  refused the file.
 - **A lightning address, claimed from the wallet.** `notecase address
   claim <name>` takes `name@mint.example` at a mint that hands them out.
   The mint charges in its own notes, so the wallet cuts one out of the

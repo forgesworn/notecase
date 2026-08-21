@@ -33,6 +33,27 @@ describe('backup', () => {
     expect(file).not.toContain('b'.repeat(64))
   })
 
+  it('round-trips a note taken offline, which has no callback yet', async () => {
+    const data = sample()
+    data.notes.push({
+      id: 'c'.repeat(64),
+      k1: 'd'.repeat(64),
+      amountMsat: 5_000,
+      baseUrl: 'https://mint.example/w',
+      // no callback: the mint publishes one, and a note URL does not
+      // carry it, so a note taken offline has none until reconcile
+      callback: '',
+      mintHost: 'mint.example',
+      state: 'live',
+      origin: 'receive',
+      unrotated: true,
+      createdAt: 2,
+      updatedAt: 2
+    })
+    const file = await exportBackup(data, 'correct horse battery')
+    expect(await importBackup(file, 'correct horse battery')).toEqual(data)
+  })
+
   it('refuses a short passphrase at export', async () => {
     await expect(exportBackup(sample(), 'short')).rejects.toThrow(BackupError)
   })
