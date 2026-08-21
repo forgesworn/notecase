@@ -775,6 +775,59 @@ export class Wallet {
     }
   }
 
+  // ---- moving value between mints ----
+
+  // A transfer is a mint at the destination paid for by a melt at the
+  // source: B issues an invoice, A pays it, and B's payment preimage is
+  // the note that lands. Nothing here is new protocol, which is the point
+  // - it is startMint, melt and awaitMint in a row, so every safety rule
+  // those already follow (persist before disclose, melt-OK-means-in-flight,
+  // rotate on claim) applies unchanged.
+  //
+  // The failure that matters is the middle one. A melt's OK only means the
+  // payment is in flight, so between here and B settling there is a window
+  // where A's note is burned and B's note does not exist yet. That window
+  // is not closed by trying harder; it is closed by never reporting success
+  // the wallet has not seen, and leaving reconcile() to finish either way.
+  async transfer(
+    grossMsat: number,
+    fromMintHost: string,
+    toMintHost: string,
+    options: {timeoutMs?: number; intervalMs?: number} = {}
+  ): Promise<{
+    pending: PendingMint
+    melt: MeltRecord
+    fee: MintFee | null
+    result: ReceiveResult | null
+    ambiguous: boolean
+  }> {
+    const from = this.mintEntry(fromMintHost)
+    const to = this.mintEntry(toMintHost)
+    if (from.host === to.host) {
+      // Melting a note to pay the same mint's own invoice is a self-payment
+      // against one node. It moves nothing and proves nothing, and it still
+      // costs both fees.
+      throw new WalletUsageError('A transfer needs two different mints.')
+    }
+
+    const {pending, fee} = await this.startMint(grossMsat, to.host)
+    if (!pending.verifyUrl) {
+      // Without verify there is no way to learn the preimage, and the
+      // preimage IS the note. Refuse before burning anything at the source.
+      this.data.pendingMints = this.data.pendingMints.filter(record => record !== pending)
+      await this.persist()
+      throw new WalletUsageError(
+        `${to.host} offers no LUD-21 verify, so a transfer into it could not claim the note it paid for.`
+      )
+    }
+
+    const {melt, ambiguous} = await this.melt(pending.pr, `mint@${to.host}`, from.host)
+    if (ambiguous) return {pending, melt, fee, result: null, ambiguous: true}
+
+    const result = await this.awaitMint(pending, options)
+    return {pending, melt, fee, result, ambiguous: false}
+  }
+
   // ---- melting ----
 
   async melt(pr: string, target: string, mintHost?: string): Promise<{melt: MeltRecord; ambiguous: boolean}> {
