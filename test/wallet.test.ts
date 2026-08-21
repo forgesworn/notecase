@@ -451,3 +451,57 @@ describe('mint claims', () => {
     expect(wallet.balanceMsat()).toBe(0)
   })
 })
+
+// The mint fee band. LUD-25 does not say whether the fee rounds, so a
+// note landing anywhere between the msat-exact formula and the same fee
+// ceilinged to a whole sat is the mint keeping its word. Only outside
+// that is worth telling the holder about. These are the numbers
+// mint.forgesworn.dev actually credited on 2026-08-21: 40_000 gross, a
+// 1000 + 1000ppm fee, and 38_000 rather than the formula's 38_960.
+describe('the mint fee band', () => {
+  // As stageClaim above: the mock's invoices are unfundable fakes, so the
+  // claim is staged by hand. creditNote decides what the mint credited,
+  // which is the whole point here.
+  const claimCrediting = async (creditedMsat: number) => {
+    const theMint = await start()
+    {
+      const {wallet, data} = makeWallet()
+      const preimage = freshK1()
+      theMint.state.creditNote(preimage, creditedMsat)
+      const pending: PendingMint = {
+        id: hashK1(preimage),
+        mintHost: new URL(theMint.url).host,
+        baseUrl: `${theMint.url}/w`,
+        pr: 'lnbc1staged',
+        grossMsat: 40_000,
+        expectedNetMsat: 38_960,
+        minNetMsat: 38_000,
+        state: 'awaiting',
+        createdAt: 1,
+        updatedAt: 1
+      }
+      data.pendingMints.push(pending)
+      return await wallet.claimMint(pending, preimage)
+    }
+  }
+
+  it('says nothing when a mint ceilings its fee, as the reference does', async () => {
+    expect((await claimCrediting(38_000)).warnings).toEqual([])
+  })
+
+  it('says nothing at the msat-exact edge either', async () => {
+    expect((await claimCrediting(38_960)).warnings).toEqual([])
+  })
+
+  it('names the band when a mint takes more than either reading allows', async () => {
+    expect((await claimCrediting(37_999)).warnings).toEqual([
+      'expected 38000-38960 msat net but the mint credited 37999 msat'
+    ])
+  })
+
+  it('names the band when a mint credits more than it advertised', async () => {
+    expect((await claimCrediting(38_961)).warnings).toEqual([
+      'expected 38000-38960 msat net but the mint credited 38961 msat'
+    ])
+  })
+})
