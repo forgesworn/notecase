@@ -85,6 +85,26 @@ describe('the web wallet', () => {
     await until(onHome, 'home')
   })
 
+  it('turns offline mode on from the header and says so', async () => {
+    document.querySelector<HTMLButtonElement>('[data-offline]')!.click()
+    await until(
+      () => document.body.textContent?.includes('offline mode - no mint is called') ?? false,
+      'the offline badge'
+    )
+    document.querySelector<HTMLButtonElement>('[data-go="receive"]')!.click()
+    await until(() => document.querySelector('textarea') !== null, 'the receive screen')
+    // no relay round trip is offered while offline
+    expect(document.querySelector('[data-inbox]')).toBeNull()
+    expect(document.body.textContent).toContain('Taking a note with no connection')
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(onHome, 'the home screen')
+    document.querySelector<HTMLButtonElement>('[data-offline]')!.click()
+    await until(
+      () => !(document.body.textContent?.includes('offline mode - no mint is called') ?? false),
+      'the badge to go'
+    )
+  })
+
   it('opens the check screen from settings and comes back', async () => {
     document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
     await until(

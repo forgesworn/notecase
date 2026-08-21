@@ -28,6 +28,38 @@ used to warn and take it.
   no funding source legitimately issue unsigned notes. Reclaiming a note
   this wallet sent is never refused on a signature: it is our own money
   coming home.
+- **An offline cash drawer.** A note is a secret, so handing one over
+  needs no network - but a wallet holding one big note cannot pay a small
+  amount, because cutting a note down needs the mint. Each mint now has a
+  ladder of denominations (100, 500, 1000 and 5000 sats, two of each by
+  default) that `notecase prepare` keeps cut and ready. It quotes the
+  split fees before cutting anything, `--apply` cuts them, and it is
+  re-runnable: a full drawer costs nothing to check. `notecase ladder`
+  shows and sets the shape of the drawer per mint.
+- `notecase send <sats> --offline` hands over notes the wallet already
+  holds that add up to the amount exactly, as one or more URLs, with **no
+  call to any mint at all**. Where no combination is exact it names the
+  nearest above and the overpay rather than guessing; `--overpay` accepts
+  it. The records go to `sent` and are persisted before the URLs are
+  handed back, so a crash cannot give a note away twice.
+- `notecase receive --offline` takes a note on the mint's signature alone.
+  It needs a pinned key for that mint and refuses without one: there would
+  be nothing to check against, and that is the leap of faith LUD-25 is
+  careful not to ask for. A note taken this way is stored **unrotated**,
+  because whoever handed it over still knows its secret; the balance says
+  how much is in that state, and `reconcile` now rotates every one of them
+  at the first opportunity, or files it as spent if the giver got there
+  first.
+- Offline mode is asked for and never inferred from connectivity: a switch
+  in the web wallet's header, `--offline` on the CLI. The kit's `offline`
+  option is a promise, and a promise cannot be made from a guess.
+- A note URL now carries the mint's `sig` alongside the secret and amount.
+  It is the mint's own public statement about that note, and carrying it is
+  what lets a recipient check the note without asking anybody.
+- The web wallet gains a cash drawer under each mint, an offline hand-over
+  that pages through several notes one secret at a time, and an offline
+  receive whose refusal offers no override - offline the signature is the
+  only thing there is to check.
 - The web wallet gains Settings → Check your notes: the same sweep, a plain
   reading of what each mint said, and an Apply button that asks the mints
   again before writing anything down.

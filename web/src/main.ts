@@ -22,7 +22,7 @@ import {
   verifyNoteSignature
 } from 'lnurlcash-kit'
 import {Wallet, BadSignatureError, WalletUsageError, InsufficientFundsError, PinMismatchError} from '../../src/wallet.ts'
-import type {CheckReport} from '../../src/wallet.ts'
+import type {CheckReport, OfflineHandover} from '../../src/wallet.ts'
 import {exportBackup, importBackup} from '../../src/backup.ts'
 import {payWithNwc, invoiceFromNwc, nwcStatus} from '../../src/nwc.ts'
 import {npubOf, poolTransport, type NostrTransport} from '../../src/nostr.ts'
@@ -128,6 +128,31 @@ const readClaimHash = (): void => {
     rememberClaim(null)
   }
   history.replaceState(null, '', location.pathname + location.search)
+}
+
+// ---------- offline mode ----------
+// Asked for, never guessed at. The kit's `offline` option is a promise
+// that no call goes out, and a promise cannot be made from a connectivity
+// reading that is wrong as often as it is right. So it is a switch, and it
+// stays where the holder left it.
+
+const OFFLINE_KEY = 'notecase:offline'
+
+let offlineMode = (() => {
+  try {
+    return localStorage.getItem(OFFLINE_KEY) === '1'
+  } catch {
+    return false
+  }
+})()
+
+const setOfflineMode = (on: boolean): void => {
+  offlineMode = on
+  try {
+    localStorage.setItem(OFFLINE_KEY, on ? '1' : '0')
+  } catch {
+    // private mode: the switch still works for this visit
+  }
 }
 
 // ---------- tiny DOM + motion helpers ----------
@@ -891,6 +916,7 @@ const viewHome = (): void => {
       <div class="top">
         <div class="brand">${icons.logo}<span>NOTECASE</span></div>
         <span class="spacer"></span>
+        <button class="btn-icon" data-offline data-hint="${offlineMode ? 'Offline mode is on - tap to talk to mints again' : 'Offline mode: hand notes over with nothing on the wire'}" aria-label="Offline mode" aria-pressed="${offlineMode}" style="color:${offlineMode ? 'var(--warn)' : 'var(--dim)'}">${icons.offline}</button>
         <button class="btn-icon" data-history data-hint="Everything that has happened" aria-label="History">${icons.history}</button>
         <button class="btn-icon" data-settings data-hint="Mints, backup, security" aria-label="Settings">${icons.settings}</button>
       </div>
@@ -923,6 +949,16 @@ const viewHome = (): void => {
         chip.addEventListener('click', () => viewMints())
         sub.append(chip)
       }
+    }
+
+    const unrotated = w.unrotatedMsat()
+    if (unrotated > 0) {
+      sub.append(el(`<span class="fineline" style="margin-top:6px">of which ${sats(unrotated)} sat taken offline, not rotated yet</span>`))
+    }
+    if (offlineMode) {
+      view.querySelector('.hero')!.append(
+        el(`<span class="badge wait" style="margin-top:14px">${icons.offline}<span>offline mode - no mint is called</span></span>`)
+      )
     }
 
     if (w.needsReconcile()) {
@@ -987,6 +1023,16 @@ const viewHome = (): void => {
 
     view.querySelector('[data-settings]')!.addEventListener('click', viewSettings)
     view.querySelector('[data-history]')!.addEventListener('click', viewHistory)
+    view.querySelector('[data-offline]')!.addEventListener('click', () => {
+      setOfflineMode(!offlineMode)
+      toast(
+        offlineMode
+          ? 'Offline mode on. Notes are handed over and taken on the mint signature alone, with nothing sent to a mint.'
+          : 'Offline mode off. Notes are rotated at the mint again.',
+        'ok'
+      )
+      viewHome()
+    })
     view.querySelectorAll<HTMLButtonElement>('[data-go]').forEach(button =>
       button.addEventListener('click', () => {
         const go = button.dataset.go
@@ -1193,22 +1239,30 @@ const viewReceive = (prefill?: string): void => {
     const view = el(`<div class="view"></div>`)
     view.append(topBar('Receive a note', viewHome))
     const body = el(`<div class="stack">
-      <div class="hint">${icons.info}<span><b>Someone handed you a note?</b> Paste or scan it here. Receiving locks it to this wallet under a fresh secret - the sender can no longer spend it.</span></div>
+      <div class="hint">${icons.info}<span>${
+        offlineMode
+          ? '<b>Taking a note with no connection?</b> Paste or scan it here. It is checked against the signature of the mint that made it, using the key this wallet already has, so nothing needs to be sent anywhere. The person who gave it to you still knows its secret until you are back online and reconcile.'
+          : '<b>Someone handed you a note?</b> Paste or scan it here. Receiving locks it to this wallet under a fresh secret - the sender can no longer spend it.'
+      }</span></div>
       <div class="field">
         <label>The note you were given</label>
         <textarea data-input placeholder="lnurlw://… or LNURL1…" autocomplete="off" spellcheck="false"></textarea>
       </div>
       <button class="btn btn-ghost" data-paste>${icons.paste}<span>Paste from clipboard</span></button>
-      <button class="btn btn-silver" data-receive>${icons.receive}<span>Receive</span></button>
-      <div class="rubric">Or over Nostr</div>
+      <button class="btn btn-silver" data-receive>${icons.receive}<span>${offlineMode ? 'Take it offline' : 'Receive'}</span></button>
+      ${
+        offlineMode
+          ? ''
+          : `<div class="rubric">Or over Nostr</div>
       <div class="hint">${icons.info}<span><b>Sent to your npub?</b> Notes sealed to this wallet's key wait on your inbox relays. Checking opens them and locks each one to this wallet at once.</span></div>
-      <button class="btn" data-inbox>${icons.refresh}<span>Check my inbox</span></button>
+      <button class="btn" data-inbox>${icons.refresh}<span>Check my inbox</span></button>`
+      }
     </div>`)
     view.append(body)
     const input = body.querySelector('textarea')!
     if (prefill) input.value = prefill
-    const inbox = body.querySelector('[data-inbox]') as HTMLButtonElement
-    inbox.addEventListener('click', () =>
+    const inbox = body.querySelector('[data-inbox]') as HTMLButtonElement | null
+    inbox?.addEventListener('click', () =>
       busy(inbox, async () => {
         const result = await withRelays(t => w.receiveFromNostr(t))
         for (const r of result.received) r.warnings.forEach(warning => toast(warning, 'err'))
@@ -1238,7 +1292,9 @@ const viewReceive = (prefill?: string): void => {
 
     const take = async (acceptBadSignature: boolean): Promise<void> => {
       try {
-        const result = await w.receive(input.value.trim(), {acceptBadSignature})
+        const result = offlineMode
+          ? await w.receiveOffline(input.value.trim())
+          : await w.receive(input.value.trim(), {acceptBadSignature})
         result.warnings.forEach(warning => toast(warning, 'err'))
         // Safely in the store and rotated: only now is it safe to forget
         // the incoming claim.
@@ -1266,6 +1322,15 @@ const viewReceive = (prefill?: string): void => {
       </div>`)
       // the reason names a host and comes off the wire: text, never markup
       card.querySelector('[data-reason]')!.textContent = `${reason}.`
+      if (offlineMode) {
+        // Offline the signature is the ONLY thing that can be checked.
+        // There is nothing to fall back on, so there is nothing to offer.
+        card.append(
+          el(`<p class="warn" style="text-align:left">With no connection there is nothing else to check this against, so it cannot be taken. Ask for another note, or take this one once you are back online.</p>`)
+        )
+        refusal.append(card)
+        return
+      }
       const accept = el(`<button class="btn btn-ghost danger-text"><span>Take it anyway</span></button>`)
       const label = accept.querySelector('span')!
       let armed = false
@@ -1302,6 +1367,61 @@ const shortNpub = (hex: string): string => {
   return `${npub.slice(0, 12)}…${npub.slice(-6)}`
 }
 
+// A handover made with nothing on the wire. Several notes may be needed,
+// since offline nothing can be cut to size - and they are shown one page
+// at a time, because two bearer secrets on one screen is one too many.
+const handedOver = (handed: OfflineHandover): void => {
+  let page = 0
+  const draw = (): void => {
+    show(() => {
+      const note = handed.notes[page]!
+      const url = handed.urls[page]!
+      const view = el('<div class="view"></div>')
+      view.append(topBar(handed.notes.length === 1 ? 'Hand this over' : `Note ${page + 1} of ${handed.notes.length}`, viewHome))
+      const inner = el('<div class="stack center"></div>')
+      const print = notePrint(note, toBech32Lnurl(url).toUpperCase())
+      inner.append(print)
+      if (handed.notes.length > 1) {
+        inner.append(
+          el(`<p class="warn">These ${handed.notes.length} notes are worth ${sats(handed.totalMsat)} sat together. Hand over every one of them.</p>`)
+        )
+      }
+      if (handed.overpayMsat > 0) {
+        inner.append(
+          el(`<p class="warn"><strong>This is ${sats(handed.overpayMsat)} sat more than you asked for.</strong> Offline, nothing can be cut to size.</p>`)
+        )
+      }
+      inner.append(
+        el(`<p class="warn"><strong>Whoever sees this note owns it.</strong> Scratch the silver and show the QR. Nothing was sent to the mint, so until they take it you can reclaim it from the home screen.</p>`)
+      )
+      const copyUrl = el(`<button class="btn">${icons.copy}<span>Copy note URL</span></button>`)
+      copyUrl.addEventListener('click', () => void copyText(url, 'Note URL', true))
+      inner.append(copyUrl)
+      const share = shareButton(url)
+      if (share) inner.append(share)
+      if (handed.notes.length > 1) {
+        const pager = el('<div class="row" style="gap:12px;border:none"></div>')
+        const back = el(`<button class="btn btn-ghost" style="flex:1">Previous</button>`)
+        const next = el(`<button class="btn btn-ghost" style="flex:1">Next note</button>`)
+        back.addEventListener('click', () => {
+          page = (page - 1 + handed.notes.length) % handed.notes.length
+          draw()
+        })
+        next.addEventListener('click', () => {
+          page = (page + 1) % handed.notes.length
+          draw()
+        })
+        pager.append(back, next)
+        inner.append(pager)
+      }
+      view.append(inner)
+      strikeIn(print, note.amountMsat, inner)
+      return view
+    })
+  }
+  draw()
+}
+
 // ---------- send ----------
 
 const viewSend = (): void => {
@@ -1312,7 +1432,11 @@ const viewSend = (): void => {
     const amount = amountField({presets: [500, 1000, 5000], maxMsat: w.balanceMsat()})
     const body = el('<div class="stack"></div>')
     body.append(
-      el(`<div class="hint">${icons.info}<span><b>Handing money to someone?</b> Type the amount and notecase cuts a fresh note for exactly that. You can take it back any time until they receive it.</span></div>`)
+      el(`<div class="hint">${icons.info}<span>${
+        offlineMode
+          ? '<b>Paying with no connection?</b> Nothing can be cut to size without the mint, so notecase finds notes you already hold that add up to the amount. Keep a few small ones in the cash drawer and this almost always works.'
+          : '<b>Handing money to someone?</b> Type the amount and notecase cuts a fresh note for exactly that. You can take it back any time until they receive it.'
+      }</span></div>`)
     )
     body.append(el('<div class="rubric">To be handed over</div>'))
     body.append(amount.node)
@@ -1320,13 +1444,42 @@ const viewSend = (): void => {
       <label>To an npub or NIP-05 <span class="fineline">optional · seals the note to their key and leaves it on their inbox relays</span></label>
       <input data-npub type="text" placeholder="npub1… or name@domain" autocomplete="off" spellcheck="false" />
     </div>`)
-    body.append(to)
-    body.append(el(`<button class="btn btn-silver" data-cut>${icons.send}<span>Cut a note</span></button>`))
+    if (!offlineMode) body.append(to)
+    const offer = el('<div class="stack" data-offer style="gap:14px"></div>')
+    body.append(offer)
+    body.append(
+      el(`<button class="btn btn-silver" data-cut>${icons.send}<span>${offlineMode ? 'Find notes to hand over' : 'Cut a note'}</span></button>`)
+    )
     view.append(body)
     const npubInput = to.querySelector('[data-npub]') as HTMLInputElement
     const cut = body.querySelector('[data-cut]') as HTMLButtonElement
     cut.addEventListener('click', () =>
       busy(cut, async () => {
+        if (offlineMode) {
+          offer.replaceChildren()
+          const selection = w.planOfflineSend(amount.msat())
+          if (selection.overpayMsat > 0) {
+            // Nothing can be split offline, so the only honest options are
+            // to hand over more than was asked for, or not to.
+            const card = el(`<div class="card">
+              <h3>Nothing here makes that exactly</h3>
+              <p class="warn" style="text-align:left;padding-top:12px">Without a mint a note cannot be cut down. The closest these notes come is <b data-total></b>, which is <b data-over></b> more than you asked for.</p>
+            </div>`)
+            card.querySelector('[data-total]')!.textContent = `${sats(selection.totalMsat)} sat`
+            card.querySelector('[data-over]')!.textContent = `${sats(selection.overpayMsat)} sat`
+            const anyway = el(`<button class="btn btn-ghost">${icons.send}<span>Hand over ${sats(selection.totalMsat)} sat</span></button>`)
+            anyway.addEventListener('click', () =>
+              busy(anyway as HTMLButtonElement, async () =>
+                handedOver(await w.sendOffline(amount.msat(), undefined, {acceptOverpay: true}))
+              )
+            )
+            card.append(anyway)
+            offer.append(card)
+            return
+          }
+          handedOver(await w.sendOffline(amount.msat()))
+          return
+        }
         const recipient = npubInput.value.trim()
         if (recipient) {
           const sent = await withRelays(t => w.sendToNostr(t, amount.msat(), recipient))
@@ -1885,6 +2038,92 @@ const viewMelt = (prefillPr?: string): void => {
   })
 }
 
+// ---------- the cash drawer ----------
+// A wallet holding one large note cannot pay a small amount with no
+// connection: cutting a note needs the mint. So the drawer keeps small
+// notes on purpose, the way a till keeps change. Every cut costs the
+// mint's flat fee, so the cost is always shown before anything is cut.
+
+const cashDrawer = (w: Wallet, host: string): HTMLElement => {
+  const {ladder, copies} = w.ladderFor(host)
+  const card = el(`<div class="card">
+    <h3>Cash drawer</h3>
+    <p class="warn" style="text-align:left;padding-top:12px">Notes you keep small on purpose, so you can pay without a connection. Nothing can be cut to size offline, so what is in here is what you can spend.</p>
+    <div class="field" style="padding-top:14px">
+      <label>Denominations in sats <span class="fineline">separated by commas</span></label>
+      <input data-ladder type="text" inputmode="numeric" autocomplete="off" spellcheck="false" />
+    </div>
+    <div class="field">
+      <label>How many of each</label>
+      <input data-copies type="text" inputmode="numeric" autocomplete="off" spellcheck="false" />
+    </div>
+    <div data-plan class="stack" style="gap:12px;padding-top:14px"></div>
+  </div>`)
+  const ladderInput = card.querySelector('[data-ladder]') as HTMLInputElement
+  const copiesInput = card.querySelector('[data-copies]') as HTMLInputElement
+  ladderInput.value = ladder.join(', ')
+  copiesInput.value = String(copies)
+  const planArea = card.querySelector('[data-plan]') as HTMLElement
+
+  const paintPlan = (): void => {
+    planArea.replaceChildren()
+    const plan = w.ladderPlan(host)
+    const held = w.liveNotes().filter(note => note.mintHost === host).length
+    const line = el('<div class="kv"><span>notes held here</span><b></b></div>')
+    line.querySelector('b')!.textContent = String(held)
+    planArea.append(line)
+    if (!plan.cut.length) {
+      planArea.append(
+        el(
+          `<p class="warn" style="text-align:left">${
+            plan.short.length
+              ? 'Nothing here is big enough to cut the rest of the drawer. Mint or receive a larger note first.'
+              : 'The drawer is full.'
+          }</p>`
+        )
+      )
+      return
+    }
+    const cost = el('<p class="warn" style="text-align:left"></p>')
+    cost.textContent = `Cutting ${plan.cut.length} note${plan.cut.length === 1 ? '' : 's'} costs ${sats(plan.feeMsat)} sat in split fees${plan.short.length ? `, and ${plan.short.length} more cannot be cut from what is here` : ''}.`
+    planArea.append(cost)
+    const prepare = el(`<button class="btn">${icons.drawer}<span>Cut them for ${sats(plan.feeMsat)} sat</span></button>`)
+    prepare.addEventListener('click', () =>
+      busy(prepare as HTMLButtonElement, async () => {
+        const done = await w.prepareOffline(host)
+        toast(
+          done.made.length
+            ? `Cut ${done.made.length} note${done.made.length === 1 ? '' : 's'} for ${sats(done.feeMsat)} sat`
+            : 'Nothing needed cutting',
+          'ok'
+        )
+        viewMints()
+      })
+    )
+    planArea.append(prepare)
+  }
+
+  const save = el(`<button class="btn btn-ghost">${icons.check}<span>Save the drawer</span></button>`)
+  save.addEventListener('click', () =>
+    busy(save as HTMLButtonElement, async () => {
+      const denominations = ladderInput.value
+        .split(/[\s,]+/)
+        .filter(Boolean)
+        .map(Number)
+      if (denominations.some(value => !Number.isSafeInteger(value) || value <= 0)) {
+        throw new WalletUsageError('Give the denominations in whole sats, like 100, 500, 1000.')
+      }
+      const wanted = Number(copiesInput.value)
+      await w.setLadder(host, denominations, wanted)
+      toast('Cash drawer saved', 'ok')
+      paintPlan()
+    })
+  )
+  card.append(save)
+  paintPlan()
+  return card
+}
+
 // ---------- mints ----------
 
 const viewMints = (prefillAdd?: string): void => {
@@ -1936,6 +2175,7 @@ const viewMints = (prefillAdd?: string): void => {
         })
       )
       body.append(card)
+      body.append(cashDrawer(w, entry.host))
     }
 
     const add = el(`<div class="card">

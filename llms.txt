@@ -29,7 +29,11 @@ Draft spec: https://github.com/lnurl/luds/pull/301
 7. Verify NWC payments by preimage against the invoice's payment hash -
    a successful-looking response is not evidence money moved.
 8. Never print, log or echo a k1 except on explicit send/export.
-9. Sweep every note against its mint from time to time: a bearer note has
+9. Offline is a promise, not a guess. Never infer it from connectivity:
+   an offline send makes no wire call at all, and an offline receive
+   verifies the mint's signature against a pinned key or refuses. A note
+   taken that way is stored unrotated and rotated by the next reconcile.
+10. Sweep every note against its mint from time to time: a bearer note has
    copies, and one burned out of band stays listed as money until asked
    about. A mint that does not answer is never marked on.
 
@@ -40,6 +44,8 @@ notecase mints add <address|lnurl> / list / use <host>
 notecase mint <sats> [--manual] [--mint <host>]
 notecase receive <note> [--force] | send <sats> | melt <bolt11 | sats --to <addr> | sats --to-nwc>
 notecase check [--apply] [--mint <host>]
+notecase ladder [set <sats,...>] [--copies n] | prepare [--apply]
+notecase send <sats> --offline [--overpay] | receive --offline
 notecase balance | list [--all] | reconcile | verify <note>
 notecase nwc set <uri> / status / clear
 notecase backup export | shares [--threshold N --count M] | recover-key
@@ -54,7 +60,10 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   receive(input, {acceptBadSignature?}), send(amountMsat), prepareExact(amountMsat),
   melt(pr, target), startMint(grossMsat), claimMint(pending, preimage),
   awaitMint(pending), reconcile(), checkNotes({apply?, mintHost?}) -> CheckReport,
-  balanceMsat(), verifyNoteOffline(input), addMint(input)
+  balanceMsat(), unrotatedMsat(), verifyNoteOffline(input), addMint(input),
+  ladderFor(host), setLadder(host, sats[], copies), ladderPlan(host) -> LadderPlan,
+  prepareOffline(host), planOfflineSend(msat, host?) -> OfflineSelection,
+  sendOffline(msat, host?, {acceptOverpay?}), receiveOffline(input)
 createWalletFetch({allowPrivate?}) - DNS-pinned fetch, loopback passthrough
 payWithNwc(uri, pr) / invoiceFromNwc(uri, amountMsat, desc) / nwcStatus(uri)
 

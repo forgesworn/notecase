@@ -21,9 +21,11 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase balance
   notecase list [--all]
   notecase mint <sats> [--mint <host>] [--manual] [--wait <seconds>]
-  notecase receive [note] [--force]
+  notecase receive [note] [--force] [--offline]
   notecase check [--apply] [--mint <host>]
-  notecase send <sats> [--mint <host>]
+  notecase ladder [set <sats,sats,...>] [--copies <n>] [--mint <host>]
+  notecase prepare [--apply] [--mint <host>]
+  notecase send <sats> [--mint <host>] [--offline] [--overpay]
   notecase send <sats> --to <npub|nip05>
   notecase inbox
   notecase reclaim [id]
@@ -38,6 +40,11 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase heartwood link <bunker://...> | heartwood notes | heartwood collect
   notecase heartwood send <id> --to <npub> | heartwood unlink
   notecase backup export | backup shares [--threshold N --count M] | backup recover-key
+
+Offline mode is asked for, never guessed at: --offline on send and receive
+means no call is made to any mint at all. The ladder and prepare commands
+keep small notes in the case so an offline payment can be made at all -
+a wallet holding one big note cannot pay a small amount without a mint.
 
 Amounts are sats; add --msat for milli-satoshi precision. The PIN is read
 from $NOTECASE_PIN or prompted. Omit the argument to receive or nwc set
@@ -132,6 +139,9 @@ const main = async (): Promise<void> => {
       all: {type: 'boolean', default: false},
       apply: {type: 'boolean', default: false},
       force: {type: 'boolean', default: false},
+      offline: {type: 'boolean', default: false},
+      overpay: {type: 'boolean', default: false},
+      copies: {type: 'string'},
       file: {type: 'string'}
     }
   })
@@ -189,6 +199,10 @@ const main = async (): Promise<void> => {
         for (const [host, msat] of byMint) console.log(`${sats(msat)}  at ${host}`)
         if (byMint.size > 1) console.log(`${sats(wallet.balanceMsat())}  total`)
       }
+      const unrotated = wallet.unrotatedMsat()
+      if (unrotated > 0) {
+        console.log(`of which ${sats(unrotated)} taken offline and not rotated yet - \`notecase reconcile\` fixes that.`)
+      }
       if (wallet.needsReconcile()) console.log('Some outcomes are unresolved - run `notecase reconcile`.')
       return
     }
@@ -238,7 +252,9 @@ const main = async (): Promise<void> => {
       // in shell history, and the k1 in it is the money.
       const input = (rest[0] ?? (await promptHidden('Note: '))).trim()
       if (!input) throw new WalletUsageError('Give the note to receive.')
-      const result = await wallet.receive(input, {acceptBadSignature: values.force})
+      const result = values.offline
+        ? await wallet.receiveOffline(input)
+        : await wallet.receive(input, {acceptBadSignature: values.force})
       for (const warning of result.warnings) console.log(`  warning: ${warning}`)
       console.log(`Received ${sats(result.note.amountMsat)} at ${result.note.mintHost} (${shortId(result.note)}).`)
       return
@@ -294,12 +310,92 @@ const main = async (): Promise<void> => {
         }
         return
       }
+      if (values.offline) {
+        // Offline is a promise, never a guess: no wire call is made here
+        // at all, which is why it has to be asked for.
+        const handed = await wallet.sendOffline(amountMsat, values.mint, {acceptOverpay: values.overpay})
+        console.log(
+          handed.notes.length === 1
+            ? `A bearer note for ${sats(handed.totalMsat)} - whoever sees this owns it:\n`
+            : `${handed.notes.length} bearer notes worth ${sats(handed.totalMsat)} together - hand over every one:\n`
+        )
+        for (const noteUrl of handed.urls) console.log(noteUrl)
+        if (handed.overpayMsat > 0) {
+          console.log(`\nThat overpays by ${sats(handed.overpayMsat)}: offline, nothing can be split to the exact amount.`)
+        }
+        if (handed.capped) {
+          console.log('\nOnly the largest notes at that mint were considered - there are more than the search looks at.')
+        }
+        console.log('\nThe recipient takes it with `notecase receive --offline`, on the mint signature alone.')
+        console.log('If it is never claimed, `notecase reclaim` takes it back.')
+        return
+      }
       const note = await wallet.send(amountMsat, values.mint)
       const url = wallet.noteUrlFor(note)
       console.log(`A bearer note for ${sats(note.amountMsat)} - whoever sees this owns it:\n`)
       console.log(url)
       console.log(`\n${toBech32Lnurl(url)}`)
       console.log('\nIf it is never claimed, `notecase receive` with the URL above takes it back.')
+      return
+    }
+
+    case 'ladder': {
+      const [sub, arg] = rest
+      const host = values.mint ?? store.data.settings.defaultMintHost
+      if (!host) throw new WalletUsageError('No mint configured - `notecase mints add <address>` first.')
+      if (sub === 'set') {
+        const denominations = (arg ?? '')
+          .split(/[\s,]+/)
+          .filter(Boolean)
+          .map(Number)
+        if (!denominations.length || denominations.some(value => !Number.isSafeInteger(value) || value <= 0)) {
+          throw new WalletUsageError('Give the denominations in whole sats, e.g. `notecase ladder set 100,500,1000,5000`.')
+        }
+        const copies = values.copies ? Number(values.copies) : wallet.ladderFor(host).copies
+        await wallet.setLadder(host, denominations, copies)
+      }
+      const {ladder, copies} = wallet.ladderFor(host)
+      console.log(`Cash drawer at ${host}: ${copies} each of ${ladder.map(value => `${value} sat`).join(', ')}.`)
+      const plan = wallet.ladderPlan(host)
+      if (!plan.cut.length && !plan.short.length) {
+        console.log('The drawer is full.')
+      } else {
+        if (plan.cut.length) {
+          console.log(`${plan.cut.length} note(s) to cut, costing ${sats(plan.feeMsat)} in split fees - \`notecase prepare --apply\`.`)
+        }
+        if (plan.short.length) {
+          console.log(`${plan.short.length} note(s) cannot be cut: nothing at that mint is big enough.`)
+        }
+      }
+      return
+    }
+
+    case 'prepare': {
+      const host = values.mint ?? store.data.settings.defaultMintHost
+      if (!host) throw new WalletUsageError('No mint configured - `notecase mints add <address>` first.')
+      const plan = wallet.ladderPlan(host)
+      if (!plan.cut.length) {
+        console.log(
+          plan.short.length
+            ? `Nothing at ${host} is big enough to cut the ${plan.short.length} note(s) the drawer still wants.`
+            : `The cash drawer at ${host} is already full.`
+        )
+        return
+      }
+      console.log(
+        `Cutting ${plan.cut.map(value => sats(value)).join(', ')} at ${host} costs ${sats(plan.feeMsat)} in split fees.`
+      )
+      if (plan.short.length) {
+        console.log(`  ${plan.short.length} more note(s) wanted, but nothing there is big enough to cut them.`)
+      }
+      if (!values.apply) {
+        console.log('Nothing changed - run `notecase prepare --apply` to cut them.')
+        return
+      }
+      const done = await wallet.prepareOffline(host)
+      console.log(
+        `Cut ${done.made.length} note(s) for ${sats(done.feeMsat)} in fees: ${done.made.map(note => `${sats(note.amountMsat)} (${shortId(note)})`).join(', ')}.`
+      )
       return
     }
 
