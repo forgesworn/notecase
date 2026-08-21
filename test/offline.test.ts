@@ -186,7 +186,7 @@ describe('taking a note offline', () => {
     expect(sender.wallet.balanceMsat()).toBe(0)
   })
 
-  it('files an offline note the giver spent first as spent, and says why', async () => {
+  it('stops counting an offline note the giver spent first, and settles it', async () => {
     const theMint = await start()
     const sender = makeWallet()
     await sender.wallet.receive(fund(theMint, 50_000))
@@ -198,11 +198,39 @@ describe('taking a note offline', () => {
     // the giver kept a copy and spent it before the taker got online
     theMint.state.settleMelt(taken.note.k1)
 
+    // The mint's "already spent" is also what it would say to a repeat of
+    // a rotate that had gone through, so the first pass parks it rather
+    // than believing either story, and the money stops being counted.
+    await taker.wallet.reconcile()
+    expect(taken.note.state).toBe('ambiguous')
+    expect(taker.wallet.balanceMsat()).toBe(1_000)
+
+    // The second pass probes and settles it: the note really is burned.
+    await taker.wallet.reconcile()
+    expect(taken.note.state).toBe('spent')
+    expect(taker.wallet.balanceMsat()).toBe(1_000)
+  })
+
+  it('says plainly when a note from a mint it holds nothing else of is already gone', async () => {
+    const theMint = await start()
+    const sender = makeWallet()
+    await sender.wallet.receive(fund(theMint, 50_000))
+    const handed = await sender.wallet.sendOffline(50_000)
+
+    // A taker holding a pin for this mint but no note of it: there is no
+    // callback to borrow, so reconcile has to ask the mint for one - and
+    // that is where it finds out the note is gone.
+    const taker = makeWallet()
+    taker.data.pubkeyPins[hostOf(theMint)] = theMint.state.pubkey
+    const taken = await taker.wallet.receiveOffline(handed.urls[0]!)
+    expect(taken.note.callback).toBe('')
+    theMint.state.settleMelt(taken.note.k1)
+
     const events = await taker.wallet.reconcile()
     expect(events.some(event => event.kind === 'offline-note-lost')).toBe(true)
     expect(taken.note.state).toBe('spent')
     expect(taken.note.detail).toContain('spent it first')
-    expect(taker.wallet.balanceMsat()).toBe(1_000)
+    expect(taker.wallet.balanceMsat()).toBe(0)
   })
 
   it('is swept by the check like any other note', async () => {

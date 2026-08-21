@@ -15,7 +15,12 @@ Draft spec: https://github.com/lnurl/luds/pull/301
    generating ones, if you care about crashes.
 2. Only a DEFINITIVE rejection discards a staged secret. Timeouts, broken
    JSON, dropped connections and unconfirmed 200s all keep it, parked as
-   ambiguous, until a probe of the mint proves what happened.
+   ambiguous, until a probe of the mint proves what happened. A mutation
+   is a GET and HTTP stacks retry a dropped GET, so "already spent" about
+   a LIVE input is not definitive either: it is what a mint says to a
+   byte-identical repeat of a request that already went through. Park it.
+   Refusals that cannot be a landed mutation - malformed hash, dust, fee,
+   sunsetting - stay definitive.
 3. Melt OK means in flight. The note locks; settlement is confirmed via
    LUD-21 verify, and a failed melt is recovered by a rotate probe - safe
    in every outcome by construction.

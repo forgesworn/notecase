@@ -6,6 +6,26 @@ While LUD-25 is a draft, a `0.x` minor bump may be breaking. This one is:
 `receive` now refuses a note whose signature does not verify, where it
 used to warn and take it.
 
+- **A refused mutation can no longer delete the only copy of a note the
+  mint minted.** A rotate, split or merge is a GET, and HTTP stacks retry a
+  GET whose connection was dropped. The retry is byte-identical, and by the
+  time it arrives the input is burned, so a mint that does not recognise a
+  repeat answers "already spent" about a mutation that landed. The wallet
+  used to read that as proof the mutation never happened and discard the
+  staged output records, which were the only copy of the secrets the mint
+  had just minted notes against. Now an already-spent or unknown-input
+  refusal, on inputs that were live when the request went out, is parked as
+  ambiguous like any other unknown outcome, and `reconcile` settles it by
+  asking the mint what the staged secrets are worth: live means it landed,
+  and the input still being there means it did not. Refusals that cannot be
+  a landed mutation - a malformed hash, a dust or fee refusal, a sunsetting
+  mint - stay definitive and still discard the staged records at once, with
+  no round trip. A melt's own recovery probe is untouched: its input is
+  never live, and "spent" there still means the melt settled. A note taken
+  offline whose giver spent their copy first now settles over two reconcile
+  passes rather than one, for the same reason: the first parks it, the
+  second probes and confirms. It stops counting toward the balance
+  immediately either way.
 - `notecase check [--apply] [--mint <host>]` asks every mint whether the
   notes this wallet holds from it are still good, and says what it found:
   already spent, unknown to the mint, locked by something in flight, or
