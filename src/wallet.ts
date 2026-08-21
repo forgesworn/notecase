@@ -5,6 +5,7 @@ import {
   PendingNoteError,
   ServiceRejectedError,
   applyMintFee,
+  mintFeeBand,
   buildNoteUrl,
   defaultRandomSecret,
   fetchInvoiceVerification,
@@ -713,7 +714,8 @@ export class Wallet {
       pr: invoice.pr,
       ...(invoice.verify ? {verifyUrl: invoice.verify} : {}),
       grossMsat,
-      expectedNetMsat: fee ? applyMintFee(grossMsat, fee) : grossMsat,
+      expectedNetMsat: fee ? mintFeeBand(grossMsat, fee).maxNetMsat : grossMsat,
+      minNetMsat: fee ? mintFeeBand(grossMsat, fee).minNetMsat : grossMsat,
       state: 'awaiting',
       createdAt: now(),
       updatedAt: now()
@@ -741,13 +743,19 @@ export class Wallet {
     await this.persist()
     // If this throws, state and preimage stay persisted as they are -
     // reconcile() owns the retry from here.
-    const result = await this.receive(buildNoteUrl(pending.baseUrl, preimageHex, pending.expectedNetMsat))
+    // Declare an amount only when the fee pins one exactly. Where the
+    // mint's rounding is still open, we do not know what this note is
+    // worth until it answers, and a declared amount we invented would
+    // only make receive() warn about our own guess.
+    const floor = pending.minNetMsat ?? pending.expectedNetMsat
+    const declared = floor === pending.expectedNetMsat ? pending.expectedNetMsat : undefined
+    const result = await this.receive(buildNoteUrl(pending.baseUrl, preimageHex, declared))
     delete pending.preimageHex
     pending.updatedAt = now()
     await this.persist()
-    if (result.note.amountMsat !== pending.expectedNetMsat) {
+    if (result.note.amountMsat > pending.expectedNetMsat || result.note.amountMsat < floor) {
       result.warnings.push(
-        `expected ${pending.expectedNetMsat} msat net but the mint credited ${result.note.amountMsat} msat`
+        `expected ${floor === pending.expectedNetMsat ? `${pending.expectedNetMsat}` : `${floor}-${pending.expectedNetMsat}`} msat net but the mint credited ${result.note.amountMsat} msat`
       )
     }
     return result
@@ -928,7 +936,14 @@ export class Wallet {
         continue
       }
       try {
-        const result = await this.receive(buildNoteUrl(pending.baseUrl, pending.preimageHex, pending.expectedNetMsat))
+        const reFloor = pending.minNetMsat ?? pending.expectedNetMsat
+        const result = await this.receive(
+          buildNoteUrl(
+            pending.baseUrl,
+            pending.preimageHex,
+            reFloor === pending.expectedNetMsat ? pending.expectedNetMsat : undefined
+          )
+        )
         delete pending.preimageHex
         pending.updatedAt = now()
         events.push({kind: 'mint-claimed', detail: `${result.note.amountMsat} msat from ${pending.mintHost}`})

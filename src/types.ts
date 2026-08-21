@@ -50,7 +50,14 @@ export type PendingMint = {
   pr: string
   verifyUrl?: string
   grossMsat: number
+  // The most the mint can credit: the advertised fee formula, msat-exact.
   expectedNetMsat: number
+  // The least it can credit and still be following its own advertisement:
+  // the same fee ceilinged to a whole sat, which dni's lnurl-mint does on
+  // purpose. LUD-25 does not say which reading is right, so anything
+  // between the two is the mint keeping its word. Absent on records
+  // written before this existed - treat that as equal to expectedNetMsat.
+  minNetMsat?: number
   state: 'awaiting' | 'claimed' | 'expired' | 'abandoned'
   // Held only between claim and a confirmed receive; deleted once the note
   // is safely in the wallet. It is the note's k1 - while it sits here the

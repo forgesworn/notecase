@@ -190,3 +190,42 @@ describe('transfer between two mints', () => {
     expect(wallet.wallet.balanceMsat()).toBe(30_000)
   })
 })
+
+// The fee-rounding question, from the wallet's side. dni's lnurl-mint
+// ceilings its fee to a whole sat; moneyer is msat-exact. A wallet that
+// predicts one number tells the holder the other mint short-changed them.
+// The fee-rounding question, from the wallet's side. dni's lnurl-mint
+// ceilings its fee to a whole sat; moneyer is msat-exact. A wallet that
+// predicts one number tells the holder the other mint short-changed them.
+describe('a mint that ceilings its fee to a whole sat', () => {
+  it('lands inside the band without warning, as the reference does', async () => {
+    let destination: Mint | null = null
+    const source = await startMint({}, peeredWith(() => destination))
+    // mint.forgesworn.dev's real advertised fee. 40_000 gross gives a
+    // 1_040 msat fee, which the reference ceilings to 2_000.
+    destination = await startMint({
+      mintFee: {baseFeeMsat: 1000, feePpm: 1000},
+      roundFeeToSat: true
+    })
+
+    const wallet = makeWallet()
+    await wallet.wallet.addMint(source.address)
+    await wallet.wallet.addMint(destination.address)
+
+    const {pending: seed} = await wallet.wallet.startMint(100_000, source.host)
+    source.backend.control.settleInvoice(seed.id)
+    await wallet.wallet.awaitMint(seed, {timeoutMs: 5_000, intervalMs: 5})
+
+    const moved = await wallet.wallet.transfer(40_000, source.host, destination.host, {
+      timeoutMs: 5_000,
+      intervalMs: 5
+    })
+
+    // Exactly what mint.forgesworn.dev credited on 2026-08-21.
+    expect(moved.result!.note.amountMsat).toBe(38_000)
+    expect(moved.pending.expectedNetMsat).toBe(38_960)
+    expect(moved.pending.minNetMsat).toBe(38_000)
+    // The mint did what it documents, so the wallet says nothing.
+    expect(moved.result!.warnings).toEqual([])
+  })
+})
