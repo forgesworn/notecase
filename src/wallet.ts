@@ -41,7 +41,7 @@ import {
   inboxRelayListEvent,
   inboxRelays,
   newIdentitySecretHex,
-  recipientPubkey,
+  resolveRecipient,
   unwrapNote,
   wrapNote,
   type NostrIdentity,
@@ -535,7 +535,7 @@ export class Wallet {
     recipient: string,
     mintHost?: string
   ): Promise<{note: NoteRecord; recipientHex: string; relays: string[]; failed: string[]; inboxKnown: boolean; wrapId: string}> {
-    const recipientHex = recipientPubkey(recipient)
+    const recipientHex = await resolveRecipient(recipient, this.opts.fetch ?? fetch)
     const identity = await this.ensureNostrIdentity()
     // Their kind 10050 lives on the indexers as well as wherever they put
     // it; look on both, the same set publishInbox() writes to.
@@ -678,7 +678,7 @@ export class Wallet {
     noteId: string,
     recipient: string
   ): Promise<{recipientHex: string; relays: string[]; failed: string[]; inboxKnown: boolean; wrapId: string}> {
-    const recipientHex = recipientPubkey(recipient)
+    const recipientHex = await resolveRecipient(recipient, this.opts.fetch ?? fetch)
     const client = this.heartwoodClient(transport)
     const inbox = await inboxRelays(transport, recipientHex, [...new Set([...this.nostrRelays(), ...BOOTSTRAP_RELAYS])])
     const inboxKnown = inbox.length > 0
