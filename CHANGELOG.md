@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.1.1] - 2026-08-21
+
+- `notecase transfer <sats> --from <host> --to <host>` moves value between
+  two mints: the destination issues an invoice, the source melts a note to
+  pay it, and the destination's payment preimage is the note that lands. It
+  is `startMint`, `melt` and `awaitMint` in a row, so every safety rule
+  those follow applies unchanged, including rotate-on-claim. Refuses a
+  transfer to the mint the note came from, and refuses a destination with no
+  LUD-21 verify *before* the source melts - nothing could learn the preimage
+  there, and the preimage is the money.
+- Warnings now use the mint fee **band** rather than one reading of it.
+  LUD-25 says nothing about whether the fee rounds; dni's lnurl-mint
+  ceilings it to a whole sat and moneyer is msat-exact, so a single
+  predicted number is wrong about one of the two live implementations. A
+  40,000 msat transfer to a reference mint credits 38,000, and the wallet
+  used to call that a discrepancy when the mint had done exactly what it
+  documents. `minNetMsat` is the new pessimistic edge; a warning fires only
+  outside the band.
+- A refused transfer no longer leaves a pending mint nothing can resolve.
+  The destination's invoice can never be paid once the source melt refuses,
+  so it is dropped rather than left `awaiting`, where it made the wallet
+  report unresolved outcomes forever while `reconcile` had no answer.
+- Holds the wallet end of heartwood's gift-wrap interop fixture, so a drift
+  in this side's wrap format fails here rather than on a bench.
+
 ## [0.1.0] - 2026-08-20
 
 Initial implementation.
