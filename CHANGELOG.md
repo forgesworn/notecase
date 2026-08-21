@@ -6,6 +6,23 @@ While LUD-25 is a draft, a `0.x` minor bump may be breaking. This one is:
 `receive` now refuses a note whose signature does not verify, where it
 used to warn and take it.
 
+- **A "What the mint knows" section in the README.** A mint is not blind,
+  and a wallet that lets you think otherwise has told you a lie about your
+  own money. It sets out what every LUD-25 mint sees - every note it
+  issued, every rotate, split and merge and the links between them, the IP
+  that asked, the invoice a melt paid - and what it does not: who holds a
+  note between operations, and anything at all about a note handed over
+  offline until somebody rotates it. The wallet-side mitigations are listed
+  as the weak things they are, and the reason the design is like this
+  anyway is stated rather than hidden.
+- `NOTECASE_PROXY=socks5://127.0.0.1:9050` sends every call through a
+  SOCKS5 proxy, which is how the CLI is pointed at Tor. The mint's hostname
+  is handed to the proxy as a name and never resolved on this machine,
+  which is the whole point: a wallet that looks a mint up in DNS has told
+  its resolver which mint it banks with before a byte of the request goes
+  anywhere. Setting a proxy therefore turns the DNS pinning off
+  deliberately, and the README says plainly that this is a swap rather than
+  an upgrade.
 - **A refused mutation can no longer delete the only copy of a note the
   mint minted.** A rotate, split or merge is a GET, and HTTP stacks retry a
   GET whose connection was dropped. The retry is byte-identical, and by the
