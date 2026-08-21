@@ -21,6 +21,9 @@ the two are integration-tested against each other, and notecase is tested
 against the adversarial mock mint from
 [lnurlcash-conformance](https://github.com/TheCryptoDonkey/lnurlcash-conformance).
 
+Other wallets, mints and libraries speaking the same protocol are indexed
+in [awesome-lnurlcash](https://github.com/TheCryptoDonkey/awesome-lnurlcash).
+
 ## The safety design
 
 A bearer note is lost the moment its secret exists nowhere durable. So:
@@ -65,12 +68,34 @@ notecase mints add mint@mint.example   # or any LNURL / bare domain
 notecase mint 21                       # pay via NWC if set, else an invoice to pay
 notecase balance
 notecase send 8                        # prints a bearer note URL + LNURL
+notecase send 8 --to npub1...          # seals it to their key, leaves it on their inbox relays
+notecase inbox                         # opens what was sent to your npub, claims it at once
+notecase reclaim                       # takes back anything sent but not yet claimed
 notecase receive                       # prompts for the note, rotates it in
 notecase melt 21 --to you@wallet.com   # or a raw bolt11, or --to-nwc
 notecase reconcile                     # resolves anything uncertain
 notecase nwc set                       # prompts for the connection URI
+notecase nostr init                    # your npub + publishes your inbox relays (kind 10050)
+notecase heartwood link bunker://...   # a heartwood signer as a note locker
+notecase heartwood collect             # brings in what arrived at the device by wrap
 notecase backup shares --threshold 2 --count 3
 ```
+
+### Notes over Nostr
+
+A note is one URL, so it fits inside a NIP-59 gift wrap. `send --to` cuts
+the note, seals it to the recipient's pubkey and publishes the wrap to
+their inbox relays. They need no wallet yet: it waits on the relay until
+they install one and run `inbox`. Claiming rotates, so the copy on the
+relay is dead the moment it is opened - and until then the sender can
+`reclaim` it. The sealing happens with the wallet's own key (`nostr init`
+makes one); nothing on the relay says who paid whom, or how much.
+
+A [heartwood](https://github.com/forgesworn/heartwood-esp32) signer can do
+the same from hardware: it receives wraps while your laptop is shut
+(RECEIVE card, hold to accept), and `heartwood send` asks it to seal one of
+its own notes so the secret never leaves the chip. `heartwood collect`
+brings received notes here and rotates them, because the device cannot.
 
 Amounts are sats (`--msat` for precision). The PIN comes from the prompt
 or `$NOTECASE_PIN`. `NOTECASE_HOME` moves the store; `NOTECASE_ALLOW_PRIVATE=1`
@@ -102,6 +127,8 @@ vite + anime.js) around the same engine - live at
 - A note detail view per note: verified-signature badge, panic rotate,
   copy/share/QR - and handed-over notes stay listed until taken, with
   one-tap reclaim.
+- Send to an npub, and an inbox check that opens and claims what was sent
+  to yours; the wallet's Nostr identity and inbox relays live in settings.
 - Camera QR scanning (BarcodeDetector, jsQR fallback) with one universal
   scan button that classifies notes, invoices and mint addresses itself.
 - History derived from the wallet's own records - nothing logged twice.

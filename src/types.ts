@@ -34,6 +34,10 @@ export type NoteRecord = {
   // created this consumed. reconcile() groups by this to learn the fate of
   // the whole mutation from one probe.
   replaces?: string[]
+  // Nostr provenance: the pubkey this note was gift-wrapped to, or came
+  // from. A note with either is never wrapped again.
+  sentTo?: string
+  receivedFrom?: string
   createdAt: number
   updatedAt: number
 }
@@ -91,6 +95,17 @@ export type WalletData = {
     defaultMintHost?: string
     // A spending capability - the store holding this must stay encrypted.
     nwcUri?: string
+    // The wallet's Nostr identity, for sending and receiving notes as gift
+    // wraps. A signing key: the store holding this must stay encrypted.
+    nostrSecretHex?: string
+    // Inbox relays published as kind 10050, and where we look for wraps.
+    nostrRelays?: string[]
+    // Wrap ids already opened or refused, so a relay replay is idle.
+    nostrSeenWrapIds?: string[]
+    nostrLastCheck?: number
+    // A paired heartwood signer holding notes of its own (heartwood.ts).
+    // The client key is what the device bound; the store guards it.
+    heartwood?: {uri: string; devicePubkey: string; relays: string[]; clientSecretHex: string}
   }
   mints: MintEntry[]
   // Trust-on-first-use pins: mint host -> the mintPubkey first observed

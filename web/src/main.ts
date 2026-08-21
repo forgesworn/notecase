@@ -24,6 +24,7 @@ import {
 import {Wallet, WalletUsageError, InsufficientFundsError, PinMismatchError} from '../../src/wallet.ts'
 import {exportBackup, importBackup} from '../../src/backup.ts'
 import {payWithNwc, invoiceFromNwc, nwcStatus} from '../../src/nwc.ts'
+import {npubOf, poolTransport, type NostrTransport} from '../../src/nostr.ts'
 import type {NoteRecord, PendingMint} from '../../src/types.ts'
 import {
   biometricAvailable,
@@ -1030,6 +1031,8 @@ const viewNote = (note: NoteRecord): void => {
     kvMint!.textContent = note.mintHost
     kvOrigin!.textContent = note.origin
     ledger.querySelector('.kv code')!.textContent = `${note.id.slice(0, 16)}…`
+    if (note.sentTo) ledger.append(el(`<div class="kv"><span>sealed to</span><b>${esc(shortNpub(note.sentTo))}</b></div>`))
+    if (note.receivedFrom) ledger.append(el(`<div class="kv"><span>from</span><b>${esc(shortNpub(note.receivedFrom))}</b></div>`))
     body.append(ledger)
     view.append(body)
 
@@ -1163,10 +1166,29 @@ const viewReceive = (prefill?: string): void => {
       </div>
       <button class="btn btn-ghost" data-paste>${icons.paste}<span>Paste from clipboard</span></button>
       <button class="btn btn-silver" data-receive>${icons.receive}<span>Receive</span></button>
+      <div class="rubric">Or over Nostr</div>
+      <div class="hint">${icons.info}<span><b>Sent to your npub?</b> Notes sealed to this wallet's key wait on your inbox relays. Checking opens them and locks each one to this wallet at once.</span></div>
+      <button class="btn" data-inbox>${icons.refresh}<span>Check my inbox</span></button>
     </div>`)
     view.append(body)
     const input = body.querySelector('textarea')!
     if (prefill) input.value = prefill
+    const inbox = body.querySelector('[data-inbox]') as HTMLButtonElement
+    inbox.addEventListener('click', () =>
+      busy(inbox, async () => {
+        const result = await withRelays(t => w.receiveFromNostr(t))
+        for (const r of result.received) r.warnings.forEach(warning => toast(warning, 'err'))
+        for (const sk of result.skipped) toast(`Skipped one: ${sk.reason}`, 'err')
+        if (result.received.length) {
+          burst(body)
+          const total = result.received.reduce((sum, r) => sum + r.note.amountMsat, 0)
+          toast(`Received ${sats(total)} sat from ${result.received.length === 1 ? 'one note' : `${result.received.length} notes`}`, 'ok')
+          setTimeout(viewHome, 650)
+        } else if (!result.skipped.length) {
+          toast('Nothing waiting', '')
+        }
+      })
+    )
     body.querySelector('[data-paste]')!.addEventListener('click', async () => {
       input.value = await navigator.clipboard.readText().catch(() => input.value)
     })
@@ -1191,6 +1213,22 @@ const viewReceive = (prefill?: string): void => {
   })
 }
 
+// One relay pool per action: opened for the call, closed after, so a
+// backgrounded tab holds no sockets.
+const withRelays = async <T>(work: (transport: NostrTransport) => Promise<T>): Promise<T> => {
+  const transport = poolTransport()
+  try {
+    return await work(transport)
+  } finally {
+    transport.close()
+  }
+}
+
+const shortNpub = (hex: string): string => {
+  const npub = npubOf(hex)
+  return `${npub.slice(0, 12)}…${npub.slice(-6)}`
+}
+
 // ---------- send ----------
 
 const viewSend = (): void => {
@@ -1205,11 +1243,42 @@ const viewSend = (): void => {
     )
     body.append(el('<div class="rubric">To be handed over</div>'))
     body.append(amount.node)
+    const to = el(`<div class="field">
+      <label>To an npub <span class="fineline">optional · seals the note to their key and leaves it on their inbox relays</span></label>
+      <input data-npub type="text" placeholder="npub1…" autocomplete="off" spellcheck="false" />
+    </div>`)
+    body.append(to)
     body.append(el(`<button class="btn btn-silver" data-cut>${icons.send}<span>Cut a note</span></button>`))
     view.append(body)
+    const npubInput = to.querySelector('[data-npub]') as HTMLInputElement
     const cut = body.querySelector('[data-cut]') as HTMLButtonElement
     cut.addEventListener('click', () =>
       busy(cut, async () => {
+        const recipient = npubInput.value.trim()
+        if (recipient) {
+          const sent = await withRelays(t => w.sendToNostr(t, amount.msat(), recipient))
+          show(() => {
+            const done = el('<div class="view"></div>')
+            done.append(topBar('Sent over Nostr', viewHome))
+            const inner = el('<div class="stack center"></div>')
+            inner.append(
+              el(`<div class="card"><h3>${sats(sent.note.amountMsat)} sat</h3><div class="kv"><span>to</span><b>${esc(shortNpub(sent.recipientHex))}</b></div>
+                <div class="kv"><span>on</span><b>${sent.relays.length ? esc(sent.relays.join(', ')) : 'no relay took it'}</b></div></div>`)
+            )
+            if (!sent.inboxKnown) {
+              inner.append(el(`<p class="warn">They publish no inbox relays, so the note went to yours. Tell them to look there, or take it back and hand it over another way.</p>`))
+            }
+            if (!sent.relays.length) {
+              inner.append(el(`<p class="warn"><strong>Nothing was delivered.</strong> The note is still yours: take it back from the home screen.</p>`))
+            } else {
+              inner.append(el(`<p class="warn">The secret never left your wallet in the clear. Until they open it, you can take it back from the home screen.</p>`))
+            }
+            done.append(inner)
+            burst(inner)
+            return done
+          })
+          return
+        }
         const note = await w.send(amount.msat())
         const url = w.noteUrlFor(note)
         show(() => {
@@ -1630,6 +1699,39 @@ const viewSettings = (): void => {
       nwc.append(row)
     }
     body.append(nwc)
+
+    // nostr
+    const nostr = el(`<div class="card"><h3>Nostr</h3>
+      <p class="warn" style="text-align:left;padding-top:12px">Notes can be sent to an npub and arrive sealed to this wallet's own key. Publish your inbox relays so senders know where to leave them.</p>
+    </div>`)
+    const identity = w.nostrIdentity()
+    if (identity) {
+      const row = el(`<div class="kv"><span>npub</span><b style="font-family:var(--mono);font-size:.85rem">${esc(shortNpub(identity.pubkey))}</b></div>`)
+      nostr.append(row)
+      const copyNpub = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy npub</span></button>`)
+      copyNpub.addEventListener('click', () => void copyText(identity.npub, 'npub'))
+      nostr.append(copyNpub)
+    }
+    const relayField = el(`<div class="field" style="padding-top:12px">
+      <label>Inbox relays <span class="fineline">one per line</span></label>
+      <textarea data-relays spellcheck="false" rows="3">${esc(w.nostrRelays().join('\n'))}</textarea>
+    </div>`)
+    nostr.append(relayField)
+    const publish = el(`<button class="btn">${icons.upload}<span>${identity ? 'Save and publish inbox' : 'Create identity and publish inbox'}</span></button>`)
+    publish.addEventListener('click', () =>
+      busy(publish as HTMLButtonElement, async () => {
+        const relays = (relayField.querySelector('textarea') as HTMLTextAreaElement).value
+          .split(/\s+/)
+          .filter(r => /^wss?:\/\//.test(r))
+        if (!relays.length) throw new WalletUsageError('Give at least one wss:// relay.')
+        await w.setNostrRelays(relays)
+        const published = await withRelays(t => w.publishInbox(t))
+        toast(published.ok.length ? `Inbox list on ${published.ok.length} relay(s)` : 'No relay took the inbox list', published.ok.length ? 'ok' : 'err')
+        viewSettings()
+      })
+    )
+    nostr.append(publish)
+    body.append(nostr)
 
     // backup
     const backup = el(`<div class="card"><h3>Backup</h3>
