@@ -52,7 +52,20 @@ const isAmount = (value: unknown): boolean => typeof value === 'number' && Numbe
 const isTimestamp = (value: unknown): boolean => typeof value === 'number' && Number.isFinite(value)
 
 const isWalletData = (data: unknown): data is WalletData => {
-  if (!isRecord(data) || data.version !== 1) return false
+  // Version 1 wallets predate the seed. They import, and are upgraded in
+  // memory below rather than rejected: a backup taken before the seed
+  // existed is still somebody's money.
+  if (!isRecord(data) || (data.version !== 1 && data.version !== 2)) return false
+  if (data.seedHex !== undefined && (typeof data.seedHex !== 'string' || !HEX.test(data.seedHex))) return false
+  if (data.mnemonic !== undefined && (typeof data.mnemonic !== 'string' || !/^[a-z ]{1,200}$/.test(data.mnemonic))) {
+    return false
+  }
+  if (data.counters !== undefined) {
+    if (!isRecord(data.counters)) return false
+    if (Object.values(data.counters).some(value => typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)) {
+      return false
+    }
+  }
   if (!isRecord(data.settings)) return false
   if (data.settings.defaultMintHost !== undefined && typeof data.settings.defaultMintHost !== 'string') return false
   if (data.settings.nwcUri !== undefined && typeof data.settings.nwcUri !== 'string') return false
@@ -76,6 +89,9 @@ const isWalletData = (data: unknown): data is WalletData => {
     if (typeof note.origin !== 'string' || !NOTE_ORIGINS.has(note.origin)) return false
     if (note.signature !== undefined && (typeof note.signature !== 'string' || !HEX.test(note.signature))) return false
     if (note.replaces !== undefined && (!Array.isArray(note.replaces) || note.replaces.some(id => typeof id !== 'string'))) {
+      return false
+    }
+    if (note.index !== undefined && (typeof note.index !== 'number' || !Number.isSafeInteger(note.index) || note.index < 0)) {
       return false
     }
     if (!isTimestamp(note.createdAt) || !isTimestamp(note.updatedAt)) return false
@@ -184,6 +200,14 @@ export const importBackup = async (contents: string, passphrase: string): Promis
   }
   if (!isWalletData(data)) {
     throw new BackupError('The backup decrypted but does not hold a valid wallet.')
+  }
+  // A version 1 backup predates the seed: it comes in as it is, and the
+  // caller gives it one. Its existing notes carry no derivation index, so
+  // they stay findable only through this file until they are adopted -
+  // which is exactly what the wallet then offers to do.
+  if (data.version === 1) {
+    data.version = 2
+    data.counters ??= {}
   }
   return data
 }

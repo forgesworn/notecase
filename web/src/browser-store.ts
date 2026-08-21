@@ -3,6 +3,7 @@ import {utf8ToBytes} from '@noble/hashes/utils.js'
 import {Keystore, browserStorage, browserWebAuthn, type BiometricSetupOptions, type SetupBiometricResult} from 'keystore-kit'
 import {sealWallet, unsealWallet} from '../../src/cryptobox.ts'
 import {emptyWallet, type WalletData} from '../../src/types.ts'
+import {newMnemonic, seedFromMnemonic} from '../../src/seed.ts'
 
 // The browser wallet store: the same sealed AES-GCM blob the CLI writes,
 // kept in localStorage, with keystore-kit's browser adapters guarding the
@@ -38,9 +39,19 @@ const storeFor = (storeKey: string, data: WalletData): BrowserStore => ({
   }
 })
 
+// A fresh wallet's data, already carrying the seed every note secret it
+// will ever make comes off. The words come back with it exactly once: the
+// caller has to show them, because nothing else ever will.
+export const freshWalletData = (mnemonic = newMnemonic()): {data: WalletData; mnemonic: string} => {
+  const data = emptyWallet()
+  data.seedHex = seedFromMnemonic(mnemonic)
+  data.mnemonic = mnemonic
+  return {data, mnemonic}
+}
+
 // Creates the device wallet: fresh by default, or around restored data -
 // either way under a NEW store key guarded by this device's PIN.
-export const createBrowserWallet = async (pin: string, data: WalletData = emptyWallet()): Promise<BrowserStore> => {
+export const createBrowserWallet = async (pin: string, data: WalletData = freshWalletData().data): Promise<BrowserStore> => {
   if (walletExists()) throw new Error('A wallet already exists on this device.')
   const ks = keystore()
   const storeKey = ks.generateSecret()

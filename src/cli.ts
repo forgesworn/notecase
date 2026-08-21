@@ -5,7 +5,7 @@ import {Writable} from 'node:stream'
 import {utf8ToBytes} from '@noble/hashes/utils.js'
 import {splitSecret, shareToWords, wordsToShare, reconstructSecret} from '@forgesworn/shamir-words'
 import {NoteSpentError, NoteUnknownError, toBech32Lnurl} from 'lnurlcash-kit'
-import {initWallet, openWallet, NoWalletError, WrongPinError, type WalletStore} from './store.ts'
+import {initWallet, openWallet, BadMnemonicError, NoWalletError, WrongPinError, seedFromMnemonic, type WalletStore} from './store.ts'
 import {Wallet, BadSignatureError, InsufficientFundsError, PinMismatchError, WalletUsageError} from './wallet.ts'
 import {createWalletFetch} from './fetchguard.ts'
 import {invoiceFromNwc, nwcStatus, payWithNwc} from './nwc.ts'
@@ -14,7 +14,10 @@ import type {NoteRecord} from './types.ts'
 
 const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
 
-  notecase init [--insecure-plaintext]
+  notecase init [--insecure-plaintext] [--restore]
+  notecase seed
+  notecase restore [--mint <host>]
+  notecase adopt
   notecase mints add <address|lnurl> [--label <name>]
   notecase mints list
   notecase mints use <host>
@@ -141,6 +144,7 @@ const main = async (): Promise<void> => {
       apply: {type: 'boolean', default: false},
       force: {type: 'boolean', default: false},
       resign: {type: 'boolean', default: false},
+      restore: {type: 'boolean', default: false},
       offline: {type: 'boolean', default: false},
       overpay: {type: 'boolean', default: false},
       copies: {type: 'string'},
@@ -154,14 +158,31 @@ const main = async (): Promise<void> => {
   }
 
   if (command === 'init') {
+    // Restoring reads the words first: a wrong list should fail before a
+    // PIN ceremony, not after it.
+    let restoring: string | undefined
+    if (values.restore) {
+      const words = (await promptHidden('Your twelve recovery words: ')).trim()
+      if (!words) throw new WalletUsageError('Give the twelve words to restore from.')
+      seedFromMnemonic(words)
+      restoring = words
+    }
     const store = values['insecure-plaintext']
-      ? await initWallet({})
-      : await initWallet({pin: await getPin(true)})
+      ? await initWallet({...(restoring ? {mnemonic: restoring} : {})})
+      : await initWallet({pin: await getPin(true), ...(restoring ? {mnemonic: restoring} : {})})
     console.log(
       store.encrypted
-        ? 'Wallet created, PIN-locked. Consider `notecase backup shares` once it holds real value.'
+        ? 'Wallet created, PIN-locked.'
         : 'Wallet created UNENCRYPTED - anyone who reads the file owns the notes in it.'
     )
+    if (restoring) {
+      console.log('Restored from your words. Add the mints you used, then `notecase restore`.')
+      return
+    }
+    console.log('\nWrite these twelve words down, on paper, in this order. They are the only')
+    console.log('way back to your notes if this device is lost, and they are shown once.\n')
+    console.log(`  ${store.mnemonic}\n`)
+    console.log('Anyone who reads them can spend everything this wallet ever holds.')
     return
   }
 
@@ -199,6 +220,68 @@ const main = async (): Promise<void> => {
       return
     }
 
+    case 'seed': {
+      // The PIN was already given to open the store. Asking again is the
+      // point: the words are the whole wallet, and a shoulder is cheap.
+      if (store.encrypted && !process.env.NOTECASE_PIN) {
+        await openWallet({pin: await getPin()})
+      }
+      if (!store.data.mnemonic) {
+        console.log(
+          store.data.seedHex
+            ? 'This wallet has a seed but not the words that made it - they cannot be worked back out.'
+            : 'This wallet has no recovery words: it was made before they existed. Your notes are only in this file, so keep `notecase backup export` safe.'
+        )
+        return
+      }
+      console.log('These twelve words are your wallet. Anyone who reads them owns everything in it.\n')
+      console.log(`  ${store.data.mnemonic}\n`)
+      console.log('On paper, in this order. Not in a photo, not in a password manager you do not own.')
+      return
+    }
+
+    case 'restore': {
+      if (!wallet.hasSeed()) {
+        throw new WalletUsageError('This wallet has no recovery words, so there is nothing to restore from.')
+      }
+      if (!store.data.mints.length) {
+        throw new WalletUsageError('Add the mints you used first - `notecase mints add <address>`.')
+      }
+      const hosts = values.mint ? [values.mint] : store.data.mints.map(mint => mint.host)
+      let total = 0
+      for (const host of hosts) {
+        try {
+          const result = await wallet.restoreFromMint(host)
+          total += result.found.length
+          console.log(
+            result.found.length
+              ? `${host}: ${result.found.length} note(s), ${sats(result.found.reduce((sum, note) => sum + note.amountMsat, 0))}`
+              : `${host}: nothing of yours left there.`
+          )
+          for (const note of result.found) {
+            console.log(`  ${shortId(note)}  ${sats(note.amountMsat)}  index ${note.index}${note.state === 'ambiguous' ? '  (the mint is holding it - `notecase reconcile`)' : ''}`)
+          }
+        } catch (err) {
+          console.log(`${host}: could not be asked - ${(err as Error).message}`)
+        }
+      }
+      if (total) console.log(`\nRestored ${sats(wallet.balanceMsat())} in total. Run \`notecase reconcile\` to finish anything the mints were holding.`)
+      return
+    }
+
+    case 'adopt': {
+      const legacy = wallet.legacyNotes()
+      if (!legacy.length) {
+        console.log('Every note here is already on your recovery words.')
+        return
+      }
+      console.log(`${legacy.length} note(s) are not covered by your words yet. Rotating them costs nothing.`)
+      const result = await wallet.adoptLegacyNotes()
+      for (const note of result.adopted) console.log(`  adopted ${sats(note.amountMsat)} (${shortId(note)})`)
+      for (const failure of result.failed) console.log(`  ${shortId(failure.note)}: ${failure.reason}`)
+      return
+    }
+
     case 'balance': {
       const byMint = wallet.balanceByMint()
       if (byMint.size === 0) {
@@ -206,6 +289,12 @@ const main = async (): Promise<void> => {
       } else {
         for (const [host, msat] of byMint) console.log(`${sats(msat)}  at ${host}`)
         if (byMint.size > 1) console.log(`${sats(wallet.balanceMsat())}  total`)
+      }
+      const legacy = wallet.legacyNotes()
+      if (legacy.length) {
+        console.log(
+          `${legacy.length} note(s) are not covered by your recovery words - \`notecase adopt\` fixes that for free.`
+        )
       }
       const unrotated = wallet.unrotatedMsat()
       if (unrotated > 0) {
@@ -755,6 +844,11 @@ const main = async (): Promise<void> => {
 }
 
 main().catch(err => {
+  if (err instanceof BadMnemonicError) {
+    console.error(err.message)
+    process.exitCode = 1
+    return
+  }
   if (err instanceof BadSignatureError) {
     console.error(`Refused: ${err.message}.`)
     console.error('If you are certain this note is good, `notecase receive --force` takes it anyway.')

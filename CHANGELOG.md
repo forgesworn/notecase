@@ -2,9 +2,46 @@
 
 ## [0.2.0] - unreleased
 
+Needs `lnurlcash-kit` 0.2.0.
+
 While LUD-25 is a draft, a `0.x` minor bump may be breaking. This one is:
 `receive` now refuses a note whose signature does not verify, where it
-used to warn and take it.
+used to warn and take it, and the wallet file moves to version 2. A
+version 1 file opens and a version 1 backup imports; both are upgraded in
+place, and the notes already in them stay findable only through the file
+until they are adopted onto the seed.
+
+- **Twelve words, and the money can be found again.** `notecase init`
+  shows a BIP39 mnemonic once; `notecase seed` shows it again after the
+  PIN. Every note secret this wallet makes now comes off it:
+
+      root  = HMAC-SHA256(key = "lnurlcash-note-v1", msg = seed)
+      k1[i] = HMAC-SHA256(key = root, msg = "<mint host>:<i>")
+
+  where the host is the exact lowercase `host[:port]` and `i` counts up
+  from zero, one counter per mint. So `notecase init --restore`, add the
+  mints you used, `notecase restore`, and the wallet asks each mint which
+  of those secrets are still worth something and takes back what is.
+  It walks upward until twenty consecutive indices are unknown, records
+  what it finds as recovered, and parks anything the mint is holding for
+  `reconcile` to finish.
+- The next unused index per mint is written to disk **in the same save
+  that stages a fresh secret, before its hash goes anywhere**. A crash
+  between the two wastes an index and costs nothing; the other order would
+  hand a mint a secret the wallet could never find its way back to. A
+  split consumes two indices, and an unwound mutation does not give its
+  indices back.
+- `notecase adopt` moves notes the words cannot find - a note somebody
+  handed you, or anything made before the seed - onto the seed with one
+  rotate each, which the mint charges nothing for. The balance says how
+  many are in that state.
+- The web wallet shows the words once behind an "I have written them down"
+  gate, shows them again from Settings after the PIN, and gains a "Restore
+  from your words" door on the welcome screen with "ask my mints what is
+  still mine" in Settings.
+- The passphrase-sealed export is unchanged and still worth having: it
+  carries mints, pins, history and pending outcomes, none of which the
+  words can rebuild.
 
 - A backup holding a note taken offline can be restored again. The
   portable backup's validator required every note to carry its mint's
