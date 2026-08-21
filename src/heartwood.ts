@@ -82,23 +82,42 @@ export class HeartwoodClient {
       },
       this.secret
     )
-    const published = await this.transport.publish(this.link.relays, request)
-    if (!published.ok.length) throw new HeartwoodError(`No relay took the request (${published.failed.join(', ')}).`)
-    const deadline = this.now() + timeoutMs
-    while (this.now() < deadline) {
-      const answers = await this.transport.query(this.link.relays, {
+    // NIP-46 replies are kind 24133, which is in the ephemeral range: relays
+    // do not store them, so asking for history after publishing is a race
+    // the device usually loses - it answers in about 100 ms, and a stored-
+    // event query returns nothing at all. Subscribe BEFORE publishing and
+    // take the reply live.
+    let answer: {id: string; result?: unknown; error?: unknown} | null = null
+    const sub = this.transport.subscribe(
+      this.link.relays,
+      {
         kinds: [NIP46_KIND],
         authors: [this.link.devicePubkey],
         '#p': [this.clientPubkey],
         since: createdAt - 5
-      })
-      for (const answer of answers) {
-        const inner = this.open(answer)
-        if (!inner || inner.id !== id) continue
-        if (inner.error !== undefined) throw new HeartwoodError(String(inner.error))
-        return inner.result as T
+      },
+      event => {
+        if (answer) return
+        const inner = this.open(event)
+        if (inner && inner.id === id) answer = inner
       }
-      await sleep(POLL_MS)
+    )
+    try {
+      const published = await this.transport.publish(this.link.relays, request)
+      if (!published.ok.length) {
+        throw new HeartwoodError(`No relay took the request (${published.failed.join(', ')}).`)
+      }
+      const deadline = this.now() + timeoutMs
+      while (this.now() < deadline) {
+        if (answer) {
+          const inner = answer as {id: string; result?: unknown; error?: unknown}
+          if (inner.error !== undefined) throw new HeartwoodError(String(inner.error))
+          return inner.result as T
+        }
+        await sleep(POLL_MS)
+      }
+    } finally {
+      sub.close()
     }
     throw new HeartwoodError(`The device did not answer ${method} in time.`)
   }

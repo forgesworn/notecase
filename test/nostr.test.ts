@@ -44,6 +44,11 @@ const fakeRelays = (): {transport: NostrTransport; stored: Map<string, Event[]>;
   const stored = new Map<string, Event[]>()
   const down = new Set<string>()
   const transport: NostrTransport = {
+    subscribe(_relays, _filter, _onEvent) {
+      // This suite drives the wrap/inbox paths, which use query() against
+      // stored kinds. Nothing here needs a live subscription.
+      return {close() {}}
+    },
     async query(relays, filter: Filter) {
       const out: Event[] = []
       for (const r of relays) {
