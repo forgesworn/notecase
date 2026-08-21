@@ -597,15 +597,39 @@ export class Wallet {
     const held = (await client.listNotes()).filter(n => n.state === 'confirmed' && n.from)
     const collected: ReceiveResult[] = []
     const failed: {id: string; reason: string}[] = []
-    for (const note of held) {
-      onProgress(`hold the device button to release ${note.id}`)
-      let k1: string
-      try {
-        k1 = await client.exportSecret(note.id)
-      } catch (err) {
-        failed.push({id: note.id, reason: (err as Error).message})
-        continue
-      }
+    if (!held.length) {
+      await this.persist()
+      return {collected, failed}
+    }
+
+    // Ask for every secret at once. The device coalesces asks that share a
+    // client, identity and method onto ONE card, and a single hold answers
+    // the batch - but only while that card is still open. Awaiting each
+    // reply before sending the next means the card has always resolved by
+    // the time the next arrives, so four notes cost four holds instead of
+    // one. Firing them together is what lets the batching work at all.
+    onProgress(
+      held.length === 1
+        ? `hold the device button to release ${held[0]!.id}`
+        : `hold the device button once to release all ${held.length} notes`
+    )
+    const secrets = await Promise.all(
+      held.map(note =>
+        client.exportSecret(note.id).then(
+          k1 => ({note, k1, error: null as string | null}),
+          (err: Error) => ({note, k1: null as string | null, error: err.message})
+        )
+      )
+    )
+
+    const claimed: (typeof held)[number][] = []
+    const released: {note: (typeof held)[number]; k1: string}[] = []
+    for (const outcome of secrets) {
+      if (outcome.k1 === null) failed.push({id: outcome.note.id, reason: outcome.error!})
+      else released.push({note: outcome.note, k1: outcome.k1})
+    }
+
+    for (const {note, k1} of released) {
       const url = buildNoteUrl(`lnurlw://${note.host}`, k1, note.amount_msat)
       let result: ReceiveResult | null = null
       try {
@@ -619,12 +643,28 @@ export class Wallet {
         }
         // Already burned, or already ours: the device copy is history.
       }
-      onProgress(`hold again to mark ${note.id} spent on the device`)
-      try {
-        await client.markSpent(note.id)
-      } catch (err) {
-        failed.push({id: note.id, reason: `claimed here but not marked spent on the device: ${(err as Error).message}`})
-      }
+      claimed.push(note)
+    }
+
+    // Same again for the spend marks: one hold for the batch.
+    if (claimed.length) {
+      onProgress(
+        claimed.length === 1
+          ? `hold again to mark ${claimed[0]!.id} spent on the device`
+          : `hold once more to mark all ${claimed.length} spent on the device`
+      )
+      const marks = await Promise.all(
+        claimed.map(note =>
+          client.markSpent(note.id).then(
+            () => null,
+            (err: Error) => ({
+              id: note.id,
+              reason: `claimed here but not marked spent on the device: ${err.message}`
+            })
+          )
+        )
+      )
+      for (const mark of marks) if (mark) failed.push(mark)
     }
     await this.persist()
     return {collected, failed}
