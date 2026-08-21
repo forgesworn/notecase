@@ -27,6 +27,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase prepare [--apply] [--mint <host>]
   notecase send <sats> [--mint <host>] [--offline] [--overpay]
   notecase send <sats> --to <npub|nip05>
+  notecase address | address claim <name> [--mint <host>]
   notecase inbox
   notecase reclaim [id]
   notecase melt <bolt11>
@@ -514,6 +515,28 @@ const main = async (): Promise<void> => {
       return
     }
 
+    case 'address': {
+      const [sub, wanted] = rest
+      if (sub === 'claim') {
+        if (!wanted) throw new WalletUsageError('address claim <name> [--mint <host>]')
+        const price = await wallet.namePriceMsat(values.mint)
+        if (price === null) {
+          throw new WalletUsageError(`${values.mint ?? store.data.settings.defaultMintHost} is not handing out lightning addresses.`)
+        }
+        console.log(
+          price > 0
+            ? `Claiming ${wanted} costs ${sats(price)}, paid with a note of that mint.`
+            : `Claiming ${wanted} is free at that mint.`
+        )
+        const claimed = await wallet.registerName({name: wanted, ...(values.mint ? {mintHost: values.mint} : {})})
+        console.log(`${claimed.address} is yours. Payments to it arrive as notes sealed to your npub - \`notecase inbox\` opens them.`)
+        return
+      }
+      const address = wallet.lightningAddress()
+      console.log(address ?? 'No lightning address yet - `notecase address claim <name>`.')
+      return
+    }
+
     case 'inbox': {
       const transport = poolTransport()
       try {
@@ -521,6 +544,11 @@ const main = async (): Promise<void> => {
         for (const r of result.received) {
           for (const warning of r.warnings) console.log(`  warning: ${warning}`)
           console.log(`Received ${sats(r.note.amountMsat)} at ${r.note.mintHost} (${shortId(r.note)})${r.note.receivedFrom ? ` from ${npubOf(r.note.receivedFrom)}` : ''}.`)
+          if (r.note.zap) {
+            console.log(
+              `  zap from ${npubOf(r.note.zap.senderPubkey)}${r.note.zap.content ? `: ${r.note.zap.content}` : ''}`
+            )
+          }
         }
         for (const s of result.skipped) console.log(`  skipped ${s.wrapId.slice(0, 8)}: ${s.reason}`)
         if (!result.received.length && !result.skipped.length) console.log('Nothing new.')

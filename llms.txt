@@ -54,6 +54,7 @@ notecase receive <note> [--force] | send <sats> | melt <bolt11 | sats --to <addr
 notecase check [--apply] [--resign] [--mint <host>]
 notecase ladder [set <sats,...>] [--copies n] | prepare [--apply]
 notecase send <sats> --offline [--overpay] | receive --offline
+notecase address [claim <name> --mint <host>]
 notecase balance | list [--all] | reconcile | verify <note>
 notecase nwc set <uri> / status / clear
 notecase backup export | shares [--threshold N --count M] | recover-key
@@ -74,7 +75,8 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   balanceMsat(), unrotatedMsat(), verifyNoteOffline(input), addMint(input),
   ladderFor(host), setLadder(host, sats[], copies), ladderPlan(host) -> LadderPlan,
   prepareOffline(host), planOfflineSend(msat, host?) -> OfflineSelection,
-  sendOffline(msat, host?, {acceptOverpay?}), receiveOffline(input)
+  sendOffline(msat, host?, {acceptOverpay?}), receiveOffline(input),
+  namePriceMsat(host?), registerName({name, mintHost?}), lightningAddress()
 createWalletFetch({allowPrivate?, proxy?}) - DNS-pinned fetch, loopback
   passthrough; with a socks5:// proxy it tunnels instead and resolves remotely
 payWithNwc(uri, pr) / invoiceFromNwc(uri, amountMsat, desc) / nwcStatus(uri)

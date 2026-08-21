@@ -6,6 +6,20 @@ While LUD-25 is a draft, a `0.x` minor bump may be breaking. This one is:
 `receive` now refuses a note whose signature does not verify, where it
 used to warn and take it.
 
+- **A lightning address, claimed from the wallet.** `notecase address
+  claim <name>` takes `name@mint.example` at a mint that hands them out.
+  The mint charges in its own notes, so the wallet cuts one out of the
+  balance and the mint burns it; a free name cuts nothing. The only
+  identity involved is the wallet's Nostr key: the request is signed with
+  it (NIP-98), so the name belongs to the key and no account exists
+  anywhere. If the mint refuses, the note that was to pay for it comes
+  straight home under a fresh secret. In the web wallet it is a settings
+  card that shows the price before you commit, and the home screen then
+  carries the address with a copy button.
+- A note that arrived as a zap now carries the payer's own signed request,
+  so the wallet shows who sent it and what they wrote rather than "a note
+  arrived". The signature on that request is checked, so a mint cannot
+  invent a sender.
 - **A mint that rotates its signing key is no longer mistaken for an
   attack.** Rotating a signing key invalidates every outstanding signature
   at once, and the wallet used to throw `PinMismatchError` at the mint it
