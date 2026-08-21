@@ -5,7 +5,7 @@ import {nip44} from 'nostr-tools'
 import {bytesToHex} from '@noble/hashes/utils.js'
 import {Wallet} from '../src/wallet.ts'
 import {HeartwoodError, NIP46_KIND, parseBunkerUri} from '../src/heartwood.ts'
-import {GIFT_WRAP_KIND, INBOX_RELAYS_KIND, identityFromSecret, inboxRelays, newIdentitySecretHex, unwrapNote, wrapNote, type NostrTransport} from '../src/nostr.ts'
+import {GIFT_WRAP_KIND, INBOX_RELAYS_KIND, identityFromSecret, inboxRelays, newIdentitySecretHex, npubOf, unwrapNote, wrapNote, type NostrTransport} from '../src/nostr.ts'
 import {freshK1, makeWallet} from './helpers.ts'
 
 // A heartwood that lives on the relay: it answers heartwood_note_* the way
@@ -31,6 +31,7 @@ const fakeDevice = (relay: string) => {
   const stored: Event[] = []
   const log: string[] = []
   const signer = {key: secret}
+  const trusted = new Set<string>()
 
   const answer = (to: string, id: string, body: {result?: unknown; error?: string}): Event =>
     finalizeEvent(
@@ -57,6 +58,19 @@ const fakeDevice = (relay: string) => {
         n.state = 'spent'
         return {result: JSON.stringify({ok: true})}
       }
+      case 'heartwood_note_trust': {
+        const pk = String(fields.pubkey)
+        if (!/^[0-9a-f]{64}$/.test(pk)) return {error: 'bad_request'}
+        if (fields.remove === true) {
+          const had = trusted.delete(pk)
+          return {result: JSON.stringify({ok: true, trusted: false, changed: had})}
+        }
+        const had = trusted.has(pk)
+        trusted.add(pk)
+        return {result: JSON.stringify({ok: true, trusted: true, changed: !had})}
+      }
+      case 'heartwood_note_trusted':
+        return {result: JSON.stringify({ok: true, trusted: [...trusted]})}
       case 'heartwood_note_send': {
         const n = find()
         if (!n) return {error: 'not_found'}
@@ -225,6 +239,22 @@ describe('a linked heartwood', () => {
 
     // A sender who only knows the npub now knows where to leave a note.
     expect(await inboxRelays(device.transport, device.pubkey, ['wss://dev.example'])).toEqual(['wss://dev.example'])
+  })
+
+  it('trusts a mint by npub, lists it, and withdraws the trust without a hold', async () => {
+    const device = fakeDevice('wss://dev.example')
+    const {wallet} = makeWallet()
+    await wallet.linkHeartwood(device.transport, device.uri)
+    const mintSk = generateSecretKey()
+    const mintNpub = npubOf(getPublicKey(mintSk))
+    const added = await wallet.heartwoodTrust(device.transport, mintNpub)
+    expect(added).toMatchObject({pubkeyHex: getPublicKey(mintSk), trusted: true, changed: true})
+    expect(await wallet.heartwoodTrusted(device.transport)).toEqual([getPublicKey(mintSk)])
+    expect((await wallet.heartwoodTrust(device.transport, mintNpub)).changed).toBe(false)
+    const removed = await wallet.heartwoodTrust(device.transport, mintNpub, true)
+    expect(removed).toMatchObject({trusted: false, changed: true})
+    expect(await wallet.heartwoodTrusted(device.transport)).toEqual([])
+    expect(device.log.filter(m => m === 'heartwood_note_trust')).toHaveLength(3)
   })
 
   it('refuses an inbox list the device did not actually sign', async () => {

@@ -546,6 +546,28 @@ const strikeIn = (print: HTMLElement, amountMsat: number, host: HTMLElement): vo
   }
 }
 
+// What to send someone who may have no wallet that speaks LUD-25: the note
+// is an ordinary LNURL-withdraw, so any Lightning wallet cashes it out, and
+// the claim link keeps it as a note in this wallet instead.
+const redeemMessage = (note: {amountMsat: number; mintHost: string}, url: string): string => {
+  const parsed = new URL(url)
+  const claim = new URLSearchParams({
+    u: `${parsed.host}${parsed.pathname}`,
+    k1: parsed.searchParams.get('k1') ?? '',
+    a: String(note.amountMsat)
+  })
+  return [
+    `Here's ${sats(note.amountMsat)} sat for you, as a Lightning bearer note.`,
+    '',
+    `To cash it into any Lightning wallet (Wallet of Satoshi, Phoenix, Zeus…): scan or paste this, it's an LNURL withdraw:`,
+    toBech32Lnurl(url).toUpperCase(),
+    '',
+    `Or keep it as a note: ${location.origin}/#/claim?${claim.toString()}`,
+    '',
+    'Whoever has this can spend it, so use it once and don\'t forward it.'
+  ].join('\n')
+}
+
 const shareButton = (text: string): HTMLElement | null => {
   if (!navigator.share) return null
   const button = el(`<button class="btn btn-ghost">${icons.share}<span>Share</span></button>`)
@@ -1255,8 +1277,8 @@ const viewSend = (): void => {
     body.append(el('<div class="rubric">To be handed over</div>'))
     body.append(amount.node)
     const to = el(`<div class="field">
-      <label>To an npub <span class="fineline">optional · seals the note to their key and leaves it on their inbox relays</span></label>
-      <input data-npub type="text" placeholder="npub1…" autocomplete="off" spellcheck="false" />
+      <label>To an npub or NIP-05 <span class="fineline">optional · seals the note to their key and leaves it on their inbox relays</span></label>
+      <input data-npub type="text" placeholder="npub1… or name@domain" autocomplete="off" spellcheck="false" />
     </div>`)
     body.append(to)
     body.append(el(`<button class="btn btn-silver" data-cut>${icons.send}<span>Cut a note</span></button>`))
@@ -1306,7 +1328,14 @@ const viewSend = (): void => {
           const copyLnurl = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy LNURL</span></button>`)
           copyLnurl.addEventListener('click', () => void copyText(toBech32Lnurl(url), 'LNURL', true))
           inner.append(copyUrl, copyLnurl)
-          const share = shareButton(url)
+          // For someone who has never heard of a mint: the note as text they
+          // can paste into any Lightning wallet, and a link that keeps it as a
+          // note here, with one line on what to do.
+          const message = redeemMessage(note, url)
+          const copyMessage = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy a message for them</span></button>`)
+          copyMessage.addEventListener('click', () => void copyText(message, 'Message', true))
+          inner.append(copyMessage)
+          const share = shareButton(message)
           if (share) inner.append(share)
           done.append(inner)
           strikeIn(print, note.amountMsat, inner)
@@ -1314,6 +1343,173 @@ const viewSend = (): void => {
         })
       })
     )
+    return view
+  })
+}
+
+// ---------- hardware signer ----------
+
+// A heartwood signer as a note locker: notes zapped or sent to its npub
+// land there, and this is where they come off it. Every gated step is a
+// hold on the device, so each one says so before it starts.
+const viewSigner = (): void => {
+  const w = wallet!
+  show(() => {
+    const view = el('<div class="view"></div>')
+    view.append(topBar('Hardware signer', viewSettings))
+    const body = el('<div class="stack"></div>')
+    view.append(body)
+    const link = w.heartwoodLink()
+
+    if (!link) {
+      body.append(
+        el(`<div class="hint">${icons.info}<span><b>A heartwood signer holds notes behind a button.</b> Pair it here and you can bring those notes into this wallet, trust a mint so zaps land without a hold, and publish where senders should leave them.</span></div>`)
+      )
+      const field = el(`<div class="field">
+        <label>Bunker URI <span class="fineline">from the device's pairing screen or Sapwood</span></label>
+        <input data-uri type="text" placeholder="bunker://…?relay=…&secret=…" autocomplete="off" spellcheck="false" />
+      </div>`)
+      body.append(field)
+      const uriInput = field.querySelector('[data-uri]') as HTMLInputElement
+      const scan = scanButton(value => {
+        uriInput.value = value
+      })
+      if (scan) body.append(scan)
+      const pair = el(`<button class="btn btn-silver">${icons.shield}<span>Pair</span></button>`) as HTMLButtonElement
+      pair.addEventListener('click', () =>
+        busy(pair, async () => {
+          const uri = uriInput.value.trim()
+          if (!uri) throw new WalletUsageError('Paste the bunker URI first.')
+          await withRelays(t => w.linkHeartwood(t, uri))
+          toast('Paired with the signer.', 'ok')
+          viewSigner()
+        })
+      )
+      body.append(pair)
+      return view
+    }
+
+    body.append(
+      el(`<div class="card"><h3>Paired</h3>
+        <div class="kv"><span>device</span><b>${esc(shortNpub(link.devicePubkey))}</b></div>
+        <div class="kv"><span>relays</span><b>${esc(link.relays.join(', '))}</b></div></div>`)
+    )
+
+    // ---- notes on the device ----
+    const notesCard = el(`<div class="card"><h3>Notes on the device</h3><div data-list><p class="fineline">Loading…</p></div></div>`)
+    body.append(notesCard)
+    const list = notesCard.querySelector('[data-list]') as HTMLElement
+    const progress = el('<div class="stack" data-progress></div>')
+    const collect = el(`<button class="btn btn-silver">${icons.receive}<span>Collect into this wallet</span></button>`) as HTMLButtonElement
+    const refresh = el(`<button class="btn btn-ghost">${icons.refresh}<span>Refresh</span></button>`) as HTMLButtonElement
+    notesCard.append(progress, collect, refresh)
+    const paintNotes = async () => {
+      list.innerHTML = '<p class="fineline">Asking the device…</p>'
+      try {
+        const notes = await withRelays(t => w.heartwoodNotes(t))
+        const waiting = notes.filter(n => n.state === 'confirmed' && n.from)
+        list.innerHTML = ''
+        if (!notes.length) list.append(el('<p class="fineline">The device holds no notes.</p>'))
+        for (const n of notes) {
+          const who = n.from ? `from ${shortNpub(n.from)}` : n.sent_to ? `sent to ${shortNpub(n.sent_to)}` : ''
+          list.append(
+            el(`<div class="kv"><span>${esc(n.state)}</span><b>${sats(n.amount_msat)} sat · ${esc(n.host)}${who ? ` · ${esc(who)}` : ''}</b></div>`)
+          )
+        }
+        collect.disabled = !waiting.length
+        ;(collect.querySelector('span') as HTMLElement).textContent = waiting.length
+          ? `Collect ${waiting.length} note${waiting.length === 1 ? '' : 's'} (${sats(waiting.reduce((a, n) => a + n.amount_msat, 0))} sat)`
+          : 'Nothing to collect'
+      } catch (err) {
+        list.innerHTML = ''
+        list.append(el(`<p class="warn">${esc((err as Error).message)}</p>`))
+      }
+    }
+    refresh.addEventListener('click', () => void paintNotes())
+    collect.addEventListener('click', () =>
+      busy(collect, async () => {
+        progress.innerHTML = ''
+        progress.append(el(`<p class="warn"><strong>Watch the device.</strong> Each note needs two holds: one to release it, one to mark it spent once this wallet has it.</p>`))
+        const result = await withRelays(t =>
+          w.collectFromHeartwood(t, step => progress.append(el(`<p class="fineline">${esc(step)}</p>`)))
+        )
+        for (const r of result.collected) progress.append(el(`<p class="fineline">${icons.check} Collected ${sats(r.note.amountMsat)} sat at ${esc(r.note.mintHost)}.</p>`))
+        for (const f of result.failed) progress.append(el(`<p class="warn">${esc(f.id)}: ${esc(f.reason)}</p>`))
+        if (result.collected.length) {
+          toast(`Collected ${result.collected.length} note${result.collected.length === 1 ? '' : 's'}.`, 'ok')
+          burst(progress)
+        }
+        await paintNotes()
+      })
+    )
+    void paintNotes()
+
+    // ---- trusted senders ----
+    const trustCard = el(`<div class="card"><h3>Trusted senders</h3>
+      <p class="warn" style="text-align:left;padding-top:12px">A note from a trusted key is stored on the device without a hold. Trust a mint's zap key here (it is the <code>nostrPubkey</code> on its zap payRequest) and zaps to your address land on the signer by themselves.</p>
+      <div data-trusted></div>
+      <div class="field"><label>Sender <span class="fineline">npub, hex or NIP-05</span></label><input data-sender type="text" placeholder="npub1…" autocomplete="off" spellcheck="false" /></div></div>`)
+    body.append(trustCard)
+    const trustedList = trustCard.querySelector('[data-trusted]') as HTMLElement
+    const senderInput = trustCard.querySelector('[data-sender]') as HTMLInputElement
+    const trustButton = el(`<button class="btn">${icons.shield}<span>Trust (one hold)</span></button>`) as HTMLButtonElement
+    trustCard.append(trustButton)
+    const paintTrusted = async () => {
+      try {
+        const trusted = await withRelays(t => w.heartwoodTrusted(t))
+        trustedList.innerHTML = ''
+        if (!trusted.length) trustedList.append(el('<p class="fineline">No trusted senders: every note needs a hold.</p>'))
+        for (const pk of trusted) {
+          const row = el(`<div class="kv"><span>trusted</span><b>${esc(shortNpub(pk))}</b></div>`)
+          const drop = el(`<button class="btn btn-ghost">${icons.x}<span>Untrust</span></button>`) as HTMLButtonElement
+          drop.addEventListener('click', () =>
+            busy(drop, async () => {
+              await withRelays(t => w.heartwoodTrust(t, pk, true))
+              await paintTrusted()
+            })
+          )
+          row.append(drop)
+          trustedList.append(row)
+        }
+      } catch (err) {
+        trustedList.innerHTML = ''
+        trustedList.append(el(`<p class="warn">${esc((err as Error).message)}</p>`))
+      }
+    }
+    trustButton.addEventListener('click', () =>
+      busy(trustButton, async () => {
+        const sender = senderInput.value.trim()
+        if (!sender) throw new WalletUsageError('Name the sender first.')
+        toast('Hold the device button to trust this sender.')
+        const result = await withRelays(t => w.heartwoodTrust(t, sender))
+        toast(result.changed ? `${shortNpub(result.pubkeyHex)} is now trusted.` : 'Already trusted.', 'ok')
+        senderInput.value = ''
+        await paintTrusted()
+      })
+    )
+    void paintTrusted()
+
+    // ---- inbox and unlink ----
+    const more = el(`<div class="card"><h3>Where senders find it</h3>
+      <p class="warn" style="text-align:left;padding-top:12px">The device's inbox list (kind 10050) names the relays above, signed by the device. Without it nobody who resolves its npub knows where to leave a note.</p></div>`)
+    const publish = el(`<button class="btn">${icons.upload}<span>Publish inbox (one hold)</span></button>`) as HTMLButtonElement
+    publish.addEventListener('click', () =>
+      busy(publish, async () => {
+        toast('Hold the device button to sign its inbox list.')
+        const result = await withRelays(t => w.publishHeartwoodInbox(t))
+        toast(result.ok.length ? `Inbox list on ${result.ok.length} relay(s)` : 'No relay took the inbox list', result.ok.length ? 'ok' : 'err')
+      })
+    )
+    const unlink = el(`<button class="btn btn-ghost">${icons.x}<span>Unpair</span></button>`) as HTMLButtonElement
+    unlink.addEventListener('click', () =>
+      busy(unlink, async () => {
+        await w.unlinkHeartwood()
+        toast('Unpaired. Notes on the device stay on the device.')
+        viewSigner()
+      })
+    )
+    more.append(publish, unlink)
+    body.append(more)
     return view
   })
 }
@@ -1710,6 +1906,14 @@ const viewSettings = (): void => {
       nwc.append(row)
     }
     body.append(nwc)
+
+    // hardware signer
+    const signer = el(`<div class="card"><h3>Hardware signer</h3>
+      <p class="warn" style="text-align:left;padding-top:12px">${w.heartwoodLink() ? `Paired with ${esc(shortNpub(w.heartwoodLink()!.devicePubkey))}. Notes zapped or sent to it come off here.` : 'Pair a heartwood signer to collect the notes it holds, trust a mint for hands-free zaps, and publish its inbox.'}</p></div>`)
+    const openSigner = el(`<button class="btn">${icons.shield}<span>${w.heartwoodLink() ? 'Open signer' : 'Pair a signer'}</span></button>`)
+    openSigner.addEventListener('click', viewSigner)
+    signer.append(openSigner)
+    body.append(signer)
 
     // nostr
     const nostr = el(`<div class="card"><h3>Nostr</h3>

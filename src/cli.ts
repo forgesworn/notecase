@@ -450,6 +450,19 @@ const main = async (): Promise<void> => {
             const who = n.from ? ` from ${npubOf(n.from).slice(0, 16)}…` : n.sent_to ? ` sent to ${npubOf(n.sent_to).slice(0, 16)}…` : ''
             console.log(`${n.id}  ${n.state.padEnd(9)} ${sats(n.amount_msat).padStart(12)}  ${n.host}${who}`)
           }
+        } else if (sub === 'trust' || sub === 'untrust') {
+          if (!arg) throw new WalletUsageError(`heartwood ${sub} <npub|hex|nip05>`)
+          if (sub === 'trust') console.log('  hold the device button to trust this sender')
+          const result = await wallet.heartwoodTrust(transport, arg, sub === 'untrust')
+          console.log(
+            result.changed
+              ? `${npubOf(result.pubkeyHex)} is ${result.trusted ? 'now trusted: its notes are stored without a hold.' : 'no longer trusted.'}`
+              : `${npubOf(result.pubkeyHex)} was already ${result.trusted ? 'trusted' : 'untrusted'}.`
+          )
+        } else if (sub === 'trusted') {
+          const trusted = await wallet.heartwoodTrusted(transport)
+          if (!trusted.length) console.log('The device trusts no senders; every note needs a hold.')
+          for (const pk of trusted) console.log(npubOf(pk))
         } else if (sub === 'inbox') {
           console.log('  hold the device button to sign its inbox list')
           const result = await wallet.publishHeartwoodInbox(transport)
@@ -472,7 +485,7 @@ const main = async (): Promise<void> => {
           if (sent.relays.length) console.log(`  on: ${sent.relays.join(', ')}`)
           if (sent.failed.length) console.log(`  failed: ${sent.failed.join(', ')}`)
         } else {
-          console.log('heartwood link <bunker://...> | inbox | notes | collect | send <id> --to <npub> | unlink')
+          console.log('heartwood link <bunker://...> | inbox | notes | collect | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | unlink')
         }
       } finally {
         transport.close()

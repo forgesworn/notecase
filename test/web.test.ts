@@ -56,6 +56,24 @@ describe('the web wallet', () => {
     await until(onHome, 'the home screen')
   })
 
+  it('opens the signer pairing screen from settings and comes back', async () => {
+    document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
+    await until(
+      () => [...document.querySelectorAll('button')].some(button => button.textContent?.includes('Pair a signer')),
+      'the settings screen'
+    )
+    ;[...document.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent?.includes('Pair a signer'))!.click()
+    await until(() => document.querySelector('[data-uri]') !== null, 'the pairing screen')
+    expect(document.body.textContent).toContain('Bunker URI')
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(
+      () => [...document.querySelectorAll('button')].some(button => button.textContent?.includes('Lock now')),
+      'settings again'
+    )
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(onHome, 'home')
+  })
+
   it('locks and unlocks with the PIN', async () => {
     document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
     await until(
