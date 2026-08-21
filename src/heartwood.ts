@@ -172,6 +172,21 @@ export class HeartwoodClient {
     return res.event
   }
 
+  // Senders whose wraps the device stores without a hold: a public mint's
+  // Nostr key, so a zap paid out as a note needs no human. One hold to add.
+  async trust(pubkeyHex: string): Promise<{trusted: boolean; changed: boolean}> {
+    return this.note<{trusted: boolean; changed: boolean}>('heartwood_note_trust', {pubkey: pubkeyHex}, true)
+  }
+
+  async untrust(pubkeyHex: string): Promise<{trusted: boolean; changed: boolean}> {
+    return this.note<{trusted: boolean; changed: boolean}>('heartwood_note_trust', {pubkey: pubkeyHex, remove: true})
+  }
+
+  async trusted(): Promise<string[]> {
+    const res = await this.note<{trusted: string[]}>('heartwood_note_trusted', {})
+    return res.trusted
+  }
+
   // Plain NIP-46 sign_event, as the device's own identity. Gated unless
   // the device's policy for this client allows the kind.
   async signEvent(unsigned: {kind: number; created_at: number; tags: string[][]; content: string}): Promise<Event> {

@@ -583,6 +583,20 @@ export class Wallet {
     return this.heartwoodClient(transport).listNotes()
   }
 
+  // A sender the device stores notes from without a hold. `sender` is an
+  // npub, hex or NIP-05, as for send; a public mint publishes its key as
+  // `nostrPubkey` on its zap payRequest.
+  async heartwoodTrust(transport: NostrTransport, sender: string, remove = false): Promise<{pubkeyHex: string; trusted: boolean; changed: boolean}> {
+    const pubkeyHex = await resolveRecipient(sender, this.opts.fetch ?? fetch)
+    const client = this.heartwoodClient(transport)
+    const result = remove ? await client.untrust(pubkeyHex) : await client.trust(pubkeyHex)
+    return {pubkeyHex, ...result}
+  }
+
+  async heartwoodTrusted(transport: NostrTransport): Promise<string[]> {
+    return this.heartwoodClient(transport).trusted()
+  }
+
   // Tell senders where the device's wraps go: its kind 10050, signed by
   // the device (one hold), on its relays, ours, and the indexers.
   async publishHeartwoodInbox(transport: NostrTransport): Promise<{relays: string[]; ok: string[]; failed: string[]}> {

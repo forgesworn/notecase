@@ -85,6 +85,7 @@ notecase nwc set                       # prompts for the connection URI
 notecase nostr init                    # your npub + publishes your inbox relays (kind 10050)
 notecase heartwood link bunker://...   # a heartwood signer as a note locker
 notecase heartwood inbox               # publishes the device's inbox relays (kind 10050), one hold
+notecase heartwood trust <npub|nip05>  # the device stores notes from this sender without a hold (a mint's zap key)
 notecase heartwood collect             # brings in what arrived at the device by wrap
 notecase backup shares --threshold 2 --count 3
 ```
