@@ -10,8 +10,8 @@
 // outcome is parked rather than guessed at, and reconcile() resolves the
 // parked ones by probing the mint - never by assumption.
 
-export {Wallet, InsufficientFundsError, PinMismatchError, WalletUsageError} from './wallet.ts'
-export type {ReceiveResult, ReconcileEvent} from './wallet.ts'
+export {Wallet, BadSignatureError, InsufficientFundsError, PinMismatchError, WalletUsageError} from './wallet.ts'
+export type {CheckReport, ReceiveResult, ReconcileEvent} from './wallet.ts'
 export {
   initWallet,
   openWallet,

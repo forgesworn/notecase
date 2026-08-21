@@ -6,7 +6,7 @@ import {utf8ToBytes} from '@noble/hashes/utils.js'
 import {splitSecret, shareToWords, wordsToShare, reconstructSecret} from '@forgesworn/shamir-words'
 import {NoteSpentError, NoteUnknownError, toBech32Lnurl} from 'lnurlcash-kit'
 import {initWallet, openWallet, NoWalletError, WrongPinError, type WalletStore} from './store.ts'
-import {Wallet, InsufficientFundsError, PinMismatchError, WalletUsageError} from './wallet.ts'
+import {Wallet, BadSignatureError, InsufficientFundsError, PinMismatchError, WalletUsageError} from './wallet.ts'
 import {createWalletFetch} from './fetchguard.ts'
 import {invoiceFromNwc, nwcStatus, payWithNwc} from './nwc.ts'
 import {npubOf, poolTransport} from './nostr.ts'
@@ -21,7 +21,8 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase balance
   notecase list [--all]
   notecase mint <sats> [--mint <host>] [--manual] [--wait <seconds>]
-  notecase receive [note]
+  notecase receive [note] [--force]
+  notecase check [--apply] [--mint <host>]
   notecase send <sats> [--mint <host>]
   notecase send <sats> --to <npub|nip05>
   notecase inbox
@@ -129,6 +130,8 @@ const main = async (): Promise<void> => {
       threshold: {type: 'string'},
       count: {type: 'string'},
       all: {type: 'boolean', default: false},
+      apply: {type: 'boolean', default: false},
+      force: {type: 'boolean', default: false},
       file: {type: 'string'}
     }
   })
@@ -235,9 +238,40 @@ const main = async (): Promise<void> => {
       // in shell history, and the k1 in it is the money.
       const input = (rest[0] ?? (await promptHidden('Note: '))).trim()
       if (!input) throw new WalletUsageError('Give the note to receive.')
-      const result = await wallet.receive(input)
+      const result = await wallet.receive(input, {acceptBadSignature: values.force})
       for (const warning of result.warnings) console.log(`  warning: ${warning}`)
       console.log(`Received ${sats(result.note.amountMsat)} at ${result.note.mintHost} (${shortId(result.note)}).`)
+      return
+    }
+
+    case 'check': {
+      const report = await wallet.checkNotes({apply: values.apply, ...(values.mint ? {mintHost: values.mint} : {})})
+      console.log(
+        `Checked ${report.checked} note${report.checked === 1 ? '' : 's'} against ${report.checked === 0 ? 'no' : 'their'} mint${values.apply ? '' : ' (nothing changed - add --apply)'}.`
+      )
+      const lines = (title: string, notes: NoteRecord[]) => {
+        if (!notes.length) return
+        const total = notes.reduce((sum, note) => sum + note.amountMsat, 0)
+        console.log(`  ${title}: ${notes.length} (${sats(total)})`)
+        for (const note of notes) console.log(`    ${shortId(note)}  ${sats(note.amountMsat)}  ${note.mintHost}`)
+      }
+      lines('already spent at the mint', report.spent)
+      lines('unknown to the mint', report.unknown)
+      lines('locked by something in flight', report.pending)
+      for (const changed of report.valueChanged) {
+        console.log(
+          `  value corrected: ${shortId(changed.note)} ${sats(changed.note.amountMsat)} -> ${sats(changed.amountMsat)} at ${changed.note.mintHost}`
+        )
+      }
+      for (const host of report.unreachable) {
+        console.log(`  ${host} did not answer - its notes were left alone.`)
+      }
+      const findings =
+        report.spent.length + report.unknown.length + report.pending.length + report.valueChanged.length
+      if (findings === 0 && report.unreachable.length === 0) console.log('Everything is where you left it.')
+      else if (!values.apply && findings > 0) console.log('Run `notecase check --apply` to write this down.')
+      // Asking costs nothing away: the mint issued these notes to this
+      // wallet and sees each one spent, so a sweep tells it nothing new.
       return
     }
 
@@ -571,6 +605,12 @@ const main = async (): Promise<void> => {
 }
 
 main().catch(err => {
+  if (err instanceof BadSignatureError) {
+    console.error(`Refused: ${err.message}.`)
+    console.error('If you are certain this note is good, `notecase receive --force` takes it anyway.')
+    process.exitCode = 1
+    return
+  }
   if (
     err instanceof WalletUsageError ||
     err instanceof InsufficientFundsError ||

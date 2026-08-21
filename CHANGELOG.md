@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.2.0] - unreleased
+
+While LUD-25 is a draft, a `0.x` minor bump may be breaking. This one is:
+`receive` now refuses a note whose signature does not verify, where it
+used to warn and take it.
+
+- `notecase check [--apply] [--mint <host>]` asks every mint whether the
+  notes this wallet holds from it are still good, and says what it found:
+  already spent, unknown to the mint, locked by something in flight, or
+  worth a different amount than the wallet thought. A dry run unless
+  `--apply` is given. A bearer note has copies by design, so a wallet that
+  never asks can go on counting money somebody else already spent. Four
+  notes are asked about at a time per mint; a mint that does not answer
+  has its notes left exactly as they are and is named in the report,
+  never marked. The sweep costs no privacy: the mint made these notes for
+  this wallet and sees each one spent.
+- `Wallet.checkNotes({apply?, mintHost?})` is the engine behind it, and
+  returns the report rather than printing one.
+- **A signature that fails is now a refusal.** A note carrying a `sig`
+  that does not verify against the key pinned for its mint is rejected
+  before any record is written (`BadSignatureError`): the amount may have
+  been altered, or the note may not come from that mint at all. Overridable
+  per receive - `notecase receive --force`, or a red card with a two-tap
+  "take it anyway" in the web wallet - and the override is recorded as a
+  warning. A note with **no** signature stays a warning, because mints with
+  no funding source legitimately issue unsigned notes. Reclaiming a note
+  this wallet sent is never refused on a signature: it is our own money
+  coming home.
+- The web wallet gains Settings → Check your notes: the same sweep, a plain
+  reading of what each mint said, and an Apply button that asks the mints
+  again before writing anything down.
+
 ## [0.1.1] - 2026-08-21
 
 - `notecase transfer <sats> --from <host> --to <host>` moves value between

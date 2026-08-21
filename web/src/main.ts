@@ -21,7 +21,8 @@ import {
   toBech32Lnurl,
   verifyNoteSignature
 } from 'lnurlcash-kit'
-import {Wallet, WalletUsageError, InsufficientFundsError, PinMismatchError} from '../../src/wallet.ts'
+import {Wallet, BadSignatureError, WalletUsageError, InsufficientFundsError, PinMismatchError} from '../../src/wallet.ts'
+import type {CheckReport} from '../../src/wallet.ts'
 import {exportBackup, importBackup} from '../../src/backup.ts'
 import {payWithNwc, invoiceFromNwc, nwcStatus} from '../../src/nwc.ts'
 import {npubOf, poolTransport, type NostrTransport} from '../../src/nostr.ts'
@@ -1230,18 +1231,57 @@ const viewReceive = (prefill?: string): void => {
     })
     if (scan) body.insertBefore(scan, body.querySelector('[data-receive]'))
     const receiveButton = body.querySelector('[data-receive]') as HTMLButtonElement
-    receiveButton.addEventListener('click', () =>
-      busy(receiveButton, async () => {
-        const result = await w.receive(input.value.trim())
+    // Where a refused note explains itself. Sits directly above the button
+    // that was pressed, so the answer is where the eye already is.
+    const refusal = el('<div class="stack" data-refusal style="gap:14px"></div>')
+    body.insertBefore(refusal, receiveButton)
+
+    const take = async (acceptBadSignature: boolean): Promise<void> => {
+      try {
+        const result = await w.receive(input.value.trim(), {acceptBadSignature})
         result.warnings.forEach(warning => toast(warning, 'err'))
         // Safely in the store and rotated: only now is it safe to forget
         // the incoming claim.
         rememberClaim(null)
+        refusal.replaceChildren()
         burst(body)
         toast(`Received ${sats(result.note.amountMsat)} sat`, 'ok')
         setTimeout(viewHome, 650)
+      } catch (err) {
+        if (!(err instanceof BadSignatureError)) throw err
+        showRefusal(err.message)
+      }
+    }
+
+    // A failed signature is a refusal, not a warning: the card says what
+    // went wrong in plain words and the way past it takes two deliberate
+    // taps, because the only honest reason to override is that you already
+    // know something the wallet does not.
+    const showRefusal = (reason: string): void => {
+      refusal.replaceChildren()
+      const card = el(`<div class="card" style="border-color:var(--bad)">
+        <h3 style="color:var(--bad)">Not received</h3>
+        <p class="warn" style="text-align:left;padding-top:12px"><strong>This note failed its check.</strong> <span data-reason></span></p>
+        <p class="warn" style="text-align:left">Every note is signed by the mint that made it. This signature does not match the key that mint has always used here, so either the note was altered on the way to you, or it did not come from that mint. Ask whoever gave it to you for another one.</p>
+      </div>`)
+      // the reason names a host and comes off the wire: text, never markup
+      card.querySelector('[data-reason]')!.textContent = `${reason}.`
+      const accept = el(`<button class="btn btn-ghost danger-text"><span>Take it anyway</span></button>`)
+      const label = accept.querySelector('span')!
+      let armed = false
+      accept.addEventListener('click', () => {
+        if (!armed) {
+          armed = true
+          label.textContent = 'Tap again to take a note that failed its check'
+          return
+        }
+        void busy(accept as HTMLButtonElement, () => take(true))
       })
-    )
+      card.append(accept)
+      refusal.append(card)
+    }
+
+    receiveButton.addEventListener('click', () => busy(receiveButton, () => take(false)))
     return view
   })
 }
@@ -1932,6 +1972,121 @@ const viewMints = (prefillAdd?: string): void => {
   })
 }
 
+// ---------- checking notes against their mints ----------
+
+// A note can go quiet without the wallet hearing: the other copy of a
+// bearer note spent first, a melt whose answer never arrived. This asks
+// every mint about every note it issued here, shows what it found, and
+// writes nothing down until asked twice.
+
+const viewCheck = (): void => {
+  const w = wallet!
+  show(() => {
+    const view = el('<div class="view"></div>')
+    view.append(topBar('Check your notes', viewSettings))
+    const body = el(`<div class="stack">
+      <div class="hint">${icons.info}<span><b>Is every note still money?</b> This asks each mint whether the notes you hold from it are still good, and tells you what it found. Nothing changes until you say so.</span></div>
+      <div class="hint">${icons.shield}<span><b>It costs you no privacy.</b> The mint made these notes for this wallet and sees each one the moment it is spent. Asking after them tells it nothing it does not already know.</span></div>
+      <button class="btn btn-silver" data-run>${icons.check}<span>Check now</span></button>
+      <div data-report class="stack"></div>
+    </div>`)
+    view.append(body)
+    const report = body.querySelector('[data-report]') as HTMLElement
+
+    const noteLine = (note: NoteRecord): HTMLElement => {
+      const row = el('<div class="kv"><span></span><b></b></div>')
+      row.querySelector('span')!.textContent = `${note.id.slice(0, 8)} at ${note.mintHost}`
+      row.querySelector('b')!.textContent = `${sats(note.amountMsat)} sat`
+      return row
+    }
+
+    const paint = (found: CheckReport, applied: boolean): void => {
+      report.replaceChildren()
+      const changes =
+        found.spent.length + found.unknown.length + found.pending.length + found.valueChanged.length
+
+      const summary = el(`<div class="card">
+        <h3>${applied ? 'Written down' : 'What the mints said'}</h3>
+        <div class="kv"><span>notes asked about</span><b></b></div>
+      </div>`)
+      summary.querySelector('.kv b')!.textContent = String(found.checked)
+      report.append(summary)
+
+      if (found.spent.length) {
+        const card = el(`<div class="card"><h3>Already spent</h3>
+          <p class="warn" style="text-align:left;padding-top:12px">Someone redeemed these at the mint. ${applied ? 'They are now in your history.' : 'Applying moves them to your history.'}</p></div>`)
+        found.spent.forEach(note => card.append(noteLine(note)))
+        report.append(card)
+      }
+      if (found.unknown.length) {
+        const card = el(`<div class="card"><h3>The mint has never heard of these</h3>
+          <p class="warn" style="text-align:left;padding-top:12px">Not spent, not known. ${applied ? 'Filed as spent, with the reason kept.' : 'Applying files them as spent and keeps the reason.'}</p></div>`)
+        found.unknown.forEach(note => card.append(noteLine(note)))
+        report.append(card)
+      }
+      if (found.pending.length) {
+        const card = el(`<div class="card"><h3>Locked by something in flight</h3>
+          <p class="warn" style="text-align:left;padding-top:12px">The mint is still holding these for an operation that has not finished. ${applied ? 'Parked for the next reconcile.' : 'Applying parks them for the next reconcile.'}</p></div>`)
+        found.pending.forEach(note => card.append(noteLine(note)))
+        report.append(card)
+      }
+      if (found.valueChanged.length) {
+        const card = el(`<div class="card"><h3>Worth a different amount</h3>
+          <p class="warn" style="text-align:left;padding-top:12px">The mint is the authority on what a note holds. ${applied ? 'The wallet now agrees with it.' : 'Applying makes the wallet agree with it.'}</p></div>`)
+        for (const changed of found.valueChanged) {
+          const row = el('<div class="kv"><span></span><b></b></div>')
+          row.querySelector('span')!.textContent = `${changed.note.id.slice(0, 8)} at ${changed.note.mintHost}`
+          row.querySelector('b')!.textContent = `${sats(changed.note.amountMsat)} -> ${sats(changed.amountMsat)} sat`
+          card.append(row)
+        }
+        report.append(card)
+      }
+      if (found.unreachable.length) {
+        const card = el(`<div class="card"><h3>Did not answer</h3>
+          <p class="warn" style="text-align:left;padding-top:12px">These mints were not reachable, so their notes were left exactly as they are. Try again later.</p></div>`)
+        found.unreachable.forEach(host => {
+          const row = el('<div class="kv"><span>mint</span><b></b></div>')
+          row.querySelector('b')!.textContent = host
+          card.append(row)
+        })
+        report.append(card)
+      }
+      if (changes === 0) {
+        report.append(
+          el(`<p class="warn">${found.unreachable.length ? 'Nothing to report from the mints that answered.' : 'Every note is where you left it.'}</p>`)
+        )
+        return
+      }
+      if (applied) return
+
+      const apply = el(`<button class="btn btn-silver">${icons.check}<span>Apply what the mints said</span></button>`)
+      apply.addEventListener('click', () =>
+        busy(apply as HTMLButtonElement, async () => {
+          // Asked again rather than replayed: the answer that gets written
+          // down should be the one the mint gave a moment ago, not one
+          // from before you read the screen.
+          const applied = await w.checkNotes({apply: true})
+          paint(applied, true)
+          toast('Your wallet now agrees with the mints.', 'ok')
+        })
+      )
+      report.append(apply)
+    }
+
+    const run = body.querySelector('[data-run]') as HTMLButtonElement
+    run.addEventListener('click', () =>
+      busy(run, async () => {
+        if (!w.liveNotes().length) {
+          toast('There are no notes to check yet.', '')
+          return
+        }
+        paint(await w.checkNotes(), false)
+      })
+    )
+    return view
+  })
+}
+
 // ---------- settings ----------
 
 const viewSettings = (): void => {
@@ -1946,6 +2101,11 @@ const viewSettings = (): void => {
     const mints = el(`<button class="btn">${icons.mint}<span>Mints (${w.data.mints.length})</span></button>`)
     mints.addEventListener('click', () => viewMints())
     body.append(mints)
+
+    // check every note against its mint
+    const check = el(`<button class="btn">${icons.check}<span>Check your notes</span></button>`)
+    check.addEventListener('click', () => viewCheck())
+    body.append(check)
 
     // nwc
     const nwc = el(`<div class="card"><h3>Lightning wallet (NWC)</h3></div>`)

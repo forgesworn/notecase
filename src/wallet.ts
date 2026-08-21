@@ -59,9 +59,31 @@ export class InsufficientFundsError extends Error {}
 export class PinMismatchError extends Error {}
 export class WalletUsageError extends Error {}
 
+// A note whose offline signature does not verify against the key pinned
+// for its mint. The signature is the one thing a holder can check without
+// asking anyone, so a failure is a refusal, not a note in the margin: the
+// amount may have been edited, or the note may not come from that mint at
+// all. Overridable, deliberately and per receive.
+export class BadSignatureError extends Error {}
+
 export type ReceiveResult = {note: NoteRecord; warnings: string[]}
 
 export type ReconcileEvent = {kind: string; detail: string}
+
+// What a sweep of every note against its mint found. Nothing here is
+// applied unless the caller asks for it.
+export type CheckReport = {
+  checked: number
+  spent: NoteRecord[]
+  unknown: NoteRecord[]
+  pending: NoteRecord[]
+  valueChanged: Array<{note: NoteRecord; amountMsat: number}>
+  unreachable: string[]
+}
+
+// How many notes at one mint are asked about at a time. Enough to make a
+// sweep of a full case quick, few enough that no mint sees a burst.
+const CHECK_CONCURRENCY = 4
 
 const now = () => Date.now()
 
@@ -315,7 +337,7 @@ export class Wallet {
 
   // ---- receiving ----
 
-  async receive(input: string): Promise<ReceiveResult> {
+  async receive(input: string, options: {acceptBadSignature?: boolean} = {}): Promise<ReceiveResult> {
     const url = resolveNoteInput(input)
     if (!url) throw new WalletUsageError('That does not look like an LNURLcash note.')
     const k1 = noteK1(url)
@@ -336,10 +358,23 @@ export class Wallet {
         `the note URL claims ${declared} msat but the mint says ${info.maxWithdrawable} msat - the mint is authoritative`
       )
     }
+    // The offline signature is the only claim on a note a holder can test
+    // without trusting anyone, so a failure stops the receive before a
+    // record exists. A note with NO signature is a different matter: mints
+    // with no funding source legitimately issue unsigned notes, so that
+    // stays a warning. So does a declared amount the mint disagrees with,
+    // above: the mint's number is authoritative either way.
     const signature = noteSignature(url)
     const pinned = this.data.pubkeyPins[mintHost]
     if (signature && pinned && !verifyNoteSignature(k1, info.maxWithdrawable, signature, pinned)) {
-      warnings.push('the offline signature on this note does not verify - provenance is unproven')
+      if (!options.acceptBadSignature) {
+        throw new BadSignatureError(
+          `the signature on this note does not verify against the key pinned for ${mintHost} - the note may have been altered, or it may not come from that mint`
+        )
+      }
+      warnings.push(
+        'the offline signature on this note does not verify - accepted on your say-so, provenance is unproven'
+      )
     }
 
     if (this.data.notes.some(note => note.id === hashK1(k1) && note.state !== 'spent' && note.state !== 'sent')) {
@@ -476,7 +511,10 @@ export class Wallet {
   // markTaken is the honest resolution.
   async reclaim(note: NoteRecord): Promise<ReceiveResult> {
     if (note.state !== 'sent') throw new WalletUsageError('Only a sent note can be reclaimed.')
-    return this.receive(this.noteUrlFor(note))
+    // Our own note coming home. Refusing it over a signature would strand
+    // money to protect nobody: the record already exists and the value is
+    // whatever the mint says it is when the rotate lands.
+    return this.receive(this.noteUrlFor(note), {acceptBadSignature: true})
   }
 
   // The recipient took the note (or it should simply stop being offered
@@ -748,7 +786,14 @@ export class Wallet {
         seen.add(wrap.id)
         received.push(result)
       } catch (err) {
-        if (err instanceof WalletUsageError || err instanceof NoteSpentError || err instanceof NoteUnknownError) {
+        if (
+          err instanceof WalletUsageError ||
+          err instanceof NoteSpentError ||
+          err instanceof NoteUnknownError ||
+          // A signature does not start verifying on the next pass, and one
+          // bad wrap must not stop the rest of the inbox being opened.
+          err instanceof BadSignatureError
+        ) {
           seen.add(wrap.id)
           skipped.push({wrapId: wrap.id, reason: err.message})
         } else {
@@ -1127,6 +1172,113 @@ export class Wallet {
 
     await this.persist()
     return events
+  }
+
+  // ---- checking every note against its mint ----
+
+  // Notes the sweep asks about: the ones the wallet is counting as money.
+  // Staged, ambiguous and melting records belong to reconcile(), which
+  // knows what mutation they came from; asking about them here would
+  // second-guess it with less information.
+  private checkableNotes(mintHost?: string): NoteRecord[] {
+    return this.liveNotes().filter(note => !mintHost || note.mintHost === mintHost)
+  }
+
+  // Ask every mint whether the notes this wallet thinks it holds are still
+  // there. A note burned out of band - the other copy of a bearer note
+  // spent first, a melt whose answer never arrived, a rotate someone else
+  // completed - stays listed as money until something asks.
+  //
+  // This costs nothing in privacy. The mint issued every one of these
+  // notes to this wallet and sees each one the moment it is spent; asking
+  // after them tells it nothing it does not already hold.
+  //
+  // A dry run by default: the report is the whole point, and marking money
+  // spent is the caller's decision to take with it in front of them.
+  async checkNotes(options: {apply?: boolean; mintHost?: string} = {}): Promise<CheckReport> {
+    const report: CheckReport = {checked: 0, spent: [], unknown: [], pending: [], valueChanged: [], unreachable: []}
+
+    const byHost = new Map<string, NoteRecord[]>()
+    for (const note of this.checkableNotes(options.mintHost)) {
+      byHost.set(note.mintHost, [...(byHost.get(note.mintHost) ?? []), note])
+    }
+
+    for (const [host, notes] of byHost) {
+      // Findings are held per host and only merged if the whole host
+      // answered. A mint that goes quiet halfway through has told us
+      // nothing about the notes it did not answer for, and a partial
+      // sweep must never look like a complete one.
+      const found: Omit<CheckReport, 'unreachable'> = {
+        checked: 0,
+        spent: [],
+        unknown: [],
+        pending: [],
+        valueChanged: []
+      }
+      let reachable = true
+      let next = 0
+      const ask = async (): Promise<void> => {
+        for (;;) {
+          if (!reachable) return
+          const note = notes[next++]
+          if (!note) return
+          try {
+            const info = await fetchNoteInfo(buildNoteUrl(note.baseUrl, note.k1), this.opts)
+            found.checked += 1
+            if (info.maxWithdrawable !== note.amountMsat) {
+              found.valueChanged.push({note, amountMsat: info.maxWithdrawable})
+            }
+          } catch (err) {
+            if (err instanceof NoteSpentError) {
+              found.checked += 1
+              found.spent.push(note)
+            } else if (err instanceof NoteUnknownError) {
+              found.checked += 1
+              found.unknown.push(note)
+            } else if (err instanceof PendingNoteError || (err instanceof ServiceRejectedError && /pending/i.test(err.reason))) {
+              found.checked += 1
+              found.pending.push(note)
+            } else if (err instanceof ServiceRejectedError) {
+              // A refusal that names no outcome we understand. Counted as
+              // asked, but nothing is concluded from it.
+              found.checked += 1
+            } else {
+              // A timeout, a dropped socket, a mint answering rubbish: no
+              // information about any note here.
+              reachable = false
+            }
+          }
+        }
+      }
+      await Promise.all(Array.from({length: CHECK_CONCURRENCY}, () => ask()))
+      if (!reachable) {
+        report.unreachable.push(host)
+        continue
+      }
+      report.checked += found.checked
+      report.spent.push(...found.spent)
+      report.unknown.push(...found.unknown)
+      report.pending.push(...found.pending)
+      report.valueChanged.push(...found.valueChanged)
+    }
+
+    if (options.apply) {
+      for (const note of report.spent) this.touch(note, 'spent')
+      for (const note of report.unknown) {
+        // Filed as spent because that is what it is worth, but the reason
+        // is kept: "the mint has never heard of this" is not the same
+        // story as "somebody spent it", and the holder should read both.
+        note.detail = `${note.mintHost} does not know this note`
+        this.touch(note, 'spent')
+      }
+      for (const note of report.pending) this.touch(note, 'ambiguous')
+      for (const changed of report.valueChanged) {
+        changed.note.amountMsat = changed.amountMsat
+        changed.note.updatedAt = now()
+      }
+      await this.persist()
+    }
+    return report
   }
 
   // ---- offline verification ----

@@ -38,6 +38,11 @@ export type NoteRecord = {
   // from. A note with either is never wrapped again.
   sentTo?: string
   receivedFrom?: string
+  // Why this record is in the state it is, when the state alone does not
+  // say. Set by the check sweep when a mint disowns a note: 'spent' is the
+  // safe filing, but "the mint has never heard of it" is a different story
+  // and the holder deserves to read it.
+  detail?: string
   createdAt: number
   updatedAt: number
 }
