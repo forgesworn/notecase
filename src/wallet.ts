@@ -27,6 +27,7 @@ import {
   fromLud17,
   lightningAddressUsername,
   verifyNoteSignature,
+  withNewK1,
   type LnurlcashOptions,
   type MintFee
 } from 'lnurlcash-kit'
@@ -85,6 +86,47 @@ export type CheckReport = {
 // sweep of a full case quick, few enough that no mint sees a burst.
 const CHECK_CONCURRENCY = 4
 
+// The offline cash drawer. LUD-25's whole offline story assumes the payer
+// can hand over the right amount without touching the mint, and a wallet
+// holding one big note cannot: a split needs the mint. So a wallet that
+// expects to go offline keeps a ladder of small notes, like change in a
+// pocket. Every split costs the mint's flat fee and every merge refunds
+// one, so keeping a ladder is cheap - but it has to be deliberate.
+export const DEFAULT_LADDER = [100, 500, 1000, 5000]
+export const DEFAULT_LADDER_COPIES = 2
+
+// What "prepare for offline" would do, and what it would cost.
+export type LadderPlan = {
+  mintHost: string
+  // denominations to cut, in msat, largest first: one split each
+  cut: number[]
+  // the mint's flat fee times the number of splits
+  feeMsat: number
+  // denominations the drawer wants and cannot cut: nothing big enough
+  short: number[]
+}
+
+// Notes that together pay an amount with no mint involved.
+export type OfflineSelection = {
+  mintHost: string
+  notes: NoteRecord[]
+  totalMsat: number
+  // 0 when the notes make the amount exactly; otherwise what handing them
+  // over would cost the payer over the asking price
+  overpayMsat: number
+  // the mint holds more notes than the search would look at
+  capped: boolean
+}
+
+export type OfflineHandover = OfflineSelection & {urls: string[]}
+
+// A subset-sum over bearer notes is a search, not a formula. Bounded on
+// both sides: at most this many notes are looked at, and the walk gives up
+// after this many steps and hands back the nearest it found above the
+// asking price.
+const OFFLINE_SUBSET_LIMIT = 64
+const OFFLINE_SEARCH_STEPS = 200_000
+
 const now = () => Date.now()
 
 export class Wallet {
@@ -108,6 +150,16 @@ export class Wallet {
     return this.liveNotes().reduce((sum, note) => sum + note.amountMsat, 0)
   }
 
+  // Money that is here but not yet under a secret only this wallet knows:
+  // notes taken offline on a signature, where the person who handed them
+  // over still knows the k1. Real money, worth flagging until reconcile
+  // has rotated it.
+  unrotatedMsat(): number {
+    return this.liveNotes()
+      .filter(note => note.unrotated)
+      .reduce((sum, note) => sum + note.amountMsat, 0)
+  }
+
   balanceByMint(): Map<string, number> {
     const byMint = new Map<string, number>()
     for (const note of this.liveNotes()) {
@@ -118,7 +170,14 @@ export class Wallet {
 
   needsReconcile(): boolean {
     return (
-      this.data.notes.some(note => note.state === 'staged' || note.state === 'ambiguous' || note.state === 'melting') ||
+      this.data.notes.some(
+        note =>
+          note.state === 'staged' ||
+          note.state === 'ambiguous' ||
+          note.state === 'melting' ||
+          // taken offline and still under the giver's secret
+          (note.state === 'live' && note.unrotated === true)
+      ) ||
       this.data.pendingMints.some(
         pending => pending.state === 'awaiting' || (pending.state === 'claimed' && pending.preimageHex !== undefined)
       )
@@ -421,6 +480,11 @@ export class Wallet {
     const candidates = new Map<string, NoteRecord[]>()
     for (const note of this.liveNotes()) {
       if (mintHost && note.mintHost !== mintHost) continue
+      // A note taken offline may have arrived without the mint's callback
+      // on it. It is money, and it counts in the balance, but nothing can
+      // be split or merged out of it until reconcile has been online and
+      // rotated it.
+      if (!note.callback) continue
       const group = candidates.get(note.mintHost) ?? []
       group.push(note)
       candidates.set(note.mintHost, group)
@@ -501,6 +565,9 @@ export class Wallet {
   // this note - a screenshot, a log line, a shoulder - stops mattering.
   async rotateLive(note: NoteRecord): Promise<NoteRecord> {
     if (note.state !== 'live') throw new WalletUsageError('Only a live note can be rotated.')
+    if (!note.callback) {
+      throw new WalletUsageError('This note arrived offline and has not met its mint yet - run `notecase reconcile` first.')
+    }
     const [rotated] = await this.mutate([note], {kind: 'rotate'})
     return rotated!
   }
@@ -525,8 +592,287 @@ export class Wallet {
     await this.persist()
   }
 
+  // The note as a URL: secret, amount, and - where the mint gave one - the
+  // signature over both. The signature is the mint's own public statement
+  // about this note, and carrying it is what lets a recipient check the
+  // note without asking anyone, which is the entire point of taking one
+  // offline. The kit strips it back off before any informational GET.
   noteUrlFor(note: NoteRecord): string {
-    return buildNoteUrl(note.baseUrl, note.k1, note.amountMsat)
+    const url = buildNoteUrl(note.baseUrl, note.k1, note.amountMsat)
+    return note.signature ? withNewK1(url, note.k1, note.amountMsat, note.signature) : url
+  }
+
+  // ---- the offline cash drawer ----
+
+  ladderFor(host: string): {ladder: number[]; copies: number} {
+    const entry = this.data.mints.find(mint => mint.host === host)
+    return {
+      ladder: entry?.ladder ?? DEFAULT_LADDER,
+      copies: entry?.ladderCopies ?? DEFAULT_LADDER_COPIES
+    }
+  }
+
+  async setLadder(host: string, ladder: number[], copies: number): Promise<void> {
+    const entry = this.mintEntry(host)
+    const clean = [...new Set(ladder)].filter(value => Number.isSafeInteger(value) && value > 0).sort((a, b) => a - b)
+    if (!clean.length) throw new WalletUsageError('A cash drawer needs at least one denomination, in whole sats.')
+    if (!Number.isSafeInteger(copies) || copies < 1) throw new WalletUsageError('Keep at least one of each denomination.')
+    entry.ladder = clean
+    entry.ladderCopies = copies
+    await this.persist()
+  }
+
+  // Which notes already count as the drawer, and what is missing. Notes
+  // that already sit at a wanted denomination are RESERVED: cutting a
+  // 500 out of a 500 you were keeping would only churn fees.
+  private ladderShape(entry: MintEntry): {
+    baseFeeMsat: number
+    reserved: Set<string>
+    want: number[]
+  } {
+    const {ladder, copies} = this.ladderFor(entry.host)
+    const live = this.liveNotes().filter(note => note.mintHost === entry.host && note.callback)
+    const reserved = new Set<string>()
+    const want: number[] = []
+    for (const denomination of [...ladder].sort((a, b) => b - a)) {
+      const target = denomination * 1000
+      const have = live.filter(note => note.amountMsat === target && !reserved.has(note.id)).slice(0, copies)
+      for (const note of have) reserved.add(note.id)
+      for (let short = have.length; short < copies; short++) want.push(target)
+    }
+    return {baseFeeMsat: entry.mintFee?.baseFeeMsat ?? 0, reserved, want}
+  }
+
+  // The largest note that can be cut into `target` and still leave change
+  // worth more than nothing once the mint's flat fee comes out of it.
+  private splitSource(host: string, target: number, baseFeeMsat: number, reserved: Set<string>): NoteRecord | undefined {
+    return this.liveNotes()
+      .filter(
+        note =>
+          note.mintHost === host &&
+          note.callback &&
+          !reserved.has(note.id) &&
+          note.amountMsat >= target + baseFeeMsat + 1
+      )
+      .sort((a, b) => b.amountMsat - a.amountMsat)[0]
+  }
+
+  // What preparing for offline would do, and what it would cost - without
+  // doing any of it. Largest note first, one split per output, and the
+  // change stays as one note so the next cut comes out of the same pile.
+  ladderPlan(mintHost?: string): LadderPlan {
+    const entry = this.mintEntry(mintHost)
+    const {baseFeeMsat, reserved, want} = this.ladderShape(entry)
+    // The plan is worked out against a copy of the amounts, so a preview
+    // costs nothing and the fee it quotes is the fee the real run takes.
+    const pool = this.liveNotes()
+      .filter(note => note.mintHost === entry.host && note.callback && !reserved.has(note.id))
+      .map(note => note.amountMsat)
+    const cut: number[] = []
+    const short: number[] = []
+    for (const target of want) {
+      let pick = -1
+      for (let index = 0; index < pool.length; index++) {
+        if (pool[index]! < target + baseFeeMsat + 1) continue
+        if (pick < 0 || pool[index]! > pool[pick]!) pick = index
+      }
+      if (pick < 0) {
+        short.push(target)
+        continue
+      }
+      const change = pool[pick]! - target - baseFeeMsat
+      pool.splice(pick, 1)
+      pool.push(change)
+      cut.push(target)
+    }
+    return {mintHost: entry.host, cut, feeMsat: cut.length * baseFeeMsat, short}
+  }
+
+  // Cuts the drawer. Re-runnable: whatever is already there is counted
+  // first, so running it twice in a row does nothing the second time.
+  async prepareOffline(mintHost?: string): Promise<{plan: LadderPlan; made: NoteRecord[]; feeMsat: number}> {
+    const plan = this.ladderPlan(mintHost)
+    const entry = this.mintEntry(plan.mintHost)
+    const {baseFeeMsat, reserved} = this.ladderShape(entry)
+    const made: NoteRecord[] = []
+    for (const target of plan.cut) {
+      const source = this.splitSource(entry.host, target, baseFeeMsat, reserved)
+      if (!source) break
+      const [note] = await this.mutate([source], {kind: 'split', amountMsat: target})
+      // never cut up what was just cut
+      reserved.add(note!.id)
+      made.push(note!)
+    }
+    return {plan, made, feeMsat: made.length * baseFeeMsat}
+  }
+
+  // Notes that add up to exactly the amount, or the nearest above it.
+  // Bounded: at most OFFLINE_SUBSET_LIMIT notes are looked at and the walk
+  // gives up after OFFLINE_SEARCH_STEPS, because a case full of notes is a
+  // subset-sum problem and a wallet must answer in a moment either way.
+  private subsetFor(pool: NoteRecord[], amountMsat: number): {notes: NoteRecord[]; totalMsat: number} | null {
+    const sorted = [...pool].sort((a, b) => b.amountMsat - a.amountMsat).slice(0, OFFLINE_SUBSET_LIMIT)
+    const remaining: number[] = new Array(sorted.length + 1).fill(0)
+    for (let index = sorted.length - 1; index >= 0; index--) {
+      remaining[index] = remaining[index + 1]! + sorted[index]!.amountMsat
+    }
+    let steps = 0
+    let best: {notes: NoteRecord[]; totalMsat: number} | null = null
+    const chosen: NoteRecord[] = []
+    const walk = (from: number, total: number): boolean => {
+      if (total === amountMsat && chosen.length) {
+        best = {notes: [...chosen], totalMsat: total}
+        return true
+      }
+      if (total > amountMsat) {
+        // adding another note only overshoots further, so this is as close
+        // above as this branch gets
+        if (!best || total < best.totalMsat) best = {notes: [...chosen], totalMsat: total}
+        return false
+      }
+      if (from >= sorted.length) return false
+      if (total + remaining[from]! < amountMsat) return false
+      if (steps++ > OFFLINE_SEARCH_STEPS) return false
+      for (let index = from; index < sorted.length; index++) {
+        chosen.push(sorted[index]!)
+        if (walk(index + 1, total + sorted[index]!.amountMsat)) return true
+        chosen.pop()
+      }
+      return false
+    }
+    walk(0, 0)
+    return best
+  }
+
+  // What could be handed over for an amount with no mint in the loop.
+  // Nothing is committed here: an inexact answer is for the payer to
+  // accept or refuse, and they cannot do that if it has already happened.
+  planOfflineSend(amountMsat: number, mintHost?: string): OfflineSelection {
+    if (!Number.isSafeInteger(amountMsat) || amountMsat <= 0) {
+      throw new WalletUsageError('The amount must be a positive integer of milli-satoshis.')
+    }
+    const byHost = new Map<string, NoteRecord[]>()
+    for (const note of this.liveNotes()) {
+      if (mintHost && note.mintHost !== mintHost) continue
+      byHost.set(note.mintHost, [...(byHost.get(note.mintHost) ?? []), note])
+    }
+    const hosts = [...byHost.keys()].sort((a, b) => {
+      if (a === this.data.settings.defaultMintHost) return -1
+      if (b === this.data.settings.defaultMintHost) return 1
+      return 0
+    })
+    let nearest: OfflineSelection | null = null
+    for (const host of hosts) {
+      const pool = byHost.get(host)!
+      if (pool.reduce((sum, note) => sum + note.amountMsat, 0) < amountMsat) continue
+      const found = this.subsetFor(pool, amountMsat)
+      if (!found) continue
+      const selection: OfflineSelection = {
+        mintHost: host,
+        notes: found.notes,
+        totalMsat: found.totalMsat,
+        overpayMsat: found.totalMsat - amountMsat,
+        capped: pool.length > OFFLINE_SUBSET_LIMIT
+      }
+      if (selection.overpayMsat === 0) return selection
+      if (!nearest || selection.overpayMsat < nearest.overpayMsat) nearest = selection
+    }
+    if (nearest) return nearest
+    throw new InsufficientFundsError(
+      mintHost
+        ? `Not enough at ${mintHost} to hand over ${amountMsat} msat offline.`
+        : `No single mint holds ${amountMsat} msat - and offline, notes cannot be split or combined.`
+    )
+  }
+
+  // Hands notes over with no mint in the loop at all: no wire call is made
+  // here, which is the strongest form of the kit's `offline` promise. The
+  // records go to 'sent' and are persisted BEFORE the URLs are returned,
+  // so a crash between here and the hand-over leaves notes that can be
+  // reclaimed, never notes that were given away twice.
+  async sendOffline(
+    amountMsat: number,
+    mintHost?: string,
+    options: {acceptOverpay?: boolean} = {}
+  ): Promise<OfflineHandover> {
+    const selection = this.planOfflineSend(amountMsat, mintHost)
+    if (selection.overpayMsat > 0 && !options.acceptOverpay) {
+      throw new WalletUsageError(
+        `No notes at ${selection.mintHost} add up to exactly ${amountMsat} msat, and offline nothing can be split. The nearest is ${selection.totalMsat} msat, which overpays by ${selection.overpayMsat} msat.`
+      )
+    }
+    for (const note of selection.notes) {
+      note.sentOffline = true
+      this.touch(note, 'sent')
+    }
+    await this.persist()
+    return {...selection, urls: selection.notes.map(note => this.noteUrlFor(note))}
+  }
+
+  // Takes a note on its signature alone. This needs a pin: a wallet that
+  // has never spoken to that mint has nothing to check the signature
+  // against, and taking a note it cannot check is the leap of faith LUD-25
+  // is careful not to ask for. The note is stored unrotated, because
+  // rotating needs the mint - the person who handed it over still knows
+  // the secret until reconcile has been online.
+  async receiveOffline(input: string): Promise<ReceiveResult> {
+    const url = resolveNoteInput(input)
+    if (!url) throw new WalletUsageError('That does not look like an LNURLcash note.')
+    const k1 = noteK1(url)
+    if (!k1) throw new WalletUsageError('That note URL carries no k1 - there is nothing to receive.')
+    const baseUrl = (() => {
+      const parsed = new URL(url)
+      return `${parsed.origin}${parsed.pathname}`
+    })()
+    const mintHost = serverOf(baseUrl)
+    const pinned = this.data.pubkeyPins[mintHost]
+    if (!pinned) {
+      throw new WalletUsageError(
+        `This wallet has never spoken to ${mintHost}, so it has no key to check this note against. Take it while you have a connection instead.`
+      )
+    }
+    const signature = noteSignature(url)
+    const declared = noteDeclaredAmount(url)
+    if (!signature || declared === null) {
+      throw new WalletUsageError(
+        'A note taken offline has to carry both its amount and the mint\'s signature, and this one does not. Take it while you have a connection instead.'
+      )
+    }
+    if (!verifyNoteSignature(k1, declared, signature, pinned)) {
+      throw new BadSignatureError(
+        `the signature on this note does not verify against the key pinned for ${mintHost} - the note may have been altered, or it may not come from that mint`
+      )
+    }
+    if (this.data.notes.some(note => note.id === hashK1(k1) && note.state !== 'spent' && note.state !== 'sent')) {
+      throw new WalletUsageError('This note is already in the wallet.')
+    }
+    // The mint's callback is not on a note URL, so it is borrowed from
+    // another note of the same mint if there is one. Where there is not,
+    // reconcile asks the mint for it before rotating.
+    const known = this.data.notes.find(note => note.baseUrl === baseUrl && note.callback)
+    const received: NoteRecord = {
+      id: hashK1(k1),
+      k1,
+      amountMsat: declared,
+      baseUrl,
+      callback: known?.callback ?? '',
+      mintHost,
+      signature,
+      state: 'live',
+      origin: 'receive',
+      unrotated: true,
+      createdAt: now(),
+      updatedAt: now()
+    }
+    this.data.notes = this.data.notes.filter(note => note.id !== received.id)
+    this.data.notes.push(received)
+    await this.persist()
+    return {
+      note: received,
+      warnings: [
+        'taken on the mint\'s signature alone - whoever handed it over still knows the secret until `reconcile` rotates it'
+      ]
+    }
   }
 
   // ---- notes over Nostr ----
@@ -1167,6 +1513,40 @@ export class Wallet {
         }
         // ambiguous: the staged rotate output holds; the next reconcile
         // resolves it through the group probe above
+      }
+    }
+
+    // Notes taken offline on a signature alone. The person who handed one
+    // over still knows its secret, so the first thing a connection is good
+    // for is rotating it out from under them.
+    for (const note of this.data.notes.filter(record => record.state === 'live' && record.unrotated)) {
+      try {
+        if (!note.callback) {
+          // Taken from a mint this wallet holds no other note of: ask it
+          // where its callback is, and take its word on the value while
+          // we are there.
+          const info = await fetchNoteInfo(buildNoteUrl(note.baseUrl, note.k1), this.opts)
+          note.callback = info.callback
+          note.amountMsat = info.maxWithdrawable
+          note.updatedAt = now()
+          await this.persist()
+        }
+        const [rotated] = await this.mutate([note], {kind: 'rotate'})
+        delete rotated!.unrotated
+        events.push({
+          kind: 'offline-note-rotated',
+          detail: `${rotated!.amountMsat} msat taken offline at ${note.mintHost} is now under a fresh secret`
+        })
+      } catch (err) {
+        if (err instanceof NoteSpentError || err instanceof NoteUnknownError) {
+          note.detail = 'taken offline, but the mint had already burned it - whoever handed it over spent it first'
+          this.touch(note, 'spent')
+          events.push({
+            kind: 'offline-note-lost',
+            detail: `${note.amountMsat} msat taken offline at ${note.mintHost} was already spent`
+          })
+        }
+        // anything else leaves it unrotated, and the next reconcile tries
       }
     }
 

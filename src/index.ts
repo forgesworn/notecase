@@ -11,7 +11,15 @@
 // parked ones by probing the mint - never by assumption.
 
 export {Wallet, BadSignatureError, InsufficientFundsError, PinMismatchError, WalletUsageError} from './wallet.ts'
-export type {CheckReport, ReceiveResult, ReconcileEvent} from './wallet.ts'
+export {DEFAULT_LADDER, DEFAULT_LADDER_COPIES} from './wallet.ts'
+export type {
+  CheckReport,
+  LadderPlan,
+  OfflineHandover,
+  OfflineSelection,
+  ReceiveResult,
+  ReconcileEvent
+} from './wallet.ts'
 export {
   initWallet,
   openWallet,

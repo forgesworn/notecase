@@ -38,6 +38,13 @@ export type NoteRecord = {
   // from. A note with either is never wrapped again.
   sentTo?: string
   receivedFrom?: string
+  // Taken offline on the mint's signature alone: nobody asked the mint,
+  // so the person who handed it over still knows this secret. reconcile()
+  // rotates every one of these the first time there is a connection.
+  unrotated?: boolean
+  // Handed over offline. No mint saw it happen, so nothing confirms the
+  // recipient took it until a check sweep or a reclaim asks.
+  sentOffline?: boolean
   // Why this record is in the state it is, when the state alone does not
   // say. Set by the check sweep when a mint disowns a note: 'spent' is the
   // safe filing, but "the mint has never heard of it" is a different story
@@ -98,6 +105,12 @@ export type MintEntry = {
   // LUD-25 (base fee out of a split's change, (n-1) refunds on a merge)
   // without a round trip. Refreshed whenever the payRequest is fetched.
   mintFee?: {baseFeeMsat: number; feePpm: number}
+  // The offline cash drawer: the denominations, in SATS, this wallet tries
+  // to keep at this mint, and how many of each. A wallet holding one large
+  // note cannot pay a small amount offline, because a split needs the
+  // mint; a ladder is how it keeps change in its pocket.
+  ladder?: number[]
+  ladderCopies?: number
   addedAt: number
 }
 

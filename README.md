@@ -86,6 +86,11 @@ notecase reclaim                       # takes back anything sent but not yet cl
 notecase receive                       # prompts for the note, rotates it in
 notecase check                         # asks every mint whether your notes are still good
 notecase check --apply                 # and writes down what it found
+notecase ladder                        # the cash drawer at your mint, and what it still wants
+notecase ladder set 100,500,1000 --copies 2
+notecase prepare --apply               # cuts the small notes an offline payment needs
+notecase send 500 --offline            # hands over notes you already hold, nothing on the wire
+notecase receive --offline             # takes a note on the mint's signature alone
 notecase melt 21 --to you@wallet.com   # or a raw bolt11, or --to-nwc
 notecase transfer 50 --from a.example --to b.example   # move between mints
 notecase reconcile                     # resolves anything uncertain
@@ -114,6 +119,34 @@ This costs no privacy. The mint made these notes for this wallet and sees
 each one the moment it is spent, so asking after them tells it nothing it
 does not already hold. A mint that does not answer has its notes left
 exactly as they are and is named in the report - never marked.
+
+### Paying with no connection
+
+A note is a secret, so handing one over needs no network at all - but a
+wallet holding one 48,120 sat note cannot pay 500, because cutting a note
+down needs the mint. That is what the **cash drawer** is for: a ladder of
+denominations (100, 500, 1000 and 5000 sats by default, two of each) that
+the wallet keeps cut and ready. `notecase prepare` shows what cutting the
+missing ones would cost in split fees and `--apply` cuts them; it is
+re-runnable, and a full drawer costs nothing to check. `notecase ladder`
+shows and sets the shape of the drawer per mint.
+
+With a drawer stocked, `notecase send <sats> --offline` finds notes that
+add up to the amount exactly and hands them over as one or more URLs -
+no mint is called at all. Where no combination is exact it says so and
+names the nearest above, which `--overpay` accepts.
+
+`notecase receive --offline` takes a note on the mint's signature alone.
+It needs a pinned key for that mint, so a wallet that has never spoken to
+the mint refuses: there would be nothing to check against, and that leap
+of faith is one LUD-25 is careful not to ask for. The note is stored
+**unrotated** - whoever handed it over still knows its secret - and the
+balance says how much is in that state until `notecase reconcile` rotates
+every one of them at the first opportunity. If the giver spent their copy
+first, reconcile says so and files the note as spent.
+
+Offline mode is asked for and never inferred from connectivity: in the
+web wallet it is a switch in the header, and on the CLI it is `--offline`.
 
 ### Notes over Nostr
 
@@ -170,6 +203,10 @@ vite + anime.js) around the same engine - live at
 - Settings → Check your notes: the same sweep as the CLI, with a plain
   reading of what each mint said and an Apply button that asks again
   before writing anything down.
+- An offline switch in the header, a cash drawer under each mint (edit the
+  ladder, see what cutting the rest would cost, cut it), an offline
+  hand-over that pages through several notes one secret at a time, and an
+  offline receive that checks the mint's signature and nothing else.
 - A note whose signature does not verify is refused with a red card that
   says exactly why; taking it anyway needs two deliberate taps.
 - Send to an npub, and an inbox check that opens and claims what was sent
