@@ -4,7 +4,7 @@ import {createInterface} from 'node:readline/promises'
 import {Writable} from 'node:stream'
 import {utf8ToBytes} from '@noble/hashes/utils.js'
 import {splitSecret, shareToWords, wordsToShare, reconstructSecret} from '@forgesworn/shamir-words'
-import {toBech32Lnurl} from 'lnurlcash-kit'
+import {NoteSpentError, NoteUnknownError, toBech32Lnurl} from 'lnurlcash-kit'
 import {initWallet, openWallet, NoWalletError, WrongPinError, type WalletStore} from './store.ts'
 import {Wallet, InsufficientFundsError, PinMismatchError, WalletUsageError} from './wallet.ts'
 import {createWalletFetch} from './fetchguard.ts'
@@ -339,8 +339,14 @@ const main = async (): Promise<void> => {
           const back = await wallet.reclaim(note)
           console.log(`Reclaimed ${sats(back.note.amountMsat)} (${shortId(note)} -> ${shortId(back.note)}).`)
         } catch (err) {
-          await wallet.markTaken(note)
-          console.log(`${shortId(note)} was claimed by the recipient: ${(err as Error).message}`)
+          // Only the mint saying "gone" settles it; a network failure
+          // leaves the note on loan for the next try.
+          if (err instanceof NoteSpentError || err instanceof NoteUnknownError) {
+            await wallet.markTaken(note)
+            console.log(`${shortId(note)} was claimed by the recipient; marked taken.`)
+          } else {
+            console.log(`${shortId(note)} could not be reclaimed right now: ${(err as Error).message}`)
+          }
         }
       }
       return
