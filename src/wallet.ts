@@ -593,6 +593,13 @@ export class Wallet {
     return {pubkeyHex, ...result}
   }
 
+  // A bunker URI for another device, minted by the signer on a hold. Only
+  // a wallet already bound can ask, so a stolen signer with no wallet
+  // bound to it still pairs with nothing.
+  async heartwoodPairWallet(transport: NostrTransport, label: string): Promise<{uri: string; slotIndex: number; label: string}> {
+    return this.heartwoodClient(transport).pairWallet(label)
+  }
+
   async heartwoodTrusted(transport: NostrTransport): Promise<string[]> {
     return this.heartwoodClient(transport).trusted()
   }

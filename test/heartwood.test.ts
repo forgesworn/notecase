@@ -69,6 +69,10 @@ const fakeDevice = (relay: string) => {
         trusted.add(pk)
         return {result: JSON.stringify({ok: true, trusted: true, changed: !had})}
       }
+      case 'heartwood_pair_wallet': {
+        const label = String(fields.label ?? 'another wallet')
+        return {result: JSON.stringify({ok: true, slot_index: 7, label, uri: `bunker://${pubkey}?secret=${'9'.repeat(64)}&relay=${encodeURIComponent(relay)}`})}
+      }
       case 'heartwood_note_trusted':
         return {result: JSON.stringify({ok: true, trusted: [...trusted]})}
       case 'heartwood_note_send': {
@@ -255,6 +259,17 @@ describe('a linked heartwood', () => {
     expect(removed).toMatchObject({trusted: false, changed: true})
     expect(await wallet.heartwoodTrusted(device.transport)).toEqual([])
     expect(device.log.filter(m => m === 'heartwood_note_trust')).toHaveLength(3)
+  })
+
+  it('mints a bunker URI for another wallet, and a second wallet can link with it', async () => {
+    const device = fakeDevice('wss://dev.example')
+    const {wallet} = makeWallet()
+    await wallet.linkHeartwood(device.transport, device.uri)
+    const minted = await wallet.heartwoodPairWallet(device.transport, 'phone')
+    expect(minted.label).toBe('phone')
+    expect(minted.uri).toMatch(/^bunker:\/\/[0-9a-f]{64}\?secret=[0-9a-f]{64}&relay=/)
+    expect(parseBunkerUri(minted.uri).relays).toEqual(['wss://dev.example'])
+    expect(device.log).toContain('heartwood_pair_wallet')
   })
 
   it('refuses an inbox list the device did not actually sign', async () => {

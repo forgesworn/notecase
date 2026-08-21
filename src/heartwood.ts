@@ -187,6 +187,14 @@ export class HeartwoodClient {
     return res.trusted
   }
 
+  // Mint a slot for another wallet, from this one which is already bound.
+  // One hold. The URI carries a one-time secret: show it once, to the
+  // device it is for, and never store it.
+  async pairWallet(label: string): Promise<{uri: string; slotIndex: number; label: string}> {
+    const res = await this.note<{uri: string; slot_index: number; label: string}>('heartwood_pair_wallet', {label}, true)
+    return {uri: res.uri, slotIndex: res.slot_index, label: res.label}
+  }
+
   // Plain NIP-46 sign_event, as the device's own identity. Gated unless
   // the device's policy for this client allows the kind.
   async signEvent(unsigned: {kind: number; created_at: number; tags: string[][]; content: string}): Promise<Event> {
