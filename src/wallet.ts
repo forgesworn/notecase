@@ -885,7 +885,58 @@ export class Wallet {
     note.updatedAt = now()
   }
 
+  // Are all of these still spendable at their mint? Only asked after a
+  // refusal, to tell "the mint burned my input" from "the mint already had
+  // my output hash". A note the mint cannot speak for - unreachable, or
+  // pending a melt of its own - is not proof of anything, so anything short
+  // of a clear yes for every input answers no.
+  private async inputsStillLive(inputs: NoteRecord[]): Promise<boolean> {
+    for (const input of inputs) {
+      try {
+        await fetchNoteInfo(buildNoteUrl(input.baseUrl, input.k1), this.opts)
+      } catch {
+        return false
+      }
+    }
+    return true
+  }
+
+  // A refusal that is provably the wallet's own fault, and provably did
+  // NOT land: the mint already had a note under one of the output hashes we
+  // just disclosed. That happens when this wallet's derivation counter is
+  // behind what the mint has already seen - a restore, or a second device
+  // on the same seed - and it is not a lost note, an ambiguous outcome, or
+  // anything the holder can act on. It is an index to skip.
+  private static readonly OUTPUT_COLLISION = Symbol('output-collision')
+
   private async mutate(
+    inputs: NoteRecord[],
+    plan: {kind: 'rotate'} | {kind: 'merge'} | {kind: 'split'; amountMsat: number}
+  ): Promise<NoteRecord[]> {
+    // Each attempt draws the next indexes off the ladder, so a wallet whose
+    // counter is a few notes behind walks forward rather than failing. Each
+    // one that collides has already unwound: the inputs are live and the
+    // staged secrets are gone, so a give-up here leaves the money exactly
+    // where it started.
+    const attempts = 4
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.mutateOnce(inputs, plan)
+      } catch (err) {
+        if ((err as {cause?: unknown})?.cause !== Wallet.OUTPUT_COLLISION) throw err
+        // A mint that refuses every secret this wallet can derive is not
+        // describing a stale counter any more, and the holder should hear
+        // that rather than a guess repeated four times.
+        if (attempt >= attempts) {
+          throw new WalletUsageError(
+            `${inputs[0]!.mintHost} refused ${attempts} different secrets this wallet derived, so this is not a stale derivation counter. Your notes are untouched.`
+          )
+        }
+      }
+    }
+  }
+
+  private async mutateOnce(
     inputs: NoteRecord[],
     plan: {kind: 'rotate'} | {kind: 'merge'} | {kind: 'split'; amountMsat: number}
   ): Promise<NoteRecord[]> {
@@ -1008,6 +1059,29 @@ export class Wallet {
       // reconcile asks what they are worth.
       const mayHaveLanded =
         inputsWereLive && (err instanceof NoteSpentError || err instanceof NoteUnknownError)
+
+      // Before treating that as unknowable, ask. A mint refuses a repeated
+      // output hash with the same words it refuses a dead input, on purpose
+      // - which of its tables an id collided with is an oracle nobody is
+      // owed. But this wallet may ask about its OWN inputs, and if every
+      // one of them is still live then nothing was burned, so the mutation
+      // did not land and the refusal was about a hash we disclosed. That is
+      // this wallet's counter being behind what the mint has already seen,
+      // after a restore or alongside a second device on the same seed. The
+      // indexes are wasted; the money is not. Unwind and let the caller
+      // draw the next ones, rather than parking a healthy balance as
+      // ambiguous and making the holder run reconcile to get it back.
+      if (mayHaveLanded && (await this.inputsStillLive(inputs))) {
+        this.data.notes = this.data.notes.filter(note => !staged.includes(note))
+        await this.persist()
+        throw Object.assign(
+          new WalletUsageError(
+            `${template.mintHost} already holds a note under a secret this wallet derived - skipping that index.`
+          ),
+          {cause: Wallet.OUTPUT_COLLISION}
+        )
+      }
+
       if (err instanceof AmbiguousMintError || mayHaveLanded) {
         // The mutation MAY have landed. The staged secrets are then the
         // only copy of the outputs - everything holds until reconcile.

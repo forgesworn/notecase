@@ -169,19 +169,63 @@ describe('the crash window', () => {
     expect(wallet.balanceMsat()).toBe(21_000)
   })
 
-  it('unwinds when that refusal really did refuse and the input is still there', async () => {
+  // The failure a restored wallet actually hits, reported from
+  // wallet.moneyer.dev as "notes already spent" on every melt.
+  //
+  // A mint refuses a repeated output hash with the same words it refuses a
+  // dead input, deliberately - which of its tables an id collided with is
+  // an oracle nobody is owed. So a wallet whose derivation counter is
+  // behind what the mint has already seen asks to split, discloses a hash
+  // the mint already holds a note under, and is told "already spent" about
+  // a note that is fine. Before this it parked the whole balance as
+  // ambiguous, showed zero, and failed again identically forever.
+  it('walks past indexes the mint has already seen instead of calling them spent', async () => {
+    const theMint = await start()
+    const {wallet, data} = makeWallet()
+    data.seedHex = 'be'.repeat(32)
+    const received = await wallet.receive(fund(theMint, 100_000).url)
+    expect(received.note.index).toBeDefined()
+    expect(wallet.balanceMsat()).toBe(100_000)
+
+    // Rewind the ladder, the way a restore or a second device on the same
+    // seed leaves it: the next secrets this wallet derives are ones the
+    // mint has already minted notes under.
+    const host = received.note.mintHost
+    data.counters![host] = 0
+
+    const target = await wallet.prepareExact(40_000)
+
+    // It got there, and it did not call the holder's money spent on the way.
+    expect(target.amountMsat).toBe(40_000)
+    expect(target.state).toBe('live')
+    expect(wallet.balanceMsat()).toBe(100_000)
+    expect(data.notes.some(note => note.state === 'ambiguous')).toBe(false)
+    // and the counter is past the collision, so the next one is clean
+    expect(wallet.counterFor(host)).toBeGreaterThan(0)
+  })
+
+  it('unwinds on the spot when that refusal really did refuse and the input is still there', async () => {
     const theMint = await start()
     const stub = answeringCallback('Invalid or already spent k1.', {land: false})
     const {wallet, data} = makeWallet({fetch: stub.fetchImpl})
     const received = await wallet.receive(fund(theMint, 21_000).url)
 
     stub.arm()
-    await expect(wallet.rotateLive(received.note)).rejects.toThrow(AmbiguousMintError)
+    // The wallet may ask about its OWN input, and the mint says it is still
+    // live - so nothing was burned and the refusal was about a hash we
+    // disclosed. It retries with fresh indexes, and only when a mint has
+    // refused every one of them does it stop and say so plainly. What it
+    // must NOT do is leave a healthy balance parked as ambiguous.
+    await expect(wallet.rotateLive(received.note)).rejects.toThrow(/not a stale derivation counter/)
     stub.disarm()
-    expect(wallet.balanceMsat()).toBe(0)
+
+    // Recovered without reconcile having to be run at all.
+    expect(wallet.noteById(received.note.id)?.state).toBe('live')
+    expect(wallet.balanceMsat()).toBe(21_000)
+    expect(data.notes.filter(note => note.state === 'staged' || note.state === 'ambiguous')).toEqual([])
 
     const events = await wallet.reconcile()
-    expect(events.some(event => event.kind === 'mutation-unwound')).toBe(true)
+    expect(events.some(event => event.kind === 'mutation-unwound')).toBe(false)
     expect(wallet.noteById(received.note.id)?.state).toBe('live')
     expect(data.notes.filter(record => record.state === 'ambiguous')).toEqual([])
     expect(wallet.balanceMsat()).toBe(21_000)
