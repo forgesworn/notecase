@@ -123,7 +123,27 @@ export type MintEntry = {
   // the holder deserves to hear about it from the next reconcile.
   keyRotatedAt?: number
   keyRotationReported?: boolean
+  // What the mint says about itself on its discovery endpoint: who runs
+  // it, how to reach them, the terms, and whatever the operator wants
+  // holders to know today. Every field is optional and an absent one is
+  // absent rather than empty - a holder reading "contact: " learns less
+  // than nothing. All of it is the mint's own words about itself, so it
+  // is shown as a claim and never as a fact this wallet vouches for.
+  info?: MintInfo
+  // The message of the day this holder has already been shown. A notice
+  // worth interrupting someone for is worth interrupting them only once,
+  // and only again when it actually changes.
+  motdSeen?: string
   addedAt: number
+}
+
+export type MintInfo = {
+  name?: string
+  description?: string
+  contact?: {nostr?: string; email?: string; url?: string}
+  tosUrl?: string
+  motd?: string
+  version?: string
 }
 
 export type WalletData = {

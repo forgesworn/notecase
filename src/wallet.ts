@@ -12,6 +12,7 @@ import {
   derivedSecretSource,
   fetchInvoiceVerification,
   fetchNoteInfo,
+  fetchMintAddress,
   fetchPayRequest,
   hashK1,
   meltNote,
@@ -38,7 +39,7 @@ import {
 import {hexToBytes} from '@noble/hashes/utils.js'
 import {tryDecodeBolt11} from 'farrier-kit/bolt11'
 import {verifyPreimage} from 'farrier-kit/preimage'
-import type {MeltRecord, MintEntry, NoteOrigin, NoteRecord, PendingMint, WalletData} from './types.ts'
+import type {MeltRecord, MintEntry, MintInfo, NoteOrigin, NoteRecord, PendingMint, WalletData} from './types.ts'
 import {
   BOOTSTRAP_RELAYS,
   NotANoteWrapError,
@@ -217,11 +218,99 @@ export class Wallet {
       addedAt: now()
     }
     const existing = this.data.mints.findIndex(mint => mint.host === host)
+    // A mint already known keeps what the holder has already been shown,
+    // so re-adding one does not re-interrupt them with the same notice.
+    const seen = existing >= 0 ? this.data.mints[existing]!.motdSeen : undefined
+    if (seen !== undefined) entry.motdSeen = seen
+    const discovered = await this.fetchMintInfo(payUrl)
+    if (discovered) {
+      if (discovered.info) entry.info = discovered.info
+      if (discovered.fees) entry.mintFee = discovered.fees
+    }
     if (existing >= 0) this.data.mints[existing] = entry
     else this.data.mints.push(entry)
     this.data.settings.defaultMintHost ??= host
     await this.persist()
     return entry
+  }
+
+  // What a mint says about itself, if it says anything.
+  //
+  // The discovery endpoint is experimental and optional, so every failure
+  // here is silence rather than an error: a mint that does not serve one,
+  // or cannot be reached, is a mint this wallet knows less about, not a
+  // mint it refuses to use. Adding a mint must not turn on whether an
+  // optional endpoint answered.
+  private async fetchMintInfo(
+    payUrl: string
+  ): Promise<{info?: MintInfo; fees?: {baseFeeMsat: number; feePpm: number}} | null> {
+    const url = mintAddressUrl(payUrl)
+    if (!url) return null
+    try {
+      const body = await fetchMintAddress(url, this.opts)
+      const contact = body.contact
+        ? {
+            ...(body.contact.nostr ? {nostr: body.contact.nostr} : {}),
+            ...(body.contact.email ? {email: body.contact.email} : {}),
+            ...(body.contact.url ? {url: body.contact.url} : {})
+          }
+        : undefined
+      const info: MintInfo = {
+        ...(body.name ? {name: body.name} : {}),
+        ...(body.description ? {description: body.description} : {}),
+        ...(contact && Object.keys(contact).length > 0 ? {contact} : {}),
+        ...(body.tosUrl ? {tosUrl: body.tosUrl} : {}),
+        ...(body.motd ? {motd: body.motd} : {}),
+        ...(body.version ? {version: body.version} : {})
+      }
+      return {
+        ...(Object.keys(info).length > 0 ? {info} : {}),
+        ...(body.fees ? {fees: body.fees} : {})
+      }
+    } catch {
+      return null
+    }
+  }
+
+  // Re-reads what a known mint says about itself. Returns the message of
+  // the day when it is one the holder has not been shown yet, so a caller
+  // can decide whether to interrupt them with it.
+  async refreshMintInfo(host: string): Promise<{info?: MintInfo; freshMotd?: string}> {
+    const entry = this.mintEntry(host)
+    const discovered = await this.fetchMintInfo(entry.payUrl)
+    if (!discovered) return {}
+    if (discovered.info) entry.info = discovered.info
+    else delete entry.info
+    if (discovered.fees) entry.mintFee = discovered.fees
+    await this.persist()
+    const motd = entry.info?.motd
+    const fresh = motd && motd !== entry.motdSeen ? motd : undefined
+    return {
+      ...(entry.info ? {info: entry.info} : {}),
+      ...(fresh ? {freshMotd: fresh} : {})
+    }
+  }
+
+  // A notice worth interrupting someone for is worth interrupting them
+  // once. Marked as read only when it has actually been shown.
+  async markMotdSeen(host: string): Promise<void> {
+    const entry = this.data.mints.find(mint => mint.host === host)
+    if (!entry) return
+    const motd = entry.info?.motd
+    if (!motd || entry.motdSeen === motd) return
+    entry.motdSeen = motd
+    await this.persist()
+  }
+
+  // Every mint with something to say the holder has not read yet.
+  unreadMotds(): Array<{host: string; motd: string; name?: string}> {
+    return this.data.mints
+      .filter(mint => mint.info?.motd && mint.info.motd !== mint.motdSeen)
+      .map(mint => ({
+        host: mint.host,
+        motd: mint.info!.motd!,
+        ...(mint.info?.name ? {name: mint.info.name} : {})
+      }))
   }
 
   mintEntry(host?: string): MintEntry {
@@ -1821,6 +1910,29 @@ export class Wallet {
         }
         // ambiguous: the staged rotate output holds; the next reconcile
         // resolves it through the group probe above
+      }
+    }
+
+    // What each mint says about itself, re-read on the regular pass.
+    //
+    // Without this the info is only ever as fresh as the last `mints info`,
+    // so a notice an operator posted today would never reach a holder who
+    // does not go looking for it - which defeats the point of a message of
+    // the day. Reported as an event when the words have changed, so the
+    // holder hears it once rather than on every pass. Best effort: an
+    // optional endpoint failing must not colour a reconcile.
+    for (const entry of this.data.mints) {
+      const before = entry.info?.motd
+      try {
+        const {freshMotd} = await this.refreshMintInfo(entry.host)
+        if (freshMotd && freshMotd !== before) {
+          events.push({
+            kind: 'mint-notice',
+            detail: `${entry.info?.name ?? entry.host} says: ${freshMotd}`
+          })
+        }
+      } catch {
+        // silence, exactly as it is everywhere else this endpoint is asked
       }
     }
 
