@@ -45,6 +45,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase heartwood link <bunker://...> | heartwood notes | heartwood collect
   notecase heartwood send <id> --to <npub> | heartwood unlink
   notecase backup export | backup shares [--threshold N --count M] | backup recover-key
+  notecase backup nostr on|off|push|pull
 
 Offline mode is asked for, never guessed at: --offline on send and receive
 means no call is made to any mint at all. The ladder and prepare commands
@@ -152,6 +153,25 @@ const main = async (): Promise<void> => {
       file: {type: 'string'}
     }
   })
+  // Publishes the mint list when it has actually changed and the holder
+  // asked for that. Quiet on success and on being switched off; a relay
+  // refusing is worth one line, because the holder believes they have a
+  // backup.
+  const pushMintBackupIfDue = async (w: Wallet): Promise<void> => {
+    if (!w.mintBackupNeedsPush()) return
+    const transport = poolTransport()
+    try {
+      const result = await w.pushMintBackup(transport)
+      if (result.ok.length === 0) {
+        console.log('  (mint-list backup: no relay accepted it - run `notecase backup nostr push` later)')
+      }
+    } catch {
+      console.log('  (mint-list backup: could not reach a relay - run `notecase backup nostr push` later)')
+    } finally {
+      transport.close()
+    }
+  }
+
   const [command, ...rest] = positionals
   if (values.help || !command) {
     console.log(HELP)
@@ -257,6 +277,9 @@ const main = async (): Promise<void> => {
       } else {
         console.log('mints add <address> | mints list | mints use <host> | mints info [host]')
       }
+      // Backing up is worth nothing if it only happens when somebody
+      // remembers. A change to the list publishes the list.
+      await pushMintBackupIfDue(wallet)
       return
     }
 
@@ -284,8 +307,31 @@ const main = async (): Promise<void> => {
       if (!wallet.hasSeed()) {
         throw new WalletUsageError('This wallet has no recovery words, so there is nothing to restore from.')
       }
+      if (!store.data.mints.length && wallet.mintBackupEnabled()) {
+        // Words alone are only enough if the wallet can find out which
+        // mints to ask. This is the half that makes seed-only restore work.
+        console.log('Looking for a mint list on Nostr\u2026')
+        const transport = poolTransport()
+        try {
+          const pulled = await wallet.pullMintBackup(transport)
+          if (pulled.added.length) {
+            console.log(`  found ${pulled.added.length} mint(s): ${pulled.added.join(', ')}`)
+            if (pulled.pins) console.log(`  and ${pulled.pins} pinned signing key(s)`)
+          } else if (pulled.found) {
+            console.log('  a backup is there, but it lists no mints.')
+          } else {
+            console.log('  nothing published under this seed.')
+          }
+        } finally {
+          transport.close()
+        }
+      }
       if (!store.data.mints.length) {
-        throw new WalletUsageError('Add the mints you used first - `notecase mints add <address>`.')
+        throw new WalletUsageError(
+          wallet.mintBackupEnabled()
+            ? 'No mints known and none published - add the mints you used: `notecase mints add <address>`.'
+            : 'Add the mints you used first - `notecase mints add <address>`.'
+        )
       }
       const hosts = values.mint ? [values.mint] : store.data.mints.map(mint => mint.host)
       let total = 0
@@ -849,6 +895,69 @@ const main = async (): Promise<void> => {
 
     case 'backup': {
       const [sub] = rest
+      if (sub === 'nostr') {
+        const action = rest[1]
+        if (action === 'on' || action === 'off') {
+          // Switching on looks for an existing list first. A wallet
+          // restored from words has no mints yet, and that emptiness must
+          // not become the backup.
+          const lookup = action === 'on' ? poolTransport() : null
+          try {
+            await wallet.setMintBackup(action === 'on', lookup ?? undefined)
+          } finally {
+            lookup?.close()
+          }
+          if (action === 'on' && store.data.mints.length > 0) {
+            console.log(`Found a published mint list: ${store.data.mints.map(m => m.host).join(', ')}`)
+          }
+          if (action === 'off') {
+            console.log('Mint-list backup off. Anything already published stays on the relays until it is replaced.')
+            return
+          }
+          console.log(
+            `Mint-list backup on, publishing as ${wallet.mintBackupPubkey().slice(0, 16)}\u2026`
+          )
+          console.log('  Your MINTS and pinned keys go to your relays, encrypted under a key derived')
+          console.log('  from your seed. Not your notes, not your balance, and not linked to your npub.')
+        }
+        if (action === 'on' || action === 'push') {
+          if (!wallet.mintBackupEnabled()) {
+            throw new WalletUsageError('Mint-list backup is off - `notecase backup nostr on` first.')
+          }
+          const transport = poolTransport()
+          try {
+            const result = await wallet.pushMintBackup(transport)
+            console.log(
+              result.ok.length
+                ? `Published to ${result.ok.length} relay(s)${result.failed.length ? `, ${result.failed.length} refused` : ''}.`
+                : 'No relay accepted it - nothing is backed up.'
+            )
+          } finally {
+            transport.close()
+          }
+          return
+        }
+        if (action === 'pull') {
+          if (!wallet.hasSeed()) throw new WalletUsageError('This wallet has no seed to look under.')
+          const transport = poolTransport()
+          try {
+            const pulled = await wallet.pullMintBackup(transport)
+            if (!pulled.found) console.log('Nothing published under this seed.')
+            else if (!pulled.added.length && !pulled.pins) console.log('Found a backup; everything in it is already here.')
+            else {
+              if (pulled.added.length) console.log(`Added ${pulled.added.length} mint(s): ${pulled.added.join(', ')}`)
+              if (pulled.pins) console.log(`Restored ${pulled.pins} pinned signing key(s).`)
+            }
+          } finally {
+            transport.close()
+          }
+          return
+        }
+        if (action !== 'on' && action !== 'off') {
+          console.log('backup nostr on | off | push | pull')
+        }
+        return
+      }
       if (sub === 'export') {
         const body = JSON.stringify(store.data, null, 2)
         if (values.file) {

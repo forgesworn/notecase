@@ -173,6 +173,14 @@ export type WalletData = {
     // Inbox relays published as kind 10050, and where we look for wraps.
     nostrRelays?: string[]
     // Wrap ids already opened or refused, so a relay replay is idle.
+    // Backing the mint LIST up to Nostr, encrypted under a seed-derived
+    // key that is not the wallet's identity. Off unless asked for: the
+    // list says where somebody banks, which is not nothing.
+    mintBackup?: boolean
+    // A fingerprint of what was last published, so a push happens when
+    // something actually changed rather than on a flag that a crash can
+    // lose or a restore can carry in wrongly.
+    mintBackupPushed?: string
     nostrSeenWrapIds?: string[]
     nostrLastCheck?: number
     // A lightning address claimed at a mint, as name@host. Payments to it

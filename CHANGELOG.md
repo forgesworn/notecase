@@ -15,6 +15,25 @@ until they are adopted onto the seed.
   default. The PIN's KDF is deliberately expensive and several tests start
   a mint on top of it, so the slower cases crossed the default on a loaded
   machine while passing perfectly well.
+- **Twelve words are enough now: the mint list backs up to Nostr.**
+  `restoreNotes` re-derives a wallet's note secrets, which is the hard half
+  of recovery - and the easy half beat it on its own, because a fresh
+  wallet does not know WHICH mints to ask. Words alone recovered nothing
+  and the holder still needed a file, which is the situation the words
+  existed to remove. `notecase backup nostr on|off|push|pull` publishes the
+  mint list, the pinned signing keys and the default mint as an encrypted
+  kind 30078 event under a key derived as
+  `sha256(seed || "lnurlcash-mint-backup")` - deliberately not the wallet's
+  Nostr identity, so nobody who knows the holder's npub can tell they run
+  an LNURLcash wallet or watch their mint list change. Notes, secrets,
+  balances and counters never travel. Off unless asked for, because the
+  list still says where somebody banks. It republishes whenever the list
+  actually changes, compared by fingerprint rather than a dirty flag a
+  crash could lose, and a push no relay accepted is not recorded as one.
+  Switching it on in a fresh wallet LOOKS for a list rather than
+  overwriting one, and a wallet that has never published refuses to publish
+  an empty list at all - otherwise turning the backup on after a restore
+  destroys the backup at the exact moment it is needed.
 - **A mint can say who runs it, and holders can read it.** The discovery
   endpoint's optional fields are now kept on the mint record: `name`,
   `description`, `contact` (nostr, email, url), `tosUrl`, `motd` and

@@ -41,6 +41,13 @@ import {tryDecodeBolt11} from 'farrier-kit/bolt11'
 import {verifyPreimage} from 'farrier-kit/preimage'
 import type {MeltRecord, MintEntry, MintInfo, NoteOrigin, NoteRecord, PendingMint, WalletData} from './types.ts'
 import {
+  buildMintBackup,
+  fetchMintBackup,
+  mintBackupKey,
+  publishMintBackup,
+  type MintBackupKey
+} from './mintbackup.ts'
+import {
   BOOTSTRAP_RELAYS,
   NotANoteWrapError,
   fetchWraps,
@@ -493,6 +500,127 @@ export class Wallet {
 
   hasSeed(): boolean {
     return Boolean(this.data.seedHex)
+  }
+
+  // ---- backing the mint list up to Nostr ----
+  //
+  // restoreNotes re-derives a wallet's note secrets, which is the hard
+  // half of recovery. The easy half beats it on its own: a fresh wallet
+  // does not know WHICH mints to ask, so twelve words alone recover
+  // nothing and the holder still needs a file - the situation the words
+  // existed to remove. The list travels under a seed-derived key that is
+  // deliberately not this wallet's Nostr identity, encrypted to itself.
+
+  mintBackupEnabled(): boolean {
+    return this.data.settings.mintBackup === true
+  }
+
+  // `transport` is optional and only used when switching ON: the first
+  // thing a wallet should do is LOOK for a list, not overwrite one. A
+  // fresh wallet turning this on is the seed-only restore path, and it
+  // must recover the mints rather than replace them with its own emptiness.
+  async setMintBackup(on: boolean, transport?: NostrTransport): Promise<void> {
+    if (on && !this.data.seedHex) {
+      throw new WalletUsageError('This wallet has no seed, so there is no key to back a mint list up under.')
+    }
+    if (on && transport && this.data.mints.length === 0) {
+      try {
+        await this.pullMintBackup(transport)
+      } catch {
+        // A relay that cannot be reached simply means nothing was found,
+        // and the guard above stops an empty list going out either way.
+      }
+    }
+    this.data.settings.mintBackup = on
+    // Turning it off forgets what was pushed, so turning it back on
+    // publishes afresh rather than assuming a relay still holds anything.
+    if (!on) delete this.data.settings.mintBackupPushed
+    await this.persist()
+  }
+
+  private mintBackupKey(): MintBackupKey {
+    const seed = this.data.seedHex
+    if (!seed) throw new WalletUsageError('This wallet has no seed, so there is no key to back a mint list up under.')
+    return mintBackupKey(hexToBytes(seed))
+  }
+
+  // The pubkey the backup lives under. Exposed so a holder can see what
+  // they are publishing as, and so a test can look for it.
+  mintBackupPubkey(): string {
+    return this.mintBackupKey().pubkey
+  }
+
+  // What is worth publishing, as a stable string. Compared rather than
+  // flagged: a dirty bit can be lost by a crash or carried in wrongly by a
+  // restore, and neither failure is visible.
+  private mintBackupFingerprint(): string {
+    const payload = buildMintBackup(this.data)
+    return JSON.stringify([payload.mints, payload.pins, payload.defaultMintHost ?? null])
+  }
+
+  mintBackupNeedsPush(): boolean {
+    if (!this.mintBackupEnabled() || !this.data.seedHex) return false
+    return this.data.settings.mintBackupPushed !== this.mintBackupFingerprint()
+  }
+
+  // Publishing an empty list is only ever right when this wallet HAS a
+  // list and the holder emptied it. From a wallet that has never published,
+  // an empty list is not a statement about the mints - it is a wallet that
+  // does not know them yet, and replacing a good backup with it destroys
+  // the thing at the exact moment it is needed. Found by restoring for
+  // real: a fresh wallet turning the backup on wiped its own mint list.
+  private wouldEraseBackup(): boolean {
+    return this.data.mints.length === 0 && this.data.settings.mintBackupPushed === undefined
+  }
+
+  async pushMintBackup(transport: NostrTransport): Promise<{ok: string[]; failed: string[]}> {
+    if (this.wouldEraseBackup()) return {ok: [], failed: []}
+    const key = this.mintBackupKey()
+    const fingerprint = this.mintBackupFingerprint()
+    const result = await publishMintBackup(transport, this.nostrRelays(), key, buildMintBackup(this.data))
+    // Only counted as pushed where a relay actually took it. Recording it
+    // on a total failure would mean the next change is the first thing
+    // anyone ever sees, with the mints before it silently missing.
+    if (result.ok.length > 0) {
+      this.data.settings.mintBackupPushed = fingerprint
+      await this.persist()
+    }
+    return result
+  }
+
+  // Reads a published list back. Adds mints this wallet does not have and
+  // restores pins it is missing; it never overwrites a pin already held,
+  // because the local one was made by a real first contact and the backup
+  // is only a copy of some earlier wallet's.
+  async pullMintBackup(transport: NostrTransport): Promise<{added: string[]; pins: number; found: boolean}> {
+    const key = this.mintBackupKey()
+    const payload = await fetchMintBackup(transport, this.nostrRelays(), key)
+    if (!payload) return {added: [], pins: 0, found: false}
+
+    const added: string[] = []
+    for (const mint of payload.mints) {
+      if (this.data.mints.some(existing => existing.host === mint.host)) continue
+      this.data.mints.push({
+        input: mint.input,
+        host: mint.host,
+        payUrl: mint.payUrl,
+        ...(mint.baseUrl ? {baseUrl: mint.baseUrl} : {}),
+        ...(mint.label ? {label: mint.label} : {}),
+        addedAt: now()
+      })
+      added.push(mint.host)
+    }
+    let pins = 0
+    for (const [host, pubkey] of Object.entries(payload.pins)) {
+      if (this.data.pubkeyPins[host]) continue
+      this.data.pubkeyPins[host] = pubkey
+      pins += 1
+    }
+    if (payload.defaultMintHost && !this.data.settings.defaultMintHost) {
+      this.data.settings.defaultMintHost = payload.defaultMintHost
+    }
+    await this.persist()
+    return {added, pins, found: true}
   }
 
   counterFor(host: string): number {
