@@ -364,6 +364,38 @@ vite + anime.js) around the same engine - live at
 - Installable PWA whose service worker asks before updating and caches no
   protocol call: money answers are live or visibly absent, never stale.
 
+### Serving it
+
+The build is static files and wants no server logic, but two of the
+protections it asks for can only come from the host. `frame-ancestors` is
+ignored inside a meta element by specification, so a page carrying it in
+the HTML alone has no clickjacking protection whatsoever; it has to arrive
+as a response header. `X-Frame-Options` says the same thing to browsers
+that predate CSP.
+
+Send the whole policy, the same string that is in `web/index.html`:
+
+```caddy
+wallet.example.com {
+    root * /srv/notecase/web/dist
+    file_server
+    encode gzip
+    header {
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https: wss: http://localhost:* http://127.0.0.1:*; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        X-Frame-Options DENY
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+}
+```
+
+Any static host will do; the headers are the requirement, not Caddy.
+`connect-src` keeps loopback so the wallet can talk to a mint running on
+the holder's own machine, which from a hosted page reaches nothing but
+their computer. A test holds this block and the meta tag to the same
+policy, because a policy that disagrees with itself protects whichever
+half the browser happened to read.
+
 ## Testing
 
 ```bash
