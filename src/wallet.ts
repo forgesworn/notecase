@@ -1576,14 +1576,39 @@ export class Wallet {
 
   // ---- melting ----
 
-  async melt(pr: string, target: string, mintHost?: string): Promise<{melt: MeltRecord; ambiguous: boolean}> {
+  // `sendMsat` is for an invoice that states no amount: the payee left the
+  // figure to the payer, so the wallet has to be told it. A mint melting
+  // such an invoice sends the whole-sat floor of the note it burns, which
+  // is why this prepares a note of exactly the amount asked for rather
+  // than passing the figure to the mint - there is nowhere on the wire to
+  // put it. Supplying it for an invoice that already names an amount is
+  // refused rather than silently ignored: the two figures could differ,
+  // and guessing which one the payer meant is not the wallet's call.
+  async melt(
+    pr: string,
+    target: string,
+    mintHost?: string,
+    options: {sendMsat?: number} = {}
+  ): Promise<{melt: MeltRecord; ambiguous: boolean}> {
     const decoded = tryDecodeBolt11(pr)
     if (!decoded) throw new WalletUsageError('That is not a decodable BOLT-11 invoice.')
-    if (decoded.amountMsats === null) throw new WalletUsageError('Amountless invoices cannot be melted into.')
     const expiresAt = (decoded.timestamp + decoded.expirySeconds) * 1000
     if (expiresAt < now()) throw new WalletUsageError('That invoice has expired.')
-    const amountMsat = Number(decoded.amountMsats)
-    if (!Number.isSafeInteger(amountMsat)) throw new WalletUsageError('That invoice amount is out of range.')
+    if (decoded.amountMsats !== null && options.sendMsat !== undefined) {
+      throw new WalletUsageError('That invoice already states its amount - drop the amount argument.')
+    }
+    if (decoded.amountMsats === null && options.sendMsat === undefined) {
+      throw new WalletUsageError('That invoice states no amount - say how much to send.')
+    }
+    const amountMsat = decoded.amountMsats === null ? options.sendMsat! : Number(decoded.amountMsats)
+    if (!Number.isSafeInteger(amountMsat) || amountMsat <= 0) {
+      throw new WalletUsageError('That invoice amount is out of range.')
+    }
+    // The mint sends the whole-sat floor of whatever note it burns, so a
+    // sub-sat amount would quietly send less than asked. Refuse instead.
+    if (decoded.amountMsats === null && amountMsat % 1000 !== 0) {
+      throw new WalletUsageError('An amountless invoice can only be paid a whole number of sats.')
+    }
 
     const note = await this.prepareExact(amountMsat, mintHost)
     const melt: MeltRecord = {

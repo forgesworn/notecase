@@ -11,6 +11,20 @@ version 1 file opens and a version 1 backup imports; both are upgraded in
 place, and the notes already in them stay findable only through the file
 until they are adopted onto the seed.
 
+- The test suite has a 30 second timeout rather than vitest's 5 second
+  default. The PIN's KDF is deliberately expensive and several tests start
+  a mint on top of it, so the slower cases crossed the default on a loaded
+  machine while passing perfectly well.
+- **An invoice that states no amount can be paid.** `notecase melt <bolt11>
+  <sats>` says how much to send for an invoice that leaves the figure to
+  the payer; it used to be refused outright. There is nowhere on the LUD-25
+  wire to put the figure - a melt sends the note's own value - so the
+  wallet cuts a note of exactly that amount and melts that, which is what
+  the mint then pays out. Giving an amount for an invoice that already
+  names one is refused rather than silently ignored, because the two could
+  disagree and picking one is not the wallet's call. So is a sub-sat
+  amount: the mint sends the whole-sat floor of the note it burns, so
+  25_500 msat would send 25_000 and say nothing.
 - **Twelve words, and the money can be found again.** `notecase init`
   shows a BIP39 mnemonic once; `notecase seed` shows it again after the
   PIN. Every note secret this wallet makes now comes off it:
