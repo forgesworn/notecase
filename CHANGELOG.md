@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.0] - unreleased
+## [0.3.0] - 2026-08-22
 
 - **One wallet on several devices: the notes themselves can live on your
   relays.** `notecase sync on`, off until you ask for it, and separate from
