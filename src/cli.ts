@@ -76,6 +76,20 @@ const sats = (msat: number): string =>
 
 const shortId = (note: NoteRecord): string => note.id.slice(0, 8)
 
+// What a mint will actually credit, said without over-promising.
+//
+// LUD-25 does not say whether a mint rounds its fee, so a wallet can only
+// bound the answer: the msat-exact figure at one end, the sat-ceilinged
+// one at the other. Leading with the optimistic end and then handing over
+// less is a small lie that costs trust in every other number shown, so
+// where the two differ this states the floor and names the range.
+const netAfterFee = (pending: {expectedNetMsat: number; minNetMsat?: number}): string => {
+  const min = pending.minNetMsat ?? pending.expectedNetMsat
+  return min === pending.expectedNetMsat
+    ? sats(pending.expectedNetMsat)
+    : `at least ${sats(min)} (up to ${sats(pending.expectedNetMsat)}, depending on how it rounds)`
+}
+
 const promptHidden = async (question: string): Promise<string> => {
   if (!process.stdin.isTTY) {
     const rl = createInterface({input: process.stdin})
@@ -460,7 +474,7 @@ const main = async (): Promise<void> => {
     case 'mint': {
       const grossMsat = parseAmountMsat(rest[0], values.msat)
       const {pending, fee} = await wallet.startMint(grossMsat, values.mint)
-      if (fee) console.log(`This mint withholds a fee - expect ${sats(pending.expectedNetMsat)} net for ${sats(grossMsat)} paid.`)
+      if (fee) console.log(`This mint withholds a fee - expect ${netAfterFee(pending)} net for ${sats(grossMsat)} paid.`)
       if (nwcUri && !values.manual) {
         console.log('Paying the mint invoice through the connected NWC wallet…')
         const paid = await payWithNwc(nwcUri, pending.pr, {})
@@ -723,7 +737,7 @@ const main = async (): Promise<void> => {
       console.log(`Minting ${sats(grossMsat)} at ${values.to}, paid by melting at ${values.from}\u2026`)
       const moved = await wallet.transfer(grossMsat, values.from, values.to, {timeoutMs: waitMs})
       if (moved.fee) {
-        console.log(`  ${values.to} withholds a fee - expect ${sats(moved.pending.expectedNetMsat)} net.`)
+        console.log(`  ${values.to} withholds a fee - expect ${netAfterFee(moved.pending)} net.`)
       }
       if (moved.ambiguous) {
         console.log(

@@ -2159,7 +2159,17 @@ const viewMint = (): void => {
         const entry = w.data.mints.find(mint => mint.host === host)
         const gross = entry?.mintFee ? grossUp(net, entry.mintFee) : net
         const {pending, fee} = await w.startMint(gross, host)
-        if (fee) toast(`The invoice is ${sats(pending.grossMsat)} sat - the note will hold ${sats(pending.expectedNetMsat)} sat.`)
+        if (fee) {
+          // The floor, not the hopeful figure: a mint that ceilings its
+          // fee credits the lower end, and promising the higher one then
+          // handing over less costs trust in every other number here.
+          const min = pending.minNetMsat ?? pending.expectedNetMsat
+          toast(
+            min === pending.expectedNetMsat
+              ? `The invoice is ${sats(pending.grossMsat)} sat - the note will hold ${sats(pending.expectedNetMsat)} sat.`
+              : `The invoice is ${sats(pending.grossMsat)} sat - the note will hold at least ${sats(min)} sat.`
+          )
+        }
         if (w.data.settings.nwcUri) {
           const paid = await payWithNwc(w.data.settings.nwcUri, pending.pr)
           const result = await w.claimMint(pending, paid.preimageHex)
@@ -2192,7 +2202,7 @@ const viewMintInvoice = (pending: PendingMint): void => {
     const body = el(`<div class="stack center">
       <div class="rubric">The invoice</div>
       <div class="amount"><span>${sats(pending.grossMsat)}</span><span class="unit">sat</span></div>
-      <p class="warn">Pay from any Lightning wallet - tap the QR to open one on this device. The note (${sats(pending.expectedNetMsat)} sat) is claimed automatically when it settles.</p>
+      <p class="warn">Pay from any Lightning wallet - tap the QR to open one on this device. The note (${sats(pending.minNetMsat ?? pending.expectedNetMsat)} sat or a little more) is claimed automatically when it settles.</p>
       <p class="pulse" style="color:var(--dim);font-family:var(--mono);font-size:12px;letter-spacing:0.2em;text-transform:uppercase">Waiting for the payment…</p>
     </div>`)
     // the invoice string comes from the mint: assign href as a property,

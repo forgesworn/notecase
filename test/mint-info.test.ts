@@ -1,5 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
+import {mintFeeBand} from 'lnurlcash-kit'
 import {makeWallet} from './helpers.ts'
 
 // What a mint says about itself.
@@ -190,5 +191,35 @@ describe('a notice reaches a holder who is not looking for it', () => {
       'The maintenance is finished.'
     )
     expect(wallet.unreadMotds()).toHaveLength(1)
+  })
+})
+
+// What a mint will credit, said without over-promising.
+//
+// LUD-25 does not say whether a mint rounds its fee, so a wallet can only
+// bound the answer: the msat-exact figure at one end, the sat-ceilinged
+// one at the other. moneyer and the reference both ceiling now, which is
+// the LOW end - so a wallet leading with the optimistic figure tells its
+// holder they will get more than they will, and then hands over less.
+describe('predicting what a mint will credit', () => {
+  it('bounds it at both ends when the fee has a fraction of a sat in it', () => {
+    // 150000 - 1000 - 300 = 148700 exact; 150000 - 2000 = 148000 ceilinged.
+    const band = mintFeeBand(150_000, {baseFeeMsat: 1000, feePpm: 2000})
+    expect(band.maxNetMsat).toBe(148_700)
+    expect(band.minNetMsat).toBe(148_000)
+    expect(band.minNetMsat).toBeLessThan(band.maxNetMsat)
+  })
+
+  it('collapses to one figure when there is nothing to round', () => {
+    const band = mintFeeBand(150_000, {baseFeeMsat: 1000, feePpm: 0})
+    expect(band.minNetMsat).toBe(band.maxNetMsat)
+    expect(band.maxNetMsat).toBe(149_000)
+    // Nothing to hedge about, so the wallet states the figure flatly.
+  })
+
+  it('never promises more than a fee-free mint would give', () => {
+    const band = mintFeeBand(150_000, {baseFeeMsat: 0, feePpm: 0})
+    expect(band.minNetMsat).toBe(150_000)
+    expect(band.maxNetMsat).toBe(150_000)
   })
 })
