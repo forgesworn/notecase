@@ -88,6 +88,107 @@ describe('a mint that rotates its signing key', () => {
     expect(again.some(event => event.kind === 'mint-key-rotated')).toBe(false)
   })
 
+  // A wallet that has only ever RECEIVED notes from a mint - the ordinary
+  // case for a bearer-note wallet, and the one the escape hatch could not
+  // reach. The pin is created by the receive itself, from the note alone.
+  // Finding the key history needed the mint's pay URL out of the wallet's
+  // mint list, and there is no entry, so the history came back empty and
+  // empty means refuse: the same receive that created the pin could never
+  // create what was needed to move it. The note's own `payLink` closes it.
+  describe('for a mint known only from notes', () => {
+    const noteOnlyWallet = async (mint: Mint) => {
+      const wallet = makeWallet()
+      await wallet.wallet.receive(fund(mint, 21_000))
+      expect(wallet.data.pubkeyPins[hostOf(mint)]).toBe(mint.state.pubkey)
+      // The point of the fixture: nothing in the directory to look up.
+      expect(wallet.data.mints).toEqual([])
+      return wallet
+    }
+
+    it('accepts an announced rotation, the same as a mint in the directory', async () => {
+      const mint = await start()
+      const other = await start({privateKey: freshK1()})
+      const oldKey = mint.state.pubkey
+      const wallet = await noteOnlyWallet(mint)
+
+      const rotated = new Wallet(wallet.data, async () => {}, {
+        timeoutMs: 3_000,
+        fetch: rotatedTo(mint, other.state.pubkey, {publishOldKey: true})
+      })
+      const received = await rotated.receive(fund(mint, 5_000))
+
+      expect(wallet.data.pubkeyPins[hostOf(mint)]).toBe(other.state.pubkey)
+      expect(rotated.pubkeyHistoryFor(hostOf(mint))).toEqual([oldKey])
+      expect(received.warnings.some(warning => warning.includes('rotated its signing key'))).toBe(true)
+      expect(rotated.balanceMsat()).toBe(26_000)
+    })
+
+    it('still refuses a rotation the mint has not announced', async () => {
+      const mint = await start()
+      const other = await start({privateKey: freshK1()})
+      const wallet = await noteOnlyWallet(mint)
+      const oldKey = mint.state.pubkey
+
+      const rotated = new Wallet(wallet.data, async () => {}, {
+        timeoutMs: 3_000,
+        fetch: rotatedTo(mint, other.state.pubkey, {publishOldKey: false})
+      })
+      await expect(rotated.receive(fund(mint, 5_000))).rejects.toThrow(PinMismatchError)
+      expect(wallet.data.pubkeyPins[hostOf(mint)]).toBe(oldKey)
+    })
+
+    it('still refuses when the mint publishes no way home at all', async () => {
+      // A mint that does not serve payLink leaves a note-only wallet exactly
+      // where it was: no route to the history, and silence is not permission.
+      const mint = await start({noteInfoPayLink: false})
+      const other = await start({privateKey: freshK1()})
+      const wallet = await noteOnlyWallet(mint)
+
+      const rotated = new Wallet(wallet.data, async () => {}, {
+        timeoutMs: 3_000,
+        fetch: rotatedTo(mint, other.state.pubkey, {publishOldKey: true})
+      })
+      await expect(rotated.receive(fund(mint, 5_000))).rejects.toThrow(PinMismatchError)
+    })
+
+    it('will not read a key history off another host, even from its own file', async () => {
+      // The wallet file is on disk. A tampered `mints[].payUrl` pointing at
+      // an attacker's host would otherwise let them nominate who vouches
+      // for this mint's keys - the same hole as an off-origin payLink, but
+      // arriving from local state rather than the wire, where the kit's
+      // check cannot help.
+      const mint = await start()
+      const other = await start({privateKey: freshK1()})
+      const wallet = await noteOnlyWallet(mint)
+      wallet.data.mints.push({
+        host: hostOf(mint),
+        payUrl: `${other.url}/.well-known/lnurlp/mint`,
+        addedAt: Date.now()
+      } as (typeof wallet.data.mints)[number])
+
+      const rotated = new Wallet(wallet.data, async () => {}, {
+        timeoutMs: 3_000,
+        fetch: rotatedTo(mint, other.state.pubkey, {publishOldKey: true})
+      })
+      await expect(rotated.receive(fund(mint, 5_000))).rejects.toThrow(PinMismatchError)
+    })
+
+    it('will not follow a way home that points at somebody else', async () => {
+      // A mint nominating a third party to vouch for its key history. The
+      // kit drops an off-origin payLink before the wallet ever sees it, and
+      // the wallet checks the host again on its own account.
+      const mint = await start({payLinkOffOrigin: true})
+      const other = await start({privateKey: freshK1()})
+      const wallet = await noteOnlyWallet(mint)
+
+      const rotated = new Wallet(wallet.data, async () => {}, {
+        timeoutMs: 3_000,
+        fetch: rotatedTo(mint, other.state.pubkey, {publishOldKey: true})
+      })
+      await expect(rotated.receive(fund(mint, 5_000))).rejects.toThrow(PinMismatchError)
+    })
+  })
+
   it('is refused when the mint says nothing about the old key', async () => {
     const mint = await start()
     const other = await start({privateKey: freshK1()})
