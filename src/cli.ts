@@ -33,6 +33,9 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase send <sats> --to <npub|nip05>
   notecase address | address claim <name> [--mint <host>]
   notecase inbox
+  notecase request <sats> [--memo <text>] [--wait <seconds>] [--mint <host>]
+  notecase requests [--all]
+  notecase pay <lnurlcashreq1...>
   notecase reclaim [id]
   notecase melt <bolt11> [<sats>]
   notecase melt <sats> --to <lightning-address>
@@ -133,6 +136,7 @@ const main = async (): Promise<void> => {
       help: {type: 'boolean', default: false},
       'insecure-plaintext': {type: 'boolean', default: false},
       label: {type: 'string'},
+      memo: {type: 'string'},
       mint: {type: 'string'},
       manual: {type: 'boolean', default: false},
       wait: {type: 'string'},
@@ -280,6 +284,61 @@ const main = async (): Promise<void> => {
       // Backing up is worth nothing if it only happens when somebody
       // remembers. A change to the list publishes the list.
       await pushMintBackupIfDue(wallet)
+      return
+    }
+
+    case 'request': {
+      const amountMsat = parseAmountMsat(rest[0], values.msat)
+      const expires = values.wait === undefined ? undefined : Number(values.wait)
+      if (expires !== undefined && (!Number.isFinite(expires) || expires <= 0)) {
+        throw new WalletUsageError('--wait takes a positive number of seconds.')
+      }
+      const request = await wallet.createRequest({
+        amountMsat,
+        ...(values.memo ? {memo: values.memo} : {}),
+        ...(expires === undefined ? {} : {expiresInSecs: expires}),
+        ...(values.mint ? {mintHost: values.mint} : {})
+      })
+      console.log(`Asking for ${sats(request.amountMsat)}${request.memo ? ` - ${request.memo}` : ''}`)
+      console.log(`  at: ${request.mints.join(', ')}`)
+      if (request.expiresAt) console.log(`  until: ${new Date(request.expiresAt).toISOString()}`)
+      console.log(`\n${request.encoded}\n`)
+      console.log(`Show that to whoever is paying. \`notecase inbox\` collects it; \`notecase requests\` shows what is outstanding (id ${request.id}).`)
+      return
+    }
+
+    case 'requests': {
+      const all = wallet.requests().filter(request => values.all || request.state === 'open')
+      if (all.length === 0) {
+        console.log(values.all ? 'No requests.' : 'Nothing outstanding - `notecase requests --all` shows the rest.')
+        return
+      }
+      for (const request of all) {
+        const memo = request.memo ? ` - ${request.memo}` : ''
+        console.log(`${request.id}  ${sats(request.amountMsat)}  ${request.state}${memo}`)
+        if (request.state === 'open') console.log(`  ${request.encoded}`)
+        if (request.paidBy) console.log(`  paid by note ${request.paidBy.slice(0, 8)}`)
+      }
+      return
+    }
+
+    case 'pay': {
+      const input = rest[0]
+      if (!input) throw new WalletUsageError('Give a payment request - `notecase pay lnurlcashreq1...`.')
+      const transport = poolTransport()
+      try {
+        const paid = await wallet.payRequest(transport, input)
+        console.log(
+          `Paid ${sats(paid.note.amountMsat)}${paid.request.memo ? ` for "${paid.request.memo}"` : ''} to ${paid.request.to}`
+        )
+        console.log(
+          paid.relays.length
+            ? `  delivered to ${paid.relays.length} relay(s)${paid.inboxKnown ? '' : ' (they publish no inbox list, so this went to yours)'}`
+            : '  no relay accepted it - the note is held as sent; `notecase reclaim` takes it back'
+        )
+      } finally {
+        transport.close()
+      }
       return
     }
 
@@ -732,6 +791,17 @@ const main = async (): Promise<void> => {
           if (r.note.zap) {
             console.log(
               `  zap from ${npubOf(r.note.zap.senderPubkey)}${r.note.zap.content ? `: ${r.note.zap.content}` : ''}`
+            )
+          }
+          // Somebody else's words, printed as they were written and not
+          // read as anything else.
+          if (r.note.memo) console.log(`  memo: ${r.note.memo}`)
+          if (r.note.requestId) {
+            const request = wallet.requestById(r.note.requestId)
+            console.log(
+              request
+                ? `  settles your request ${request.id}${request.memo ? ` (${request.memo})` : ''} - now ${request.state}`
+                : `  names request ${r.note.requestId}, which is not one of yours`
             )
           }
         }
