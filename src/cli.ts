@@ -33,7 +33,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase address | address claim <name> [--mint <host>]
   notecase inbox
   notecase reclaim [id]
-  notecase melt <bolt11>
+  notecase melt <bolt11> [<sats>]
   notecase melt <sats> --to <lightning-address>
   notecase melt <sats> --to-nwc
   notecase transfer <sats> --from <host> --to <host> [--wait <seconds>]
@@ -543,7 +543,17 @@ const main = async (): Promise<void> => {
         pr = first
         target = 'invoice'
       }
-      const {melt, ambiguous} = await wallet.melt(pr, target, values.mint)
+      // A second positional after an invoice is what to send, for an
+      // invoice that names no amount of its own. It has no meaning
+      // alongside an amount request, which already carries its figure.
+      let sendMsat: number | undefined
+      if (rest[1] !== undefined) {
+        if (target !== 'invoice') {
+          throw new WalletUsageError('An amount request takes its figure first - `notecase melt <sats> --to ...`.')
+        }
+        sendMsat = parseAmountMsat(rest[1], values.msat)
+      }
+      const {melt, ambiguous} = await wallet.melt(pr, target, values.mint, sendMsat === undefined ? {} : {sendMsat})
       console.log(
         ambiguous
           ? 'The melt may be in flight - `notecase reconcile` will settle what happened.'

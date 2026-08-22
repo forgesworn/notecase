@@ -246,6 +246,66 @@ describe('melting', () => {
     expect(wallet.noteById(melt.noteId)?.state).toBe('spent')
   })
 
+  // An invoice that names no amount leaves the figure to the payer. LUD-25
+  // has nowhere on the wire to put it - a melt sends the note's own value -
+  // so the wallet cuts a note of exactly the amount asked for and melts
+  // that. moneyer 0.2.0 fills the invoice in from the note it burns.
+  it('melts an amountless invoice for the amount it was told to send', async () => {
+    const theMint = await start()
+    const {wallet} = makeWallet()
+    await wallet.receive(fund(theMint, 100_000).url)
+
+    const {melt} = await wallet.melt(
+      fakeBolt11({paymentHashHex: hashK1(freshK1())}),
+      'invoice',
+      undefined,
+      {sendMsat: 25_000}
+    )
+    expect(melt.amountMsat).toBe(25_000)
+    // The rest is change, not spent: an amountless invoice must not turn
+    // into a licence to send the whole note.
+    expect(wallet.balanceMsat()).toBe(75_000)
+  })
+
+  it('will not guess what an amountless invoice is worth', async () => {
+    const theMint = await start()
+    const {wallet} = makeWallet()
+    await wallet.receive(fund(theMint, 100_000).url)
+
+    await expect(
+      wallet.melt(fakeBolt11({paymentHashHex: hashK1(freshK1())}), 'invoice')
+    ).rejects.toThrow(/states no amount/)
+    expect(wallet.balanceMsat()).toBe(100_000)
+  })
+
+  it('refuses an amount alongside an invoice that already states one', async () => {
+    const theMint = await start()
+    const {wallet} = makeWallet()
+    await wallet.receive(fund(theMint, 100_000).url)
+
+    // Two figures that could disagree. Which one the payer meant is not
+    // the wallet's guess to make.
+    await expect(
+      wallet.melt(fakeBolt11({amountMsat: 21_000, paymentHashHex: hashK1(freshK1())}), 'invoice', undefined, {
+        sendMsat: 25_000
+      })
+    ).rejects.toThrow(/already states its amount/)
+    expect(wallet.balanceMsat()).toBe(100_000)
+  })
+
+  it('refuses a sub-sat amount on an amountless invoice, which would send less', async () => {
+    const theMint = await start()
+    const {wallet} = makeWallet()
+    await wallet.receive(fund(theMint, 100_000).url)
+
+    // The mint sends the whole-sat floor of the note it burns, so 25_500
+    // would cut a note of 25_500 and send 25_000 of it.
+    await expect(
+      wallet.melt(fakeBolt11({paymentHashHex: hashK1(freshK1())}), 'invoice', undefined, {sendMsat: 25_500})
+    ).rejects.toThrow(/whole number of sats/)
+    expect(wallet.balanceMsat()).toBe(100_000)
+  })
+
   it('recovers the note under a fresh secret when the melt fails', async () => {
     const theMint = await start({meltAlwaysFails: true})
     const {wallet, data} = makeWallet()
