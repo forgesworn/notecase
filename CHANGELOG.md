@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.0] - unreleased
+## [0.2.0] - 2026-08-22
 
 Needs `lnurlcash-kit` 0.2.0.
 
