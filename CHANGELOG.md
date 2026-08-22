@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.0] - unreleased
+
+- **Choose which notes to spend.** The wallet picks for you by default and
+  that is right for almost every payment, but notes are visible objects
+  with histories - one came from a stranger, one is the change from
+  something else - and a holder who wants to spend a particular one can now
+  say so. `notecase melt <bolt11> --notes <id,id>`, and a "Choose which
+  notes to spend" list on the web wallet's melt screen. A selection that
+  cannot work is refused with the reason: short, a note that is not
+  spendable, notes from two mints, or change that cannot cover the split
+  fee. It is never quietly swapped for a selection that would work, because
+  being overruled without being told is worse than being refused.
+- **The web wallet can melt an invoice that states no amount.** It had no
+  field to put the figure in, so those invoices simply could not be paid
+  there; the CLI has taken `melt <bolt11> <sats>` all along. The field
+  appears only for invoices that need it.
+
 ## [0.3.1] - 2026-08-22
 
 - **A stale derivation counter is no longer reported as a spent note.**

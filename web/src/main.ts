@@ -26,6 +26,7 @@ import {
 } from 'lnurlcash-kit'
 import {Wallet, BadSignatureError, WalletUsageError, InsufficientFundsError, PinMismatchError} from '../../src/wallet.ts'
 import type {CheckReport, OfflineHandover} from '../../src/wallet.ts'
+import {tryDecodeBolt11} from 'farrier-kit/bolt11'
 import {exportBackup, importBackup} from '../../src/backup.ts'
 import {payWithNwc, invoiceFromNwc, nwcStatus} from '../../src/nwc.ts'
 import {npubOf, poolTransport, type NostrTransport} from '../../src/nostr.ts'
@@ -2258,7 +2259,47 @@ const viewMelt = (prefillPr?: string): void => {
     view.append(body)
 
     let tab = 'invoice'
+    // Which notes fund it. Empty means the wallet chooses, which is right
+    // for almost every payment; a holder who wants a particular note - the
+    // one from a stranger, the change from something else - can say so, and
+    // is refused with a reason rather than quietly overruled.
+    let chosen = new Set<string>()
     const pane = body.querySelector('[data-pane]')!
+
+    const picker = (): HTMLElement => {
+      const notes = w.liveNotes().sort((a, b) => b.amountMsat - a.amountMsat)
+      const wrap = el(`<details class="stack"><summary>Choose which notes to spend</summary></details>`)
+      if (notes.length === 0) {
+        wrap.append(el(`<p class="fineline">Nothing to choose from yet.</p>`))
+        return wrap
+      }
+      const running = el(`<p class="fineline" data-running></p>`)
+      const say = () => {
+        const total = notes
+          .filter(note => chosen.has(note.id))
+          .reduce((sum, note) => sum + note.amountMsat, 0)
+        running.textContent = chosen.size
+          ? `${chosen.size} note${chosen.size === 1 ? '' : 's'} chosen, ${sats(total)} sat`
+          : 'None chosen - the wallet will pick for you.'
+      }
+      for (const note of notes) {
+        const row = el(`<label class="kv" style="cursor:pointer"><span></span><input type="checkbox" /></label>`)
+        // note values and hosts are persisted strings: set as text, never
+        // interpolated into markup
+        row.querySelector('span')!.textContent = `${sats(note.amountMsat)} sat · ${note.mintHost} · ${note.id.slice(0, 8)}`
+        const box = row.querySelector('input') as HTMLInputElement
+        box.checked = chosen.has(note.id)
+        box.addEventListener('change', () => {
+          if (box.checked) chosen.add(note.id)
+          else chosen.delete(note.id)
+          say()
+        })
+        wrap.append(row)
+      }
+      say()
+      wrap.append(running)
+      return wrap
+    }
     const paint = () => {
       body.querySelectorAll('[data-tab]').forEach(button =>
         button.classList.toggle('on', (button as HTMLElement).dataset.tab === tab)
@@ -2267,19 +2308,40 @@ const viewMelt = (prefillPr?: string): void => {
         const stack = el(`<div class="stack">
           <div class="field"><label>BOLT-11 invoice</label><textarea data-pr placeholder="lnbc…" spellcheck="false"></textarea></div>
         </div>`)
-        if (prefillPr) (stack.querySelector('[data-pr]') as HTMLTextAreaElement).value = prefillPr
+        // An invoice that states no amount leaves the amount to the payer,
+        // so there is nothing to melt until they say. The field appears
+        // only for those: asking everyone for a figure the invoice already
+        // carries is how two numbers end up disagreeing.
+        const openField = el(`<div class="stack" hidden>
+          <p class="warn">This invoice states no amount - say how much to send.</p>
+          <div class="amount-input"><input data-open inputmode="numeric" placeholder="0" /><span class="unit">sat</span></div>
+        </div>`)
+        const box = stack.querySelector('[data-pr]') as HTMLTextAreaElement
+        const reconsider = () => {
+          const typed = box.value.trim().replace(/^lightning:/i, '')
+          const decoded = typed ? tryDecodeBolt11(typed) : null
+          openField.hidden = !decoded || decoded.amountMsats !== null
+        }
+        box.addEventListener('input', reconsider)
+        if (prefillPr) {
+          box.value = prefillPr
+          reconsider()
+        }
         const scan = scanButton(value => {
-          ;(stack.querySelector('[data-pr]') as HTMLTextAreaElement).value = value.replace(/^lightning:/i, '')
+          box.value = value.replace(/^lightning:/i, '')
+          reconsider()
         })
         if (scan) stack.append(scan)
+        stack.append(openField)
+        stack.append(picker())
         pane.replaceChildren(stack)
       } else if (tab === 'address') {
-        pane.replaceChildren(
-          el(`<div class="stack">
-            <div class="field"><label>Lightning Address</label><input data-addr placeholder="them@wallet.example" autocomplete="off" /></div>
-            <div class="amount-input"><input data-amount inputmode="numeric" placeholder="0" /><span class="unit">sat</span></div>
-          </div>`)
-        )
+        const stack = el(`<div class="stack">
+          <div class="field"><label>Lightning Address</label><input data-addr placeholder="them@wallet.example" autocomplete="off" /></div>
+          <div class="amount-input"><input data-amount inputmode="numeric" placeholder="0" /><span class="unit">sat</span></div>
+        </div>`)
+        stack.append(picker())
+        pane.replaceChildren(stack)
       } else if (tab === 'move') {
         const stack = el(`<div class="stack">
           <p class="warn">Move sats from one of your mints to another. The source mint burns a note to pay the destination's invoice, and the new note lands here once it settles. Both mints take their usual fee.</p>
@@ -2367,10 +2429,20 @@ const viewMelt = (prefillPr?: string): void => {
         }
         let pr: string
         let target: string
+        // Only set for an invoice that names no amount of its own.
+        let openMsat: number | undefined
         if (tab === 'invoice') {
           pr = (pane.querySelector('[data-pr]') as HTMLTextAreaElement).value.trim().replace(/^lightning:/i, '')
           target = 'invoice'
           if (!pr) throw new WalletUsageError('Paste the invoice to pay.')
+          const decoded = tryDecodeBolt11(pr)
+          if (decoded && decoded.amountMsats === null) {
+            const open = Number((pane.querySelector('[data-open]') as HTMLInputElement)?.value)
+            if (!Number.isSafeInteger(open) || open <= 0) {
+              throw new WalletUsageError('That invoice states no amount - say how much to send, in whole sats.')
+            }
+            openMsat = open * 1000
+          }
         } else {
           const amount = Number((pane.querySelector('[data-amount]') as HTMLInputElement).value)
           if (!Number.isSafeInteger(amount) || amount <= 0) throw new WalletUsageError('Give an amount in whole sats.')
@@ -2387,7 +2459,10 @@ const viewMelt = (prefillPr?: string): void => {
             target = 'my wallet'
           }
         }
-        const {ambiguous} = await w.melt(pr, target)
+        const {ambiguous} = await w.melt(pr, target, undefined, {
+          ...(openMsat === undefined ? {} : {sendMsat: openMsat}),
+          ...(chosen.size ? {noteIds: [...chosen]} : {})
+        })
         toast(ambiguous ? 'The melt may be in flight - reconciling shortly.' : `Melting to ${target} - in flight.`, 'ok')
         viewHome()
         // settle it in the background while the user carries on
