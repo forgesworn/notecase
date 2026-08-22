@@ -201,6 +201,8 @@ notecase prepare --apply               # cuts the small notes an offline payment
 notecase send 500 --offline            # hands over notes you already hold, nothing on the wire
 notecase receive --offline             # takes a note on the mint's signature alone
 notecase melt 21 --to you@wallet.com   # or a raw bolt11, or --to-nwc
+notecase melt <bolt11> 21              # an invoice that names no amount of its own
+notecase melt <bolt11> --notes c3e3,b8b4 # choose which notes fund it
 notecase transfer 50 --from a.example --to b.example   # move between mints
 notecase reconcile                     # resolves anything uncertain
 notecase nwc set                       # prompts for the connection URI

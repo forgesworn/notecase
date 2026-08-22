@@ -1264,11 +1264,72 @@ export class Wallet {
     )
   }
 
+  // The same preparation, from notes the holder chose rather than ones the
+  // wallet picked for them.
+  //
+  // Nothing about the money changes: the mint still does the splitting, the
+  // change still comes back here, and the fee algebra is the same. Only the
+  // selection step is replaced - and a selection that cannot work is
+  // refused, saying why, rather than quietly falling back to a different
+  // one. Being overruled without being told is worse than being refused.
+  async prepareExactFrom(amountMsat: number, noteIds: string[]): Promise<NoteRecord> {
+    if (!Number.isSafeInteger(amountMsat) || amountMsat <= 0) {
+      throw new WalletUsageError('The amount must be a positive integer of milli-satoshis.')
+    }
+    if (noteIds.length === 0) throw new WalletUsageError('Choose at least one note.')
+
+    const chosen: NoteRecord[] = []
+    for (const id of noteIds) {
+      const note = this.data.notes.find(record => record.id === id)
+      if (!note) throw new WalletUsageError('One of those notes is not in this wallet any more.')
+      if (note.state !== 'live') {
+        throw new WalletUsageError(`One of those notes is ${note.state}, so it cannot be spent.`)
+      }
+      // Same reason prepareExact skips these: money, but nothing can be
+      // split or merged out of it until reconcile has rotated it.
+      if (!note.callback) {
+        throw new WalletUsageError('One of those notes has not met its mint yet - reconcile first.')
+      }
+      if (chosen.some(already => already.id === note.id)) continue
+      chosen.push(note)
+    }
+
+    const host = chosen[0]!.mintHost
+    if (chosen.some(note => note.mintHost !== host)) {
+      throw new WalletUsageError('Notes from different mints cannot be combined - choose from one mint.')
+    }
+
+    const total = chosen.reduce((sum, note) => sum + note.amountMsat, 0)
+    if (total < amountMsat) {
+      throw new InsufficientFundsError(
+        `Those notes come to ${total} msat, short of the ${amountMsat} msat asked for.`
+      )
+    }
+    if (total === amountMsat && chosen.length === 1) return chosen[0]!
+
+    const baseFeeMsat = this.data.mints.find(mint => mint.host === host)?.mintFee?.baseFeeMsat ?? 0
+    // An exact-sum merge only lands on the amount when the mint refunds
+    // nothing, so with a flat fee the answer is always a split.
+    if (baseFeeMsat === 0 && total === amountMsat) {
+      const [target] = await this.mutate(chosen, {kind: 'merge'})
+      return target!
+    }
+    if (total < amountMsat + baseFeeMsat + 1) {
+      throw new InsufficientFundsError(
+        `Those notes come to ${total} msat, which leaves no change once the mint's ${baseFeeMsat} msat split fee comes out of it. Choose one more.`
+      )
+    }
+    const [target] = await this.mutate(chosen, {kind: 'split', amountMsat})
+    return target!
+  }
+
   // Hands a note over: worth exactly the amount, freshly out of this
   // wallet's balance. The returned record's k1 is what the caller shows the
   // recipient; the state flips to 'sent' so it can be reclaimed if unclaimed.
-  async send(amountMsat: number, mintHost?: string): Promise<NoteRecord> {
-    const note = await this.prepareExact(amountMsat, mintHost)
+  async send(amountMsat: number, mintHost?: string, noteIds?: string[]): Promise<NoteRecord> {
+    const note = noteIds?.length
+      ? await this.prepareExactFrom(amountMsat, noteIds)
+      : await this.prepareExact(amountMsat, mintHost)
     this.touch(note, 'sent')
     await this.persist()
     return note
@@ -2282,7 +2343,7 @@ export class Wallet {
     pr: string,
     target: string,
     mintHost?: string,
-    options: {sendMsat?: number} = {}
+    options: {sendMsat?: number; noteIds?: string[]} = {}
   ): Promise<{melt: MeltRecord; ambiguous: boolean}> {
     const decoded = tryDecodeBolt11(pr)
     if (!decoded) throw new WalletUsageError('That is not a decodable BOLT-11 invoice.')
@@ -2304,7 +2365,9 @@ export class Wallet {
       throw new WalletUsageError('An amountless invoice can only be paid a whole number of sats.')
     }
 
-    const note = await this.prepareExact(amountMsat, mintHost)
+    const note = options.noteIds?.length
+      ? await this.prepareExactFrom(amountMsat, options.noteIds)
+      : await this.prepareExact(amountMsat, mintHost)
     const melt: MeltRecord = {
       paymentHash: decoded.paymentHashHex,
       noteId: note.id,

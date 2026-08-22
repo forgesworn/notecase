@@ -37,7 +37,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase requests [--all]
   notecase pay <lnurlcashreq1...>
   notecase reclaim [id]
-  notecase melt <bolt11> [<sats>]
+  notecase melt <bolt11> [<sats>] [--notes <id,id>]
   notecase melt <sats> --to <lightning-address>
   notecase melt <sats> --to-nwc
   notecase transfer <sats> --from <host> --to <host> [--wait <seconds>]
@@ -71,6 +71,22 @@ you always receive less than you send.
 Sending to an npub or a NIP-05 address (name@host) seals the note to that
 key and leaves it on their inbox relays; they need no wallet yet to be paid. \`inbox\` opens what was sent to
 you and claims it at once, which burns the copy on the relay.`
+
+// Short ids as `list` prints them, turned into the full ones the wallet
+// keys on. An ambiguous or unknown one is refused by name: quietly
+// spending a note the holder did not mean is the whole thing this flag
+// exists to prevent.
+const resolveNoteIds = (wallet: Wallet, spec: string): string[] => {
+  const wanted = spec.split(',').map(part => part.trim().toLowerCase()).filter(Boolean)
+  if (wanted.length === 0) throw new WalletUsageError('--notes needs at least one note id.')
+  const live = wallet.liveNotes()
+  return wanted.map(prefix => {
+    const hits = live.filter(note => note.id.startsWith(prefix))
+    if (hits.length === 0) throw new WalletUsageError(`No live note here starts with ${prefix}.`)
+    if (hits.length > 1) throw new WalletUsageError(`${prefix} matches ${hits.length} notes - give more of the id.`)
+    return hits[0]!.id
+  })
+}
 
 const sats = (msat: number): string =>
   msat % 1000 === 0 ? `${msat / 1000} sat` : `${(msat / 1000).toFixed(3)} sat`
@@ -157,6 +173,7 @@ const main = async (): Promise<void> => {
       wait: {type: 'string'},
       msat: {type: 'boolean', default: false},
       to: {type: 'string'},
+      notes: {type: 'string'},
       from: {type: 'string'},
       'to-nwc': {type: 'boolean', default: false},
       threshold: {type: 'string'},
@@ -713,7 +730,13 @@ const main = async (): Promise<void> => {
         }
         sendMsat = parseAmountMsat(rest[1], values.msat)
       }
-      const {melt, ambiguous} = await wallet.melt(pr, target, values.mint, sendMsat === undefined ? {} : {sendMsat})
+      // --notes picks which notes fund it, by the short ids `list` prints,
+      // instead of leaving the choice to the wallet.
+      const noteIds = values.notes ? resolveNoteIds(wallet, values.notes) : undefined
+      const {melt, ambiguous} = await wallet.melt(pr, target, values.mint, {
+        ...(sendMsat === undefined ? {} : {sendMsat}),
+        ...(noteIds ? {noteIds} : {})
+      })
       console.log(
         ambiguous
           ? 'The melt may be in flight - `notecase reconcile` will settle what happened.'

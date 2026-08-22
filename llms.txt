@@ -52,7 +52,7 @@ Draft spec: https://github.com/lnurl/luds/pull/301
 notecase init [--insecure-plaintext] [--restore] | seed | restore | adopt
 notecase mints add <address|lnurl> / list / use <host>
 notecase mint <sats> [--manual] [--mint <host>]
-notecase receive <note> [--force] | send <sats> | melt <bolt11 | sats --to <addr> | sats --to-nwc>
+notecase receive <note> [--force] | send <sats> | melt <bolt11 [sats] | sats --to <addr> | sats --to-nwc> [--notes <id,..>]
 notecase check [--apply] [--resign] [--mint <host>]
 notecase ladder [set <sats,...>] [--copies n] | prepare [--apply]
 notecase send <sats> --offline [--overpay] | receive --offline
@@ -97,6 +97,7 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   awaitMint(pending), reconcile(), checkNotes({apply?, mintHost?}) -> CheckReport,
   balanceMsat(), unrotatedMsat(), verifyNoteOffline(input), addMint(input),
   ladderFor(host), setLadder(host, sats[], copies), ladderPlan(host) -> LadderPlan,
+  prepareExactFrom(msat, noteIds) - caller-chosen selection, refused if it cannot work,
   prepareOffline(host), planOfflineSend(msat, host?) -> OfflineSelection,
   sendOffline(msat, host?, {acceptOverpay?}), receiveOffline(input),
   namePriceMsat(host?), registerName({name, mintHost?}), lightningAddress(),
