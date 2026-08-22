@@ -70,6 +70,17 @@ describe('the web wallet', () => {
       'the confirm screen'
     )
     for (const digit of '210987') type(digit)
+    // the twelve words, once, behind a gate you have to tick
+    await until(() => document.querySelector('[data-gate]') !== null, 'the recovery words')
+    expect(document.body.textContent).toContain('Write these twelve words on paper')
+    expect(document.querySelector('[data-words]')!.textContent!.split(/\s+/).length).toBe(24)
+    const done = document.querySelector<HTMLButtonElement>('[data-done]')!
+    expect(done.disabled).toBe(true)
+    const gate = document.querySelector<HTMLInputElement>('[data-gate]')!
+    gate.checked = true
+    gate.dispatchEvent(new Event('change'))
+    expect(done.disabled).toBe(false)
+    done.click()
     await until(onHome, 'the home screen')
     expect(document.querySelector('[data-balance]')).not.toBeNull()
   })
@@ -216,6 +227,25 @@ describe('the web wallet', () => {
     // no mints yet, so the form says so rather than offering a price
     expect(document.body.textContent).toContain('Add a mint first')
     expect(document.querySelector('[data-name]')).not.toBeNull()
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(onHome, 'home')
+  })
+
+  it('shows the recovery words again behind the PIN, and offers to ask the mints', async () => {
+    document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
+    await until(() => button('Show my words') !== undefined, 'the settings screen')
+    expect(document.body.textContent).toContain('Recovery words')
+    expect(button('Ask my mints what is still mine')).toBeDefined()
+    button('Show my words')!.click()
+    await until(() => document.querySelector('.pinwrap') !== null, 'the PIN prompt')
+    for (const digit of '210987') type(digit)
+    await until(() => document.querySelector('[data-gate]') !== null, 'the words again')
+    expect(document.querySelector('[data-words]')!.textContent!.split(/\s+/).length).toBe(24)
+    const gate = document.querySelector<HTMLInputElement>('[data-gate]')!
+    gate.checked = true
+    gate.dispatchEvent(new Event('change'))
+    document.querySelector<HTMLButtonElement>('[data-done]')!.click()
+    await until(() => button('Lock now') !== undefined, 'settings again')
     document.querySelector<HTMLButtonElement>('[data-back]')!.click()
     await until(onHome, 'home')
   })

@@ -8,6 +8,8 @@ import {
   mintFeeBand,
   buildNoteUrl,
   defaultRandomSecret,
+  deriveNoteRoot,
+  derivedSecretSource,
   fetchInvoiceVerification,
   fetchNoteInfo,
   fetchPayRequest,
@@ -21,6 +23,7 @@ import {
   requestInvoice,
   resolveMintInput,
   resolveNoteInput,
+  restoreNotes,
   rotateNoteWithHash,
   serverOf,
   splitNoteWithHash,
@@ -32,6 +35,7 @@ import {
   type LnurlcashOptions,
   type MintFee
 } from 'lnurlcash-kit'
+import {hexToBytes} from '@noble/hashes/utils.js'
 import {tryDecodeBolt11} from 'farrier-kit/bolt11'
 import {verifyPreimage} from 'farrier-kit/preimage'
 import type {MeltRecord, MintEntry, NoteOrigin, NoteRecord, PendingMint, WalletData} from './types.ts'
@@ -372,6 +376,50 @@ export class Wallet {
     }
   }
 
+  // ---- derived secrets ----
+
+  // The root every note secret at every mint comes off. Absent only for a
+  // wallet made before seeds existed, which keeps making random secrets
+  // until its notes are adopted onto one.
+  private noteRoot(): Uint8Array | null {
+    const seed = this.data.seedHex
+    return seed ? deriveNoteRoot(hexToBytes(seed)) : null
+  }
+
+  hasSeed(): boolean {
+    return Boolean(this.data.seedHex)
+  }
+
+  counterFor(host: string): number {
+    return this.data.counters?.[host] ?? 0
+  }
+
+  // Live notes this wallet cannot find again from the words: made before
+  // the seed, or received and never rotated onto it.
+  legacyNotes(): NoteRecord[] {
+    return this.liveNotes().filter(note => note.index === undefined)
+  }
+
+  // One rotate each, which a mint charges nothing for, and every one of
+  // them is on the seed afterwards. Safe to re-run: whatever succeeded is
+  // no longer legacy.
+  async adoptLegacyNotes(): Promise<{adopted: NoteRecord[]; failed: Array<{note: NoteRecord; reason: string}>}> {
+    const adopted: NoteRecord[] = []
+    const failed: Array<{note: NoteRecord; reason: string}> = []
+    for (const note of this.legacyNotes()) {
+      if (!note.callback) {
+        failed.push({note, reason: 'it has not met its mint yet - reconcile first'})
+        continue
+      }
+      try {
+        adopted.push(await this.rotateLive(note))
+      } catch (err) {
+        failed.push({note, reason: (err as Error).message})
+      }
+    }
+    return {adopted, failed}
+  }
+
   private touch(note: NoteRecord, state: NoteRecord['state']): void {
     note.state = state
     note.updatedAt = now()
@@ -408,16 +456,36 @@ export class Wallet {
     }
     const mergedMsat = totalMsat + (inputs.length - 1) * baseFeeMsat
 
-    const secret = (this.opts.randomSecret ?? defaultRandomSecret)()
+    // Where the replacement secrets come from. On a seeded wallet that is
+    // the mint's own ladder, so twelve words and the mint's name are
+    // enough to find these notes again; the source advances as it is
+    // drawn from, and a split draws twice.
+    const root = this.noteRoot()
+    const startIndex = this.counterFor(template.mintHost)
+    const source = root
+      ? derivedSecretSource(root, template.mintHost, startIndex)
+      : (this.opts.randomSecret ?? defaultRandomSecret)
+    const derived = root !== null && this.opts.randomSecret === undefined
+    const nextSecret = derived ? (source as ReturnType<typeof derivedSecretSource>) : (source as () => string)
+
+    const cut = (amountMsat: number, noteOrigin: NoteOrigin, offset: number): NoteRecord => {
+      const record = this.record(template, nextSecret(), amountMsat, noteOrigin, inputIds)
+      if (derived) record.index = startIndex + offset
+      return record
+    }
     const staged: NoteRecord[] =
       plan.kind === 'split'
-        ? [
-            this.record(template, secret, plan.amountMsat, 'split', inputIds),
-            this.record(template, (this.opts.randomSecret ?? defaultRandomSecret)(), changeMsat, 'change', inputIds)
-          ]
-        : [this.record(template, secret, mergedMsat, origin, inputIds)]
+        ? [cut(plan.amountMsat, 'split', 0), cut(changeMsat, 'change', 1)]
+        : [cut(mergedMsat, origin, 0)]
 
-    // The hashes are about to be disclosed: the secrets go to disk first.
+    // The hashes are about to be disclosed: the secrets go to disk first,
+    // and the counter goes with them in the SAME write. A crash here
+    // wastes an index and costs nothing; the other order would hand a
+    // secret to a mint the wallet could not find its way back to.
+    if (derived) {
+      this.data.counters ??= {}
+      this.data.counters[template.mintHost] = startIndex + staged.length
+    }
     this.data.notes.push(...staged)
     await this.persist()
 
@@ -1723,6 +1791,27 @@ export class Wallet {
       })
     }
 
+    // Notes found by a restore that the mint was holding for something in
+    // flight. They replace nothing, so the group probe above has no way to
+    // reach them: they are settled by asking the mint directly.
+    for (const note of this.data.notes.filter(
+      record => record.state === 'ambiguous' && !record.replaces?.length
+    )) {
+      try {
+        const info = await fetchNoteInfo(buildNoteUrl(note.baseUrl, note.k1), this.opts)
+        note.amountMsat = info.maxWithdrawable
+        if (!note.callback) note.callback = info.callback
+        this.touch(note, 'live')
+        events.push({kind: 'note-restored', detail: `${note.amountMsat} msat recovered at ${note.mintHost}`})
+      } catch (err) {
+        if (err instanceof NoteSpentError || err instanceof NoteUnknownError) {
+          note.detail = 'found by a restore, but the mint had already burned it'
+          this.touch(note, 'spent')
+        }
+        // still pending, or the mint is quiet: it holds for the next pass
+      }
+    }
+
     // Notes taken offline on a signature alone. The person who handed one
     // over still knows its secret, so the first thing a connection is good
     // for is rotating it out from under them.
@@ -1759,6 +1848,78 @@ export class Wallet {
 
     await this.persist()
     return events
+  }
+
+  // ---- restore from the seed ----
+
+  // Walks a mint's ladder of derived secrets and asks it which are still
+  // worth something. This is the whole reason the secrets are derived: a
+  // wallet that has lost everything but twelve words and the name of a
+  // mint can find its money by asking the mint.
+  async restoreFromMint(host: string, options: {gap?: number} = {}): Promise<{found: NoteRecord[]; next: number}> {
+    const root = this.noteRoot()
+    if (!root) throw new WalletUsageError('This wallet has no recovery words, so there is nothing to restore from.')
+    const entry = this.mintEntry(host)
+    let baseUrl = entry.baseUrl
+    if (!baseUrl) {
+      const pay = await fetchPayRequest(entry.payUrl, this.opts)
+      if (!pay.withdrawLink) throw new WalletUsageError(`${entry.host} no longer advertises notes.`)
+      baseUrl = fromLud17(pay.withdrawLink)
+      entry.baseUrl = baseUrl
+    }
+
+    const result = await restoreNotes(baseUrl, root, entry.host, {gap: options.gap ?? 20, start: 0}, this.opts)
+    const found: NoteRecord[] = []
+    for (const restored of result.found) {
+      const id = hashK1(restored.k1)
+      if (this.data.notes.some(note => note.id === id)) continue
+      // A note URL carries no callback, so the mint is asked for one -
+      // and for what the note is really worth while it is answering. If
+      // it will not say, the record is kept anyway and marked for
+      // reconcile to finish: the secret is the money, not the callback.
+      let callback = ''
+      let amountMsat = restored.amountMsat ?? 0
+      try {
+        const info = await fetchNoteInfo(buildNoteUrl(baseUrl, restored.k1), this.opts)
+        callback = info.callback
+        amountMsat = info.maxWithdrawable
+      } catch {
+        // leave it for reconcile
+      }
+      const record: NoteRecord = {
+        id,
+        k1: restored.k1,
+        amountMsat,
+        baseUrl,
+        callback,
+        mintHost: entry.host,
+        index: restored.index,
+        state: restored.state === 'pending' ? 'ambiguous' : 'live',
+        origin: 'recovered',
+        ...(callback === '' && restored.state === 'live' ? {unrotated: true} : {}),
+        createdAt: now(),
+        updatedAt: now()
+      }
+      this.data.notes.push(record)
+      found.push(record)
+    }
+    this.data.counters ??= {}
+    this.data.counters[entry.host] = Math.max(this.counterFor(entry.host), result.next)
+    await this.persist()
+    return {found, next: result.next}
+  }
+
+  async restoreAll(options: {gap?: number} = {}): Promise<Array<{host: string; found: NoteRecord[]; error?: string}>> {
+    const results: Array<{host: string; found: NoteRecord[]; error?: string}> = []
+    for (const entry of [...this.data.mints]) {
+      try {
+        const {found} = await this.restoreFromMint(entry.host, options)
+        results.push({host: entry.host, found})
+      } catch (err) {
+        results.push({host: entry.host, found: [], error: (err as Error).message})
+      }
+    }
+    return results
   }
 
   // ---- checking every note against its mint ----

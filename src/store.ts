@@ -4,6 +4,7 @@ import {homedir} from 'node:os'
 import {sha256} from '@noble/hashes/sha2.js'
 import {bytesToHex, utf8ToBytes, randomBytes} from '@noble/hashes/utils.js'
 import {Keystore, type KeystoreStorage} from 'keystore-kit'
+import {BadMnemonicError, newMnemonic, normaliseMnemonic, seedFromMnemonic} from './seed.ts'
 import {sealWallet, unsealWallet} from './cryptobox.ts'
 import {emptyWallet, type WalletData} from './types.ts'
 
@@ -81,25 +82,39 @@ export type WalletStore = {
   encrypted: boolean
   // hex-encodable secret material for backup shares; null in plaintext mode
   storeKey: string | null
+  // The twelve words, returned ONCE by initWallet and never again: the
+  // caller must show them or they are lost. Never logged, never written
+  // anywhere but the sealed store, and absent when a wallet is opened.
+  mnemonic?: string
 }
+
+export {BadMnemonicError, newMnemonic, seedFromMnemonic} from './seed.ts'
 
 export class WrongPinError extends Error {}
 export class NoWalletError extends Error {}
 export class WalletExistsError extends Error {}
 
-export const initWallet = async (options: {pin?: string; home?: string}): Promise<WalletStore> => {
+export const initWallet = async (options: {pin?: string; home?: string; mnemonic?: string}): Promise<WalletStore> => {
   const home = options.home ?? walletHome()
   mkdirSync(home, {recursive: true, mode: 0o700})
   const walletPath = join(home, WALLET_FILE)
   if (existsSync(walletPath)) throw new WalletExistsError(`a wallet already exists at ${walletPath}`)
 
+  // Restoring passes the words in; a new wallet gets fresh ones. Either
+  // way the seed lands in the store before anything else can be written,
+  // because every secret this wallet ever makes comes off it.
+  const mnemonic = options.mnemonic ? normaliseMnemonic(options.mnemonic) : newMnemonic()
   const data = emptyWallet()
+  data.seedHex = seedFromMnemonic(mnemonic)
+  data.mnemonic = mnemonic
+
   if (options.pin === undefined) {
     atomicWrite(walletPath, JSON.stringify({v: 1, cipher: 'none', data}))
     return {
       data,
       encrypted: false,
       storeKey: null,
+      mnemonic,
       save: async () => atomicWrite(walletPath, JSON.stringify({v: 1, cipher: 'none', data}))
     }
   }
@@ -112,6 +127,7 @@ export const initWallet = async (options: {pin?: string; home?: string}): Promis
     data,
     encrypted: true,
     storeKey,
+    mnemonic,
     save: async () => atomicWrite(walletPath, await sealWallet(data, storeKey))
   }
 }

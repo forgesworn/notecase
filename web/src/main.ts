@@ -31,6 +31,7 @@ import {
   biometricAvailable,
   biometricEnabled,
   createBrowserWallet,
+  freshWalletData,
   enableBiometric,
   forgetBrowserWallet,
   unlockWithBiometric,
@@ -819,7 +820,8 @@ const viewWelcome = (): void =>
       </div>
       <div class="stack">
         <button class="btn btn-silver" data-create>${icons.plus}<span>Create a wallet</span></button>
-        <button class="btn btn-ghost" data-restore>${icons.upload}<span>Restore a backup</span></button>
+        <button class="btn btn-ghost" data-words>${icons.check}<span>Restore from your words</span></button>
+        <button class="btn btn-ghost" data-restore>${icons.upload}<span>Restore a backup file</span></button>
       </div>
       <div class="rubric">What it holds</div>
       <div data-specimen></div>
@@ -836,6 +838,7 @@ const viewWelcome = (): void =>
     </div>`)
     view.querySelector('[data-create]')!.addEventListener('click', viewSetup)
     view.querySelector('[data-restore]')!.addEventListener('click', viewRestore)
+    view.querySelector('[data-words]')!.addEventListener('click', viewWordsRestore)
 
     const specimen = banknote({
       sats: 21,
@@ -883,10 +886,13 @@ const viewSetup = (): void =>
                 setTimeout(viewSetup, 500)
                 return 'retry'
               }
-              store = await createBrowserWallet(first)
+              const fresh = freshWalletData()
+              store = await createBrowserWallet(first, fresh.data)
               wallet = new Wallet(store.data, store.save, WALLET_OPTS)
-              viewHome()
-              toast('Wallet created. Mint or receive your first note.', 'ok')
+              viewWords(fresh.mnemonic, () => {
+                viewHome()
+                toast('Wallet created. Mint or receive your first note.', 'ok')
+              })
               return 'ok'
             }
           })
@@ -895,6 +901,78 @@ const viewSetup = (): void =>
       }
     })
   )
+
+// The twelve words, once, with a gate. Not a screen to hurry past: it is
+// the only thing that gets the money back if this device goes in a river.
+const viewWords = (mnemonic: string, done: () => void): void => {
+  show(() => {
+    const view = el('<div class="view"></div>')
+    const body = el(`<div class="stack">
+      <div class="rubric">Your recovery words</div>
+      <div class="hint">${icons.info}<span><b>Write these twelve words on paper, in this order.</b> They are the only way back to your notes if this device is lost or wiped. Anyone who reads them owns everything this wallet will ever hold, so do not photograph them and do not type them into anything else.</span></div>
+      <div class="mono" data-words></div>
+      <button class="btn btn-ghost" data-copy>${icons.copy}<span>Copy them</span></button>
+      <label class="row" style="border:none;gap:12px;align-items:center;cursor:pointer">
+        <input type="checkbox" data-gate style="width:22px;height:22px;flex:none" />
+        <span>I have written them down somewhere safe.</span>
+      </label>
+      <button class="btn btn-silver" data-done disabled>${icons.check}<span>Done</span></button>
+    </div>`)
+    // the words are a secret out of the store: text, never markup
+    body.querySelector('[data-words]')!.textContent = mnemonic
+      .split(' ')
+      .map((word, index) => `${index + 1}. ${word}`)
+      .join('    ')
+    body.querySelector('[data-copy]')!.addEventListener('click', () => void copyText(mnemonic, 'Your recovery words', true))
+    const gate = body.querySelector('[data-gate]') as HTMLInputElement
+    const finish = body.querySelector('[data-done]') as HTMLButtonElement
+    gate.addEventListener('change', () => {
+      finish.disabled = !gate.checked
+    })
+    finish.addEventListener('click', () => done())
+    view.append(body)
+    return view
+  })
+}
+
+// Coming back from twelve words on a new device. The wallet is rebuilt
+// empty: the notes are at the mints, and asking them is the next step.
+const viewWordsRestore = (): void =>
+  show(() => {
+    const view = el('<div class="view"></div>')
+    view.append(topBar('Restore from your words', viewWelcome))
+    const body = el(`<div class="stack">
+      <div class="hint">${icons.info}<span><b>Twelve words, in order.</b> They rebuild the secrets this wallet makes; the notes themselves are still at your mints, so the next step is to add each mint and ask it what is still yours.</span></div>
+      <div class="field">
+        <label>Your recovery words</label>
+        <textarea data-words rows="3" placeholder="word one word two …" autocomplete="off" spellcheck="false"></textarea>
+      </div>
+      <button class="btn btn-silver" data-go>${icons.check}<span>Restore</span></button>
+      <p class="warn">If someone else has these words, they can take everything this wallet holds. Never type words somebody sent you.</p>
+    </div>`)
+    view.append(body)
+    const go = body.querySelector('[data-go]') as HTMLButtonElement
+    go.addEventListener('click', () =>
+      busy(go, async () => {
+        const words = (body.querySelector('[data-words]') as HTMLTextAreaElement).value
+        const fresh = freshWalletData(words)
+        show(() =>
+          pinPad({
+            title: 'Choose a PIN',
+            subtitle: 'A fresh PIN for this device. Your words stay what they are.',
+            onComplete: async pin => {
+              store = await createBrowserWallet(pin, fresh.data)
+              wallet = new Wallet(store.data, store.save, WALLET_OPTS)
+              viewHome()
+              toast('Restored. Add the mints you used, then ask them what is still yours.', 'ok')
+              return 'ok'
+            }
+          })
+        )
+      })
+    )
+    return view
+  })
 
 const viewRestore = (): void =>
   show(() => {
@@ -2682,6 +2760,66 @@ const viewSettings = (): void => {
       address.append(form)
     }
     body.append(address)
+
+    // recovery words
+    const seed = el(`<div class="card"><h3>Recovery words</h3>
+      <p class="warn" style="text-align:left;padding-top:12px">Twelve words that rebuild every secret this wallet makes. With them and the names of your mints, the notes come back on any device - even one that has never seen this wallet.</p>
+    </div>`)
+    if (w.hasSeed() && w.data.mnemonic) {
+      const showWords = el(`<button class="btn btn-ghost">${icons.eye}<span>Show my words</span></button>`)
+      showWords.addEventListener('click', () =>
+        show(() =>
+          pinPad({
+            title: 'Your PIN, again',
+            subtitle: 'The words are the whole wallet, so they are worth asking twice for.',
+            onComplete: async pin => {
+              const opened = await unlockWithPin(pin).catch(() => null)
+              if (!opened) return 'retry'
+              viewWords(opened.data.mnemonic ?? '', viewSettings)
+              return 'ok'
+            }
+          })
+        )
+      )
+      seed.append(showWords)
+      const restore = el(`<button class="btn btn-ghost">${icons.refresh}<span>Ask my mints what is still mine</span></button>`)
+      restore.addEventListener('click', () =>
+        busy(restore as HTMLButtonElement, async () => {
+          if (!w.data.mints.length) throw new WalletUsageError('Add a mint first, then ask it.')
+          const results = await w.restoreAll()
+          const found = results.reduce((sum, result) => sum + result.found.length, 0)
+          for (const result of results) if (result.error) toast(`${result.host}: ${result.error}`, 'err')
+          toast(
+            found
+              ? `Found ${found} note${found === 1 ? '' : 's'} - balance is now ${sats(w.balanceMsat())} sat.`
+              : 'Your mints hold nothing else of yours.',
+            found ? 'ok' : ''
+          )
+          viewSettings()
+        })
+      )
+      seed.append(restore)
+    } else {
+      seed.append(
+        el(`<p class="warn" style="text-align:left">This wallet was made before recovery words existed, so its notes live only on this device. Download a backup and keep it somewhere safe.</p>`)
+      )
+    }
+    const legacy = w.legacyNotes()
+    if (legacy.length && w.hasSeed()) {
+      const uncovered = el('<p class="warn" style="text-align:left"></p>')
+      uncovered.textContent = `${legacy.length} note${legacy.length === 1 ? '' : 's'} here came from somewhere else and your words cannot find ${legacy.length === 1 ? 'it' : 'them'} again. Moving ${legacy.length === 1 ? 'it' : 'them'} onto your words costs nothing.`
+      const adopt = el(`<button class="btn">${icons.check}<span>Move them onto my words</span></button>`)
+      adopt.addEventListener('click', () =>
+        busy(adopt as HTMLButtonElement, async () => {
+          const result = await w.adoptLegacyNotes()
+          for (const failure of result.failed) toast(`One could not be moved: ${failure.reason}`, 'err')
+          toast(`${result.adopted.length} note(s) are on your words now.`, 'ok')
+          viewSettings()
+        })
+      )
+      seed.append(uncovered, adopt)
+    }
+    body.append(seed)
 
     // backup
     const backup = el(`<div class="card"><h3>Backup</h3>

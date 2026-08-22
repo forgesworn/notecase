@@ -34,6 +34,10 @@ export type NoteRecord = {
   // created this consumed. reconcile() groups by this to learn the fate of
   // the whole mutation from one probe.
   replaces?: string[]
+  // Which derived secret this note's k1 is: the index under its mint's
+  // host in the seed's ladder. A note without one predates the seed (or
+  // came from somewhere else) and restore cannot find it again.
+  index?: number
   // Nostr provenance: the pubkey this note was gift-wrapped to, or came
   // from. A note with either is never wrapped again.
   sentTo?: string
@@ -123,7 +127,22 @@ export type MintEntry = {
 }
 
 export type WalletData = {
-  version: 1
+  // 1: secrets were random and lived nowhere but this file.
+  // 2: secrets are derived from `seedHex`, so twelve words plus the mints
+  //    are enough to find the money again.
+  version: 1 | 2
+  // The BIP39 seed, hex, 64 bytes: what the derivation actually uses.
+  seedHex?: string
+  // The twelve words that made it. Kept because a holder who has lost
+  // their paper needs to be able to write it out again, and because the
+  // seed cannot be turned back into words. Exactly as secret as the seed,
+  // in the same sealed store, and the one thing worth writing down.
+  mnemonic?: string
+  // Next unused derivation index per mint host. Bumped and persisted in
+  // the same write that stages a record, always BEFORE its hash goes on
+  // the wire: a crash there wastes an index, and the other order loses a
+  // note.
+  counters?: Record<string, number>
   settings: {
     defaultMintHost?: string
     // A spending capability - the store holding this must stay encrypted.
@@ -156,7 +175,8 @@ export type WalletData = {
 }
 
 export const emptyWallet = (): WalletData => ({
-  version: 1,
+  version: 2,
+  counters: {},
   settings: {},
   mints: [],
   pubkeyPins: {},

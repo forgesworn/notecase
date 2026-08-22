@@ -11,8 +11,10 @@ Draft spec: https://github.com/lnurl/luds/pull/301
 ## The rules the engine enforces (and any wallet MUST)
 
 1. Persist before disclose: a replacement secret reaches disk BEFORE its
-   hash goes on the wire. Use the kit's *WithHash variants, never the
-   generating ones, if you care about crashes.
+   hash goes on the wire, and on a seeded wallet the derivation counter
+   goes to disk in the SAME write. Use the kit's *WithHash variants, never
+   the generating ones, if you care about crashes. A wasted index costs
+   nothing; the other order loses a note.
 2. Only a DEFINITIVE rejection discards a staged secret. Timeouts, broken
    JSON, dropped connections and unconfirmed 200s all keep it, parked as
    ambiguous, until a probe of the mint proves what happened. A mutation
@@ -47,7 +49,7 @@ Draft spec: https://github.com/lnurl/luds/pull/301
 
 ## CLI
 
-notecase init [--insecure-plaintext]
+notecase init [--insecure-plaintext] [--restore] | seed | restore | adopt
 notecase mints add <address|lnurl> / list / use <host>
 notecase mint <sats> [--manual] [--mint <host>]
 notecase receive <note> [--force] | send <sats> | melt <bolt11 | sats --to <addr> | sats --to-nwc>
@@ -65,6 +67,18 @@ NOTECASE_PROXY=socks5://host:port routes every call through SOCKS5 (Tor). A
 proxy turns DNS pinning OFF on purpose: the hostname is resolved at the far
 end, so the local resolver never learns which mint the wallet banks with.
 
+## Secrets
+
+Every note secret is derived, so twelve words plus the mint hosts are
+enough to find the money:
+
+  root  = HMAC-SHA256(key = "lnurlcash-note-v1", msg = 64-byte BIP39 seed)
+  k1[i] = HMAC-SHA256(key = root, msg = "<mint host>:<i>")
+
+host is the exact lowercase host[:port]; i is decimal from 0, one counter
+per mint. Restore walks i upward asking the mint about each secret and
+stops after 20 consecutive unknowns.
+
 ## Library API
 
 openWallet({pin?, home?}) / initWallet(...) -> {data, save, encrypted, storeKey}
@@ -76,7 +90,11 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   ladderFor(host), setLadder(host, sats[], copies), ladderPlan(host) -> LadderPlan,
   prepareOffline(host), planOfflineSend(msat, host?) -> OfflineSelection,
   sendOffline(msat, host?, {acceptOverpay?}), receiveOffline(input),
-  namePriceMsat(host?), registerName({name, mintHost?}), lightningAddress()
+  namePriceMsat(host?), registerName({name, mintHost?}), lightningAddress(),
+  hasSeed(), counterFor(host), restoreFromMint(host), restoreAll(),
+  legacyNotes(), adoptLegacyNotes()
+initWallet({pin?, home?, mnemonic?}) -> {..., mnemonic} returned ONCE
+newMnemonic() / seedFromMnemonic(words) - BIP39, English, no passphrase
 createWalletFetch({allowPrivate?, proxy?}) - DNS-pinned fetch, loopback
   passthrough; with a socks5:// proxy it tunnels instead and resolves remotely
 payWithNwc(uri, pr) / invoiceFromNwc(uri, amountMsat, desc) / nwcStatus(uri)

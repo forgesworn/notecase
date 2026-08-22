@@ -72,6 +72,39 @@ A bearer note is lost the moment its secret exists nowhere durable. So:
   refused before anything is burned - nothing could ever learn the preimage
   there, and the preimage is the money.
 
+## Backup and restore
+
+`notecase init` shows twelve words once and never again unasked; `notecase
+seed` shows them after the PIN. Every note secret this wallet makes comes
+off them:
+
+```
+root  = HMAC-SHA256(key = "lnurlcash-note-v1", msg = seed)
+k1[i] = HMAC-SHA256(key = root, msg = "<mint host>:<i>")
+```
+
+so a wallet that has lost everything but the words and the names of its
+mints can ask each mint which of those secrets are still worth something.
+That is what `notecase restore` does: `notecase init --restore`, add the
+mints you used, then `notecase restore`, and the notes come back.
+
+The index a note came from is kept on the record, and the next unused
+index per mint is written to disk **in the same save that stages a fresh
+secret, before its hash goes anywhere**. A crash between the two wastes an
+index, which costs nothing. The other order would hand a mint a secret the
+wallet could never find its way back to.
+
+Two things the words cannot do. They will not find a note somebody handed
+you that you have not rotated yet, because that secret came off their
+seed - the wallet lists those and `notecase adopt` moves them onto yours
+with one free rotate each. And two devices on one seed will hand out the
+same index twice; this is a single-device wallet plus restore, which is
+exactly what the words promise and no more.
+
+The passphrase-sealed export (`notecase backup export`) is still there and
+still worth having: it carries mints, pins, history and pending outcomes,
+none of which the words can rebuild.
+
 ## What the mint knows
 
 A mint is not blind, and a wallet that lets you think otherwise has told
@@ -127,7 +160,10 @@ alias notecase="node $PWD/dist/cli.js"
 ```
 
 ```bash
-notecase init                          # PIN-locked store at ~/.notecase
+notecase init                          # PIN-locked store, and twelve words shown once
+notecase seed                          # shows them again, after the PIN
+notecase init --restore                # a new device, from the words
+notecase restore                       # asks each mint which of your notes are still alive
 notecase mints add mint@mint.example   # or any LNURL / bare domain
 notecase mint 21                       # pay via NWC if set, else an invoice to pay
 notecase balance
@@ -309,6 +345,10 @@ vite + anime.js) around the same engine - live at
 - History derived from the wallet's own records - nothing logged twice.
 - Mint management: per-mint balances, default mint, key pins on display,
   guarded removal.
+- Twelve recovery words shown once behind an "I have written them down"
+  gate, shown again from Settings after the PIN, and a "Restore from your
+  words" door on the welcome screen with "ask my mints what is still
+  mine" waiting in Settings.
 - Portable backups sealed under their own passphrase (never the 6-digit
   PIN - a file must survive an offline brute force), restorable from the
   welcome screen on any device.
