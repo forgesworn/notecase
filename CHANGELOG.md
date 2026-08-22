@@ -15,6 +15,15 @@ until they are adopted onto the seed.
   default. The PIN's KDF is deliberately expensive and several tests start
   a mint on top of it, so the slower cases crossed the default on a loaded
   machine while passing perfectly well.
+- **A mint's fee is quoted as a floor, not a hope.** LUD-25 does not say
+  whether a mint rounds its fee, so a wallet can only bound what it will be
+  credited: the msat-exact figure at one end, the sat-ceilinged one at the
+  other. The wallet recorded both and then showed the optimistic one - and
+  both moneyer and dni's reference mint now ceiling, which is the LOW end,
+  so a holder was told they would get more than they would and then handed
+  less. Now stated as "at least X (up to Y, depending on how it rounds)",
+  and flatly as one figure where the fee has no fraction of a sat in it and
+  there is nothing to hedge about.
 - **Payment requests: ask for sats, and pay one over Nostr.**
   `notecase request <sats> [--memo]` publishes an `lnurlcashreq1` string
   naming the amount, this wallet's mints and its npub; `notecase pay
