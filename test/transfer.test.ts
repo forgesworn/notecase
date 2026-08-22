@@ -129,9 +129,14 @@ describe('transfer between two mints', () => {
     })
 
     expect(moved.fee).toEqual({baseFeeMsat: 5_000, feePpm: 1_000})
-    // 50_000 gross, less 5_000 flat, less 50 ppm-part = 44_950.
+    // 50_000 gross, less 5_000 flat, less the 50 msat ppm-part = 44_950 by
+    // the exact formula. The mint ceilings the fee to a whole sat, so it
+    // keeps 6_000 and the note lands on 44_000 - the floor of the band the
+    // wallet quoted, and a whole number of sats, which is the point.
     expect(moved.pending.expectedNetMsat).toBe(44_950)
-    expect(moved.result!.note.amountMsat).toBe(44_950)
+    expect(moved.pending.minNetMsat).toBe(44_000)
+    expect(moved.result!.note.amountMsat).toBe(44_000)
+    expect(moved.result!.note.amountMsat % 1000).toBe(0)
     expect(moved.result!.warnings).toEqual([])
     // The source paid the full 50_000; the difference is the destination's
     // fee, not value lost in the wallet.

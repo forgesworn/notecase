@@ -11,6 +11,22 @@ version 1 file opens and a version 1 backup imports; both are upgraded in
 place, and the notes already in them stay findable only through the file
 until they are adopted onto the seed.
 
+- **`frame-ancestors` moved to where it counts.** The web build's meta CSP
+  listed `frame-ancestors 'none'`, and a meta element ignores that
+  directive by specification: the wallet was advertising clickjacking
+  protection it did not have. The directive only takes effect as a
+  response header, so the README now documents the block an operator has
+  to serve - the whole policy as a header plus `X-Frame-Options: DENY` -
+  and a test holds that block and the meta tag to the same string, because
+  a policy that disagrees with itself protects whichever half the browser
+  happened to read. wallet.moneyer.dev serves it.
+- The mint suite now runs against a mint that actually charges, and
+  asserts a holder is credited the floor of the fee band rather than the
+  optimistic end. It was written after the arithmetic had been fixed by
+  hand against the live mint and nothing automated proved it; the mint
+  those tests build disagreed with the mint on the wire, which turned out
+  to be a bug in moneyer's library entry point (fixed in moneyer 0.3.1,
+  now the version this wallet tests against).
 - The test suite has a 30 second timeout rather than vitest's 5 second
   default. The PIN's KDF is deliberately expensive and several tests start
   a mint on top of it, so the slower cases crossed the default on a loaded
