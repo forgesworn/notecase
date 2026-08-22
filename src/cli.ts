@@ -21,6 +21,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase mints add <address|lnurl> [--label <name>]
   notecase mints list
   notecase mints use <host>
+  notecase mints info [host]
   notecase balance
   notecase list [--all]
   notecase mint <sats> [--mint <host>] [--manual] [--wait <seconds>]
@@ -200,7 +201,14 @@ const main = async (): Promise<void> => {
         for (const mint of store.data.mints) {
           const marker = mint.host === store.data.settings.defaultMintHost ? '*' : ' '
           const pin = store.data.pubkeyPins[mint.host]
-          console.log(`${marker} ${mint.host}${mint.label ? ` (${mint.label})` : ''}${pin ? ` pinned ${pin.slice(0, 16)}…` : ''}`)
+          const named = mint.info?.name ? ` "${mint.info.name}"` : ''
+          console.log(`${marker} ${mint.host}${named}${mint.label ? ` (${mint.label})` : ''}${pin ? ` pinned ${pin.slice(0, 16)}…` : ''}`)
+          // The operator's own words, and marked as unread if the holder
+          // has not been shown this one yet.
+          if (mint.info?.motd) {
+            const unread = mint.info.motd !== mint.motdSeen ? ' (new)' : ''
+            console.log(`    notice${unread}: ${mint.info.motd}`)
+          }
           if (mint.keyRotatedAt) {
             const retired = wallet.pubkeyHistoryFor(mint.host).length
             console.log(
@@ -214,8 +222,40 @@ const main = async (): Promise<void> => {
         store.data.settings.defaultMintHost = arg
         await store.save()
         console.log(`Default mint is now ${arg}.`)
+      } else if (sub === 'info') {
+        const host = arg ?? store.data.settings.defaultMintHost
+        if (!host) throw new WalletUsageError('Which mint? `notecase mints info <host>`.')
+        const entry = wallet.mintEntry(host)
+        // Re-read rather than print a cache: this is the command you run
+        // to find out what a mint is saying NOW.
+        const {info} = await wallet.refreshMintInfo(host).catch(() => ({info: entry.info}))
+        console.log(`${entry.host}${entry.label ? ` (${entry.label})` : ''}`)
+        // Everything below is the mint's own claim about itself. Shown as
+        // that, never as something this wallet has checked.
+        if (!info || Object.keys(info).length === 0) {
+          console.log('  This mint publishes nothing about itself.')
+        } else {
+          if (info.name) console.log(`  name:        ${info.name}`)
+          if (info.description) console.log(`  about:       ${info.description}`)
+          if (info.contact?.nostr) console.log(`  nostr:       ${info.contact.nostr}`)
+          if (info.contact?.email) console.log(`  email:       ${info.contact.email}`)
+          if (info.contact?.url) console.log(`  url:         ${info.contact.url}`)
+          if (info.tosUrl) console.log(`  terms:       ${info.tosUrl}`)
+          if (info.version) console.log(`  version:     ${info.version}`)
+          if (info.motd) console.log(`  notice:      ${info.motd}`)
+        }
+        const fee = entry.mintFee
+        console.log(
+          fee
+            ? `  mint fee:    ${fee.baseFeeMsat} msat + ${fee.feePpm} ppm`
+            : '  mint fee:    none advertised'
+        )
+        const pinned = store.data.pubkeyPins[entry.host]
+        if (pinned) console.log(`  pinned key:  ${pinned}`)
+        console.log('\n  All of the above is what the mint says about itself, not something notecase has checked.')
+        if (info?.motd) await wallet.markMotdSeen(host)
       } else {
-        console.log('mints add <address> | mints list | mints use <host>')
+        console.log('mints add <address> | mints list | mints use <host> | mints info [host]')
       }
       return
     }

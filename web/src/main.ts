@@ -1271,6 +1271,21 @@ const viewHome = (): void => {
     return
   }
 
+  // What a mint wants its holders to know today. Shown once, and again
+  // only when the text actually changes - a notice that reappears on every
+  // visit is a notice people learn to dismiss without reading. It is the
+  // operator's own words, so it goes in as text and is labelled as theirs.
+  for (const notice of w.unreadMotds()) {
+    const banner = el(`<div class="hint" style="margin-bottom:14px">${icons.info}<span><b></b> <i></i> <em class="fineline"></em></span></div>`)
+    banner.querySelector('b')!.textContent = `${notice.name ?? notice.host} says:`
+    banner.querySelector('i')!.textContent = notice.motd
+    banner.querySelector('em')!.textContent = ' (the mint\'s own words)'
+    // The view is already mounted by this point, so the banner goes into
+    // the live document rather than the builder's local tree.
+    document.querySelector('[data-lists]')?.prepend(banner)
+    void w.markMotdSeen(notice.host)
+  }
+
   // Something shared into the wallet from another app. Routed by what it
   // is, never accepted on its own.
   const shared = takeShare()
@@ -2410,7 +2425,58 @@ const viewMints = (prefillAdd?: string): void => {
         ${isDefault ? `<div class="kv"><span>default</span><b>new mints and sends start here</b></div>` : ''}
       </div>`)
       // host and pin are persisted strings: text, never markup
-      card.querySelector('.kv b')!.textContent = entry.host
+      card.querySelector('.kv b')!.textContent = entry.info?.name
+        ? `${entry.info.name}`
+        : entry.host
+
+      // Everything the mint says about itself. All of it is the operator's
+      // own words arriving over the wire, so every one of these is set as
+      // TEXT and never as markup, and the block says whose claim it is.
+      const info = entry.info
+      if (info && Object.keys(info).length > 0) {
+        const about = el('<div class="stack" style="gap:8px;margin-top:10px"></div>')
+        if (info.name) {
+          const row = el('<div class="kv"><span>host</span><b></b></div>')
+          row.querySelector('b')!.textContent = entry.host
+          about.append(row)
+        }
+        if (info.description) {
+          const row = el('<p class="fineline" style="margin:0"></p>')
+          row.textContent = info.description
+          about.append(row)
+        }
+        for (const [label, value] of [
+          ['nostr', info.contact?.nostr],
+          ['email', info.contact?.email],
+          ['contact', info.contact?.url]
+        ] as const) {
+          if (!value) continue
+          const chip = el(`<button class="chip"><span></span><b>copy</b></button>`)
+          chip.querySelector('span')!.textContent = `${label}: ${value}`
+          chip.addEventListener('click', () => void copyText(value, label))
+          about.append(chip)
+        }
+        if (info.tosUrl) {
+          // Rendered as text and opened deliberately, never as an <a href>
+          // built from a string the mint chose.
+          const chip = el(`<button class="chip"><span></span><b>open</b></button>`)
+          chip.querySelector('span')!.textContent = 'terms'
+          chip.addEventListener('click', () => {
+            if (/^https:\/\//i.test(info.tosUrl!)) window.open(info.tosUrl!, '_blank', 'noopener,noreferrer')
+            else toast('That terms link is not https - not opening it.', 'err')
+          })
+          about.append(chip)
+        }
+        if (info.version) {
+          const row = el('<div class="kv"><span>version</span><b></b></div>')
+          row.querySelector('b')!.textContent = info.version
+          about.append(row)
+        }
+        about.append(
+          el('<span class="fineline">what this mint says about itself, not something notecase has checked</span>')
+        )
+        card.append(about)
+      }
       if (pin) card.querySelector('.kv code')!.textContent = `${pin.slice(0, 20)}…`
       card.querySelector('[data-star]')!.addEventListener('click', async () => {
         await w.setDefaultMint(entry.host)

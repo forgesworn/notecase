@@ -15,6 +15,23 @@ until they are adopted onto the seed.
   default. The PIN's KDF is deliberately expensive and several tests start
   a mint on top of it, so the slower cases crossed the default on a loaded
   machine while passing perfectly well.
+- **A mint can say who runs it, and holders can read it.** The discovery
+  endpoint's optional fields are now kept on the mint record: `name`,
+  `description`, `contact` (nostr, email, url), `tosUrl`, `motd` and
+  `version`, plus the structured `fees`, which is taken in preference to
+  parsing the payRequest prose. `notecase mints info [host]` prints the
+  lot, `mints list` shows the name and the notice, and the web mint card
+  carries the same. A message of the day is shown once and again only when
+  the words actually change - a notice that reappears every visit is one
+  people learn to dismiss unread. It is re-read on the regular reconcile
+  rather than only when somebody goes looking, because a notice nobody
+  fetches is not a notice. Every one of these is the operator's own words
+  arriving over the wire: all of it is rendered as text, never as markup, a
+  terms link is opened deliberately and only over https, and both surfaces
+  say plainly that this is what the mint claims rather than something
+  notecase has checked. A mint that publishes nothing, or whose discovery
+  endpoint cannot be reached at all, is exactly as usable as before -
+  adding a mint must not turn on whether an experimental extra answered.
 - **A mint known only from notes can now rotate its signing key.** The
   escape hatch for an announced rotation reads the mint's published key
   history, and finding that document needed the mint's pay URL out of the
