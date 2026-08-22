@@ -17,5 +17,5 @@
     "outDir": "dist"
   },
   "include": ["src", "test"],
-  "exclude": ["test/web.test.ts", "test/claim.test.ts"]
+  "exclude": ["test/web.test.ts", "test/claim.test.ts", "test/share-target.test.ts"]
 }

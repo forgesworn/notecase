@@ -139,15 +139,21 @@ const readClaimHash = (): void => {
 
 const SHARE_KEY = 'notecase:pending-share'
 
+// Where the service worker leaves a POSTed share for the page to collect.
+// Must match share-handler.js, which is a separate file precisely because
+// it has to be importable into the generated worker.
+const SHARE_CACHE = 'notecase-pending-share'
+const SHARE_STASH = '/__notecase_pending_share__'
+
 // Android puts a shared URL in `text` about as often as in `url`, and some
 // apps share a sentence with the link inside it. Take the first thing that
 // looks like something this wallet understands.
-export const shareTargetInput = (search: string): string | null => {
-  const params = new URLSearchParams(search)
-  const fields = [params.get('url'), params.get('text'), params.get('title')].filter(
-    (value): value is string => Boolean(value)
-  )
-  for (const field of fields) {
+//
+// The worker stashes the raw fields without understanding any of this, so
+// the POST path and the GET fallback both end up here rather than keeping
+// two ideas of which field holds the money.
+export const shareTargetPick = (fields: Array<string | null>): string | null => {
+  for (const field of fields.filter((value): value is string => Boolean(value))) {
     const whole = field.trim()
     if (!whole) continue
     const candidates = [whole, ...whole.split(/\s+/)]
@@ -158,6 +164,11 @@ export const shareTargetInput = (search: string): string | null => {
     }
   }
   return null
+}
+
+export const shareTargetInput = (search: string): string | null => {
+  const params = new URLSearchParams(search)
+  return shareTargetPick([params.get('url'), params.get('text'), params.get('title')])
 }
 
 let shareMemory: string | null = null
@@ -182,10 +193,31 @@ const takeShare = (): string | null => {
   }
 }
 
+// The GET fallback. Kept because a share can still arrive this way: the
+// worker may not be controlling the page yet on the very first install, and
+// losing somebody's note to a purist refusal would be the worse bug. The
+// address bar is scrubbed at once, exactly as it always was.
 const readShareTarget = (): void => {
   if (!location.pathname.startsWith('/share')) return
   rememberShare(shareTargetInput(location.search))
   history.replaceState(null, '', '/')
+}
+
+// The POST path. The worker has already redirected us to a clean root and
+// left the fields in a cache, so there is nothing in the URL to scrub - the
+// secret was never in one. Cleared as it is read: a share is collected once.
+export const collectPostedShare = async (): Promise<string | null> => {
+  if (typeof caches === 'undefined') return null
+  try {
+    const cache = await caches.open(SHARE_CACHE)
+    const stashed = await cache.match(SHARE_STASH)
+    if (!stashed) return null
+    await cache.delete(SHARE_STASH)
+    const payload = (await stashed.json()) as {title?: string; text?: string; url?: string}
+    return shareTargetPick([payload.url ?? null, payload.text ?? null, payload.title ?? null])
+  } catch {
+    return null
+  }
 }
 
 // ---------- offline mode ----------
@@ -3033,15 +3065,26 @@ const update = registerSW({
 
 readClaimHash()
 readShareTarget()
-if (location.hash === '#/proof') {
-  viewProof()
-} else if (walletExists()) {
-  void viewLocked()
-} else if (takeClaim()) {
-  // A claim link on a fresh device: set up first, the note is kept for
-  // after - and now survives the reloads that setup tends to involve.
-  viewWelcome()
-  toast('A note is waiting - set up the wallet to receive it.', 'ok')
-} else {
-  viewWelcome()
-}
+
+// Collecting a POSTed share is a cache read, so it is awaited before any
+// screen is chosen rather than landing behind one. That makes the two share
+// paths indistinguishable from here on: by the time anything renders, the
+// payload is in memory exactly as a GET share would have been, and it still
+// waits behind the PIN like everything else.
+void (async () => {
+  const posted = await collectPostedShare()
+  if (posted) rememberShare(posted)
+
+  if (location.hash === '#/proof') {
+    viewProof()
+  } else if (walletExists()) {
+    void viewLocked()
+  } else if (takeClaim()) {
+    // A claim link on a fresh device: set up first, the note is kept for
+    // after - and now survives the reloads that setup tends to involve.
+    viewWelcome()
+    toast('A note is waiting - set up the wallet to receive it.', 'ok')
+  } else {
+    viewWelcome()
+  }
+})()
