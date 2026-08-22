@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.4.0] - unreleased
+## [0.4.0] - 2026-08-22
 
 - **Choose which notes to spend.** The wallet picks for you by default and
   that is right for almost every payment, but notes are visible objects
