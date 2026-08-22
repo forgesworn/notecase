@@ -12,8 +12,12 @@ import {
   derivedSecretSource,
   fetchInvoiceVerification,
   fetchNoteInfo,
+  decodePaymentRequest,
+  encodePaymentRequest,
   fetchMintAddress,
   fetchPayRequest,
+  paymentRequestAmountMsat,
+  type PaymentRequest,
   hashK1,
   meltNote,
   mergeNotesWithHash,
@@ -36,10 +40,10 @@ import {
   type LnurlcashOptions,
   type MintFee
 } from 'lnurlcash-kit'
-import {hexToBytes} from '@noble/hashes/utils.js'
+import {bytesToHex, hexToBytes, randomBytes} from '@noble/hashes/utils.js'
 import {tryDecodeBolt11} from 'farrier-kit/bolt11'
 import {verifyPreimage} from 'farrier-kit/preimage'
-import type {MeltRecord, MintEntry, MintInfo, NoteOrigin, NoteRecord, PendingMint, WalletData} from './types.ts'
+import type {MeltRecord, MintEntry, MintInfo, NoteOrigin, NoteRecord, PaymentRequestRecord, PendingMint, WalletData} from './types.ts'
 import {
   buildMintBackup,
   fetchMintBackup,
@@ -56,6 +60,7 @@ import {
   inboxRelays,
   nip98Header,
   newIdentitySecretHex,
+  npubOf,
   resolveRecipient,
   unwrapNote,
   wrapNote,
@@ -1333,7 +1338,8 @@ export class Wallet {
     transport: NostrTransport,
     amountMsat: number,
     recipient: string,
-    mintHost?: string
+    mintHost?: string,
+    extras: {requestId?: string; memo?: string} = {}
   ): Promise<{note: NoteRecord; recipientHex: string; relays: string[]; failed: string[]; inboxKnown: boolean; wrapId: string}> {
     const recipientHex = await resolveRecipient(recipient, this.opts.fetch ?? fetch)
     const identity = await this.ensureNostrIdentity()
@@ -1345,12 +1351,163 @@ export class Wallet {
 
     const note = await this.send(amountMsat, mintHost)
     note.sentTo = recipientHex
+    if (extras.memo) note.memo = extras.memo
+    if (extras.requestId) note.requestId = extras.requestId
     note.updatedAt = now()
     await this.persist()
 
-    const wrap = wrapNote(this.noteUrlFor(note), note.amountMsat, recipientHex, identity)
+    const wrap = wrapNote(this.noteUrlFor(note), note.amountMsat, recipientHex, identity, extras)
     const result = await transport.publish(relays, wrap)
     return {note, recipientHex, relays: result.ok, failed: result.failed, inboxKnown, wrapId: wrap.id}
+  }
+
+  // ---- payment requests ----
+  //
+  // "Send me 500 sat, at one of these mints." The payer scans it, splits a
+  // note to the exact amount and gift-wraps it to the payee, who matches
+  // it back to what they asked for. Neither side touches a lightning
+  // address, and the mint only ever sees a split.
+
+  requests(): PaymentRequestRecord[] {
+    return [...(this.data.requests ?? [])].sort((a, b) => b.createdAt - a.createdAt)
+  }
+
+  requestById(id: string): PaymentRequestRecord | undefined {
+    return this.data.requests?.find(request => request.id === id)
+  }
+
+  // Anything past its expiry is expired, whoever is asking and whenever
+  // they ask. Computed rather than swept, so a wallet that has been shut
+  // for a week does not show a stale "open".
+  private ageRequests(): void {
+    for (const request of this.data.requests ?? []) {
+      if (request.state === 'open' && request.expiresAt && request.expiresAt <= now()) {
+        request.state = 'expired'
+      }
+    }
+  }
+
+  async createRequest(options: {
+    amountMsat: number
+    memo?: string
+    expiresInSecs?: number
+    mintHost?: string
+  }): Promise<PaymentRequestRecord> {
+    if (!Number.isSafeInteger(options.amountMsat) || options.amountMsat <= 0) {
+      throw new WalletUsageError('A request needs a positive amount.')
+    }
+    // The wire carries whole sats, so an amount that is not one cannot be
+    // asked for. Refused here rather than rounded: the payee would be
+    // asking for one figure and showing another.
+    if (options.amountMsat % 1000 !== 0) {
+      throw new WalletUsageError('A request can only be for a whole number of sats.')
+    }
+    // A request naming mints the payer cannot reach is a request nobody
+    // can pay. Only mints this wallet actually holds an account with go in.
+    const mints = options.mintHost
+      ? [this.mintEntry(options.mintHost).host]
+      : this.data.mints.map(mint => mint.host)
+    if (mints.length === 0) {
+      throw new WalletUsageError('Add a mint first - a request has to name where notes can come from.')
+    }
+    const identity = await this.ensureNostrIdentity()
+    const expiresAt = options.expiresInSecs ? now() + options.expiresInSecs * 1000 : undefined
+    const request: PaymentRequest = {
+      v: 1,
+      id: bytesToHex(randomBytes(8)),
+      amount: String(Math.floor(options.amountMsat / 1000)),
+      currency: 'sat',
+      methodDetails: {mints},
+      to: npubOf(identity.pubkey),
+      ...(options.memo ? {memo: options.memo} : {}),
+      ...(expiresAt ? {expires: Math.floor(expiresAt / 1000)} : {})
+    }
+    const record: PaymentRequestRecord = {
+      id: request.id,
+      amountMsat: options.amountMsat,
+      mints,
+      ...(options.memo ? {memo: options.memo} : {}),
+      ...(expiresAt ? {expiresAt} : {}),
+      createdAt: now(),
+      state: 'open',
+      encoded: encodePaymentRequest(request)
+    }
+    this.data.requests = [...(this.data.requests ?? []), record]
+    await this.persist()
+    return record
+  }
+
+  // Marks a request settled by a note that arrived carrying its id.
+  //
+  // The id is somebody else's claim, so it is matched against this
+  // wallet's own records and nothing else: an id naming no request of ours
+  // settles nothing, and one already paid is not re-settled. The note is
+  // kept either way - it is money, and whether it also answers a question
+  // this wallet asked is a separate matter from whether it is real.
+  private settleRequest(id: string, note: NoteRecord): void {
+    const request = this.requestById(id)
+    if (!request || request.state === 'paid') return
+    request.state = 'paid'
+    request.paidBy = note.id
+  }
+
+  async cancelRequest(id: string): Promise<void> {
+    const request = this.requestById(id)
+    if (!request) throw new WalletUsageError(`No request ${id}.`)
+    if (request.state === 'paid') throw new WalletUsageError('That request has already been paid.')
+    this.data.requests = (this.data.requests ?? []).filter(candidate => candidate.id !== id)
+    await this.persist()
+  }
+
+  // Paying one. Decodes, checks it is still live, finds a mint both sides
+  // share, cuts a note to the exact amount and wraps it to the payee.
+  async payRequest(
+    transport: NostrTransport,
+    input: string
+  ): Promise<{request: PaymentRequest; note: NoteRecord; relays: string[]; failed: string[]; inboxKnown: boolean}> {
+    let request: PaymentRequest
+    try {
+      request = decodePaymentRequest(input.trim())
+    } catch (err) {
+      throw new WalletUsageError(`That is not a payment request: ${(err as Error).message}`)
+    }
+    if (request.expires && request.expires * 1000 <= now()) {
+      throw new WalletUsageError('That request has expired - ask for a fresh one.')
+    }
+    if (!request.to) {
+      throw new WalletUsageError('That request says nowhere to deliver to.')
+    }
+    const amountMsat = paymentRequestAmountMsat(request)
+
+    // A mint both sides use, that this wallet can actually pay from. Named
+    // plainly when there is none: "no notes there" and "we do not share a
+    // mint" are different problems with different fixes.
+    const asked = new Set(request.methodDetails.mints.map(host => host.toLowerCase()))
+    const shared = this.data.mints.filter(mint => asked.has(mint.host.toLowerCase()))
+    if (shared.length === 0) {
+      throw new WalletUsageError(
+        `That request only takes notes from ${request.methodDetails.mints.join(', ')} - add one of those mints first.`
+      )
+    }
+    const balances = this.balanceByMint()
+    const payable = shared.find(mint => (balances.get(mint.host) ?? 0) >= amountMsat)
+    if (!payable) {
+      throw new WalletUsageError(
+        `No notes at ${shared.map(mint => mint.host).join(' or ')} worth ${amountMsat} msat - transfer some there first.`
+      )
+    }
+
+    const sent = await this.sendToNostr(transport, amountMsat, request.to, payable.host, {
+      requestId: request.id,
+      ...(request.memo ? {memo: request.memo} : {})
+    })
+    return {
+      request,
+      note: sent.note,
+      relays: sent.relays,
+      failed: sent.failed,
+      inboxKnown: sent.inboxKnown
+    }
   }
 
   // ---- a lightning address at a mint ----
@@ -1629,6 +1786,11 @@ export class Wallet {
         const result = await this.receive(opened.note.noteUrl)
         result.note.receivedFrom = opened.sender
         if (opened.zap) result.note.zap = opened.zap
+        if (opened.memo) result.note.memo = opened.memo
+        if (opened.requestId) {
+          result.note.requestId = opened.requestId
+          this.settleRequest(opened.requestId, result.note)
+        }
         seen.add(wrap.id)
         received.push(result)
       } catch (err) {

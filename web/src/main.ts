@@ -16,6 +16,9 @@ import {
   buildNoteUrl,
   hashK1,
   isBolt11Invoice,
+  isPaymentRequest,
+  decodePaymentRequest,
+  paymentRequestAmountMsat,
   resolveMintInput,
   resolveNoteInput,
   toBech32Lnurl,
@@ -160,7 +163,14 @@ export const shareTargetPick = (fields: Array<string | null>): string | null => 
     for (const candidate of candidates) {
       const value = candidate.replace(/^lightning:/i, '').trim()
       if (!value) continue
-      if (resolveNoteInput(value) || isBolt11Invoice(value) || resolveMintInput(value)) return value
+      if (
+        resolveNoteInput(value) ||
+        isBolt11Invoice(value) ||
+        isPaymentRequest(value) ||
+        resolveMintInput(value)
+      ) {
+        return value
+      }
     }
   }
   return null
@@ -1302,8 +1312,97 @@ const classifyScan = (raw: string): void => {
   const value = raw.replace(/^lightning:/i, '').trim()
   if (resolveNoteInput(value)) return viewReceive(value)
   if (isBolt11Invoice(value)) return viewMelt(value)
+  // Before the mint check: a request names mints, and a loose matcher
+  // would read one as an address.
+  if (isPaymentRequest(value)) return viewPayRequest(value)
   if (resolveMintInput(value)) return viewMints(value)
-  toast('That QR is not a note, an invoice or a mint address.', 'err')
+  toast('That QR is not a note, an invoice, a request or a mint address.', 'err')
+}
+
+// ---------- paying a request ----------
+//
+// Somebody has asked for an amount at a set of mints. Nothing is spent
+// until the holder says so, and what is about to happen is stated in full
+// first: how much, to whom, out of which mint.
+
+const viewPayRequest = (encoded: string): void => {
+  const w = wallet!
+  let request: ReturnType<typeof decodePaymentRequest>
+  try {
+    request = decodePaymentRequest(encoded.trim())
+  } catch (err) {
+    toast(`That request will not decode: ${(err as Error).message}`, 'err')
+    return viewHome()
+  }
+  const amountMsat = paymentRequestAmountMsat(request)
+  const expired = Boolean(request.expires && request.expires * 1000 <= Date.now())
+
+  show(() => {
+    const view = el('<div class="view"></div>')
+    view.append(topBar('Pay a request', viewHome))
+    const body = el('<div class="stack" style="gap:20px"></div>')
+    view.append(body)
+
+    const card = el(`<div class="card"><div class="kv"><span>they ask for</span><b>${sats(amountMsat)} sat</b></div></div>`)
+    // The memo is the requester's own words: text, never markup.
+    if (request.memo) {
+      const row = el('<div class="kv"><span>for</span><b></b></div>')
+      row.querySelector('b')!.textContent = request.memo
+      card.append(row)
+    }
+    const to = el('<div class="kv"><span>to</span><code></code></div>')
+    to.querySelector('code')!.textContent = `${request.to?.slice(0, 24) ?? 'unstated'}\u2026`
+    card.append(to)
+    const at = el('<div class="kv"><span>from a note at</span><b></b></div>')
+    at.querySelector('b')!.textContent = request.methodDetails.mints.join(', ')
+    card.append(at)
+    body.append(card)
+
+    if (expired) {
+      body.append(
+        el(`<div class="hint">${icons.info}<span>This request has expired - ask for a fresh one.</span></div>`)
+      )
+      return view
+    }
+
+    const balances = w.balanceByMint()
+    const shared = w.data.mints.filter(mint =>
+      request.methodDetails.mints.some(host => host.toLowerCase() === mint.host.toLowerCase())
+    )
+    const payable = shared.find(mint => (balances.get(mint.host) ?? 0) >= amountMsat)
+
+    if (!shared.length) {
+      body.append(
+        el(`<div class="hint">${icons.info}<span>This request only takes notes from a mint you have not added. Add one of them first.</span></div>`)
+      )
+      return view
+    }
+    if (!payable) {
+      body.append(
+        el(`<div class="hint">${icons.info}<span>You hold no notes worth ${sats(amountMsat)} sat at ${shared.map(m => m.host).join(' or ')}. Move some there first.</span></div>`)
+      )
+      return view
+    }
+
+    const pay = el(`<button class="btn">Pay ${sats(amountMsat)} sat from ${payable.host}</button>`)
+    pay.addEventListener('click', () =>
+      busy(pay as HTMLButtonElement, async () => {
+        const transport = poolTransport()
+        try {
+          const paid = await w.payRequest(transport, encoded)
+          toast(`Paid ${sats(paid.note.amountMsat)} sat.`, 'ok')
+          viewHome()
+        } finally {
+          transport.close()
+        }
+      })
+    )
+    body.append(pay)
+    body.append(
+      el('<span class="fineline">The note is split to the exact amount and gift-wrapped to them. Once it is sent it is theirs.</span>')
+    )
+    return view
+  })
 }
 
 // ---------- note detail ----------

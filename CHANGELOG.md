@@ -15,6 +15,31 @@ until they are adopted onto the seed.
   default. The PIN's KDF is deliberately expensive and several tests start
   a mint on top of it, so the slower cases crossed the default on a loaded
   machine while passing perfectly well.
+- **Payment requests: ask for sats, and pay one over Nostr.**
+  `notecase request <sats> [--memo]` publishes an `lnurlcashreq1` string
+  naming the amount, this wallet's mints and its npub; `notecase pay
+  <string>` decodes it, cuts a note to the exact amount at a mint both
+  sides use, and gift-wraps it. Neither party touches a Lightning address
+  and the mint only ever sees a split. The payee matches the arriving note
+  back to what they asked for, so `inbox` says which request was settled
+  and `notecase requests` shows what is still outstanding. Sends can carry
+  a memo with or without a request.
+  Two things are refused rather than guessed: a request for a fraction of a
+  sat, because the wire carries whole sats and rounding would ask for one
+  figure while showing another, and a request naming only mints this wallet
+  has no account at, which is a different problem from having no money
+  there and has a different fix - both are said in those words.
+  A request id arriving on a note is somebody else's claim, so it is
+  matched against this wallet's own records and nothing else: an id naming
+  no request of ours settles nothing, one already paid is not re-settled,
+  and anything that is not 16 hex characters is not carried at all. A memo
+  is prose from a stranger and is bounded on the way in and rendered as
+  text. The note is kept either way - it is money, and whether it also
+  answers a question this wallet asked is a separate matter.
+  The extra rumor tags were checked against the hardware signer's parser
+  first: it reads `content` and looks tags up by name, so a tag it does not
+  know is one it never sees, and nothing needed gating on whether the
+  recipient is a paired device.
 - **Twelve words are enough now: the mint list backs up to Nostr.**
   `restoreNotes` re-derives a wallet's note secrets, which is the hard half
   of recovery - and the easy half beat it on its own, because a fresh

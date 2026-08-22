@@ -177,18 +177,40 @@ const hostOf = (noteUrl: string): string => {
   return `${parsed.host}${parsed.pathname === '/' ? '' : parsed.pathname}`
 }
 
-export const buildNoteRumor = (noteUrl: string, amountMsat: number, recipientHex: string): Partial<UnsignedEvent> => ({
+// `extras` carries what a send is FOR: the request it settles and a line
+// of prose. Both are additive tags.
+//
+// Checked against the hardware signer before adding them: its rumor parser
+// reads `content` and looks tags up by name, so a tag it does not know is
+// a tag it never sees. Nothing needs gating on whether the recipient is a
+// paired device.
+export type NoteRumorExtras = {requestId?: string; memo?: string}
+
+export const buildNoteRumor = (
+  noteUrl: string,
+  amountMsat: number,
+  recipientHex: string,
+  extras: NoteRumorExtras = {}
+): Partial<UnsignedEvent> => ({
   kind: NOTE_KIND,
   content: noteUrl,
   tags: [
     ['p', recipientHex],
     ['amount', String(amountMsat)],
-    ['u', hostOf(noteUrl)]
+    ['u', hostOf(noteUrl)],
+    ...(extras.requestId ? [['req', extras.requestId]] : []),
+    ...(extras.memo ? [['memo', extras.memo]] : [])
   ]
 })
 
-export const wrapNote = (noteUrl: string, amountMsat: number, recipientHex: string, sender: NostrIdentity): Event =>
-  nip59.wrapEvent(buildNoteRumor(noteUrl, amountMsat, recipientHex), sender.secret, recipientHex)
+export const wrapNote = (
+  noteUrl: string,
+  amountMsat: number,
+  recipientHex: string,
+  sender: NostrIdentity,
+  extras: NoteRumorExtras = {}
+): Event =>
+  nip59.wrapEvent(buildNoteRumor(noteUrl, amountMsat, recipientHex, extras), sender.secret, recipientHex)
 
 export class NotANoteWrapError extends Error {}
 
@@ -199,7 +221,14 @@ export class NotANoteWrapError extends Error {}
 export const unwrapNote = (
   wrap: Event,
   recipient: NostrIdentity
-): {note: NoteRumor; sender: string; rumorCreatedAt: number; zap: ZapDetail | null} => {
+): {
+  note: NoteRumor
+  sender: string
+  rumorCreatedAt: number
+  zap: ZapDetail | null
+  memo?: string
+  requestId?: string
+} => {
   if (wrap.kind !== GIFT_WRAP_KIND) throw new NotANoteWrapError('not a gift wrap')
   if (!verifyEvent(wrap)) throw new NotANoteWrapError('wrap signature does not verify')
   const seal = JSON.parse(nip44.decrypt(wrap.content, nip44.getConversationKey(recipient.secret, wrap.pubkey))) as Event
@@ -213,11 +242,20 @@ export const unwrapNote = (
   const fromUrl = noteDeclaredAmount(noteUrl)
   const fromTag = Number(rumor.tags.find(t => t[0] === 'amount')?.[1])
   const amountMsat = fromUrl ?? (Number.isSafeInteger(fromTag) && fromTag > 0 ? fromTag : 0)
+  // Somebody else's words and somebody else's id. Bounded on the way in:
+  // a memo is shown to a person, and a request id is matched against this
+  // wallet's own records, so neither is worth carrying at any length.
+  const memo = rumor.tags.find(t => t[0] === 'memo')?.[1]
+  const requestId = rumor.tags.find(t => t[0] === 'req')?.[1]
   return {
     note: {noteUrl, amountMsat, host: hostOf(noteUrl)},
     sender: seal.pubkey,
     rumorCreatedAt: rumor.created_at,
-    zap: zapFromDescription(rumor.tags)
+    zap: zapFromDescription(rumor.tags),
+    ...(typeof memo === 'string' && memo.length > 0 ? {memo: memo.slice(0, 280)} : {}),
+    ...(typeof requestId === 'string' && /^[0-9a-f]{16}$/i.test(requestId)
+      ? {requestId: requestId.toLowerCase()}
+      : {})
   }
 }
 

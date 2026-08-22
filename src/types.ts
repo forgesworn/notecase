@@ -42,6 +42,13 @@ export type NoteRecord = {
   // from. A note with either is never wrapped again.
   sentTo?: string
   receivedFrom?: string
+  // A line of prose that travelled with the note, from whoever sent it.
+  // Somebody else's words: shown as text, never trusted, never parsed.
+  memo?: string
+  // The payment request this note settles, by its id. Set on both sides:
+  // the payer records what they were paying, the payee matches an arriving
+  // note back to what they asked for.
+  requestId?: string
   // Taken offline on the mint's signature alone: nobody asked the mint,
   // so the person who handed it over still knows this secret. reconcile()
   // rotates every one of these the first time there is a connection.
@@ -137,6 +144,24 @@ export type MintEntry = {
   addedAt: number
 }
 
+// A request this wallet published: "send me this much, at one of these
+// mints". The id is the payee's own handle on it, so a note arriving over
+// Nostr can be matched back to what it settles.
+export type PaymentRequestRecord = {
+  id: string
+  amountMsat: number
+  mints: string[]
+  memo?: string
+  expiresAt?: number
+  createdAt: number
+  state: 'open' | 'paid' | 'expired'
+  // The note that settled it, once one has.
+  paidBy?: string
+  // The encoded string, kept so it can be shown again without rebuilding
+  // it - a request people have copied must not change under them.
+  encoded: string
+}
+
 export type MintInfo = {
   name?: string
   description?: string
@@ -191,6 +216,8 @@ export type WalletData = {
     heartwood?: {uri: string; devicePubkey: string; relays: string[]; clientSecretHex: string}
   }
   mints: MintEntry[]
+  // Requests this wallet has published and is waiting to be paid.
+  requests?: PaymentRequestRecord[]
   // Trust-on-first-use pins: mint host -> the mintPubkey currently in use
   // there. A later mismatch is surfaced hard unless the mint itself
   // publishes the old key as retired, in which case the old one moves to
