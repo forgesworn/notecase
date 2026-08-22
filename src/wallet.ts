@@ -283,13 +283,25 @@ export class Wallet {
   }
 
   // The mint's own discovery document, for the fields the client library
-  // does not model yet. Only a mint in the directory can be asked: the
-  // endpoint is derived from its pay URL, and a note URL carries none.
-  private async discoveryDocument(host: string): Promise<{url: string; body: Record<string, unknown>} | null> {
+  // does not model yet.
+  //
+  // Two ways in. A mint in the directory has a pay URL to derive the
+  // endpoint from. A mint known only from notes has none - and that is the
+  // ordinary case for a bearer-note wallet - so the note's own `payLink`
+  // is used instead. The kit only ever hands one back on the note's own
+  // origin, so this cannot be pointed at a third party.
+  private async discoveryDocument(
+    host: string,
+    payLink?: string | undefined
+  ): Promise<{url: string; body: Record<string, unknown>} | null> {
     const entry = this.data.mints.find(mint => mint.host === host)
-    if (!entry) return null
-    const url = mintAddressUrl(entry.payUrl)
+    const source = entry?.payUrl ?? payLink
+    if (!source) return null
+    const url = mintAddressUrl(source)
     if (!url) return null
+    // Belt and braces over the kit's own check: whatever the note said, the
+    // document that vouches for this host's keys has to be ON this host.
+    if (serverOf(url) !== host) return null
     const fetchImpl = this.opts.fetch ?? fetch
     const response = await fetchImpl(url, {
       headers: {accept: 'application/json'},
@@ -299,9 +311,9 @@ export class Wallet {
     return {url, body: body ?? {}}
   }
 
-  private async retiredKeysAt(host: string): Promise<string[]> {
+  private async retiredKeysAt(host: string, payLink?: string | undefined): Promise<string[]> {
     try {
-      const discovery = await this.discoveryDocument(host)
+      const discovery = await this.discoveryDocument(host, payLink)
       const list = discovery?.body.previousPubkeys
       if (!Array.isArray(list)) return []
       return list
@@ -325,7 +337,11 @@ export class Wallet {
   // argument. What the history buys is that a mint doing the right thing -
   // rotating a key and saying so - stops looking exactly like an attack,
   // which is the thing that makes holders click through warnings.
-  private async pinPubkey(host: string, observed: string | undefined): Promise<{rotated: boolean}> {
+  private async pinPubkey(
+    host: string,
+    observed: string | undefined,
+    payLink?: string | undefined
+  ): Promise<{rotated: boolean}> {
     if (!observed) return {rotated: false}
     const pinned = this.data.pubkeyPins[host]
     if (!pinned) {
@@ -333,7 +349,7 @@ export class Wallet {
       return {rotated: false}
     }
     if (pinned === observed) return {rotated: false}
-    const retired = await this.retiredKeysAt(host)
+    const retired = await this.retiredKeysAt(host, payLink)
     if (!retired.includes(pinned.toLowerCase())) {
       throw new PinMismatchError(
         `${host} now presents mint pubkey ${observed.slice(0, 16)}… but was pinned to ${pinned.slice(0, 16)}…`
@@ -584,7 +600,10 @@ export class Wallet {
       return `${parsed.origin}${parsed.pathname}`
     })()
     const mintHost = serverOf(baseUrl)
-    const pin = await this.pinPubkey(mintHost, info.mintPubkey)
+    // The note's own way home, so a mint this wallet has only ever received
+    // notes from can still have its announced rotation checked. Without it
+    // the escape hatch is unreachable from the only thing the wallet has.
+    const pin = await this.pinPubkey(mintHost, info.mintPubkey, info.payLink)
     if (pin.rotated) {
       warnings.push(
         `${mintHost} has rotated its signing key and says so - the old key is kept, so notes it signed still verify`

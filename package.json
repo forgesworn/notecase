@@ -56,7 +56,7 @@
     "@scure/bip39": "^2.3.0",
     "farrier-kit": "^1.1.3",
     "keystore-kit": "^0.2.1",
-    "lnurlcash-kit": "^0.2.0",
+    "lnurlcash-kit": "^0.2.1",
     "nostr-tools": "2.24.1",
     "undici": "^8.10.0"
   },
@@ -69,7 +69,7 @@
     "animejs": "^4.5.0",
     "happy-dom": "^20.11.2",
     "jsqr": "^1.4.0",
-    "lnurlcash-conformance": "^0.1.1",
+    "lnurlcash-conformance": "^0.2.2",
     "typescript": "^5.7.0",
     "uqr": "^0.1.3",
     "vite": "^7.3.6",

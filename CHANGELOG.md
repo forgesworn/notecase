@@ -15,6 +15,22 @@ until they are adopted onto the seed.
   default. The PIN's KDF is deliberately expensive and several tests start
   a mint on top of it, so the slower cases crossed the default on a loaded
   machine while passing perfectly well.
+- **A mint known only from notes can now rotate its signing key.** The
+  escape hatch for an announced rotation reads the mint's published key
+  history, and finding that document needed the mint's pay URL out of the
+  wallet's mint list. A wallet that has only ever received notes has no
+  such entry - which is the ordinary case for a bearer-note wallet - so the
+  history came back empty, and empty means refuse. The same receive that
+  created the pin could never create what was needed to move it, and a mint
+  doing exactly the right thing was reported as an attack. The note's own
+  `payLink`, which `lnurlcash-kit` 0.2.1 models and moneyer 0.2.1 publishes,
+  is now used as the route to that document. Nothing is loosened: a
+  rotation the mint has not announced is still refused, a mint that cannot
+  be reached is still refused, and a mint that publishes no `payLink` at
+  all leaves a note-only wallet exactly where it was. A `payLink` on any
+  origin but the note's own is ignored, and so is a mint-list entry whose
+  pay URL points at another host - a tampered wallet file must not be able
+  to nominate who vouches for a mint's keys.
 - **The share target is a POST, so a note's secret never reaches a URL.**
   A shared payload can be a live bearer note, and the secret in it is the
   money. The target was declared `method: 'GET'`, so a share arrived as
