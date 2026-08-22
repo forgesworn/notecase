@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.1] - 2026-08-22
+
+- **A stale derivation counter is no longer reported as a spent note.**
+  Every melt from a restored wallet failed with "notes already spent", and
+  the balance dropped to zero until `reconcile` was run - then failed
+  identically again. The notes were never spent: a mint refuses a repeated
+  OUTPUT hash with the same words it refuses a dead INPUT, so a wallet
+  whose counter is behind what the mint has already seen was told its own
+  money was gone. The wallet now asks about its own inputs, and where every
+  one is still live it knows the mutation did not land: it unwinds on the
+  spot and draws the next indexes off the ladder. A mint that refuses four
+  different derived secrets is told to be saying something else, and the
+  holder hears that instead. A restore and a second device on one seed both
+  leave the counter behind, so both hit this.
+
 ## [0.3.0] - 2026-08-22
 
 - **One wallet on several devices: the notes themselves can live on your
