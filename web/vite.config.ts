@@ -24,20 +24,28 @@ export default defineConfig({
           {src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png'},
           {src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable'}
         ],
-        // "Share to notecase" from any app. A GET target, so the payload
-        // arrives in the query string and is scrubbed out of the address
-        // bar the moment it is read - the same handling the claim fragment
-        // gets, because a shared note URL is a live secret too. Nothing is
-        // ever accepted automatically: it lands in the receive screen.
+        // "Share to notecase" from any app. A POST target, because a
+        // shared payload can be a live bearer note and the secret in it is
+        // the money: a GET puts that secret in the request line, which is
+        // what a web server writes to its access log. share-handler.js
+        // takes the POST in the service worker, stashes the fields and
+        // redirects to a clean root, so the secret never appears in a URL,
+        // in history, or in a referrer. Nothing is ever accepted
+        // automatically: it lands in the receive screen.
         share_target: {
           action: '/share',
-          method: 'GET',
-          params: {text: 'text', url: 'url'}
+          method: 'POST',
+          enctype: 'multipart/form-data',
+          params: {title: 'title', text: 'text', url: 'url'}
         }
       },
       workbox: {
         navigateFallback: 'index.html',
-        runtimeCaching: []
+        runtimeCaching: [],
+        // Imported at the top of the generated worker, so its fetch
+        // listener registers before Workbox's navigation route and gets
+        // first refusal on the share POST.
+        importScripts: ['/share-handler.js']
       }
     })
   ]

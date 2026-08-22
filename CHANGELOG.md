@@ -15,6 +15,24 @@ until they are adopted onto the seed.
   default. The PIN's KDF is deliberately expensive and several tests start
   a mint on top of it, so the slower cases crossed the default on a loaded
   machine while passing perfectly well.
+- **The share target is a POST, so a note's secret never reaches a URL.**
+  A shared payload can be a live bearer note, and the secret in it is the
+  money. The target was declared `method: 'GET'`, so a share arrived as
+  `/share?text=lnurlw://...?k1=<the secret>`. In normal use the service
+  worker answers that navigation from the precache and it never reaches the
+  network, but a worker that is updating, evicted, unregistered or bypassed
+  by a hard reload lets it out - and then the secret is written to the web
+  server's access log as an ordinary query string. That log belongs to
+  whoever serves the wallet, who need not be the mint that issued the note,
+  so a wallet holding notes from several mints was handing one operator
+  another's secrets. The share now travels in a POST body: the worker takes
+  it, stashes the raw fields, and redirects to a clean root, so there is
+  nothing to log, nothing to land in history and nothing to leak through a
+  referrer. The worker stays ignorant of what a note looks like - it stashes
+  the three share fields and the page decides, using the same code that
+  reads the GET path. The GET path is kept as a fallback, because a worker
+  may not be controlling the page on the very first install and losing
+  somebody's note to a purist refusal would be the worse bug.
 - **An invoice that states no amount can be paid.** `notecase melt <bolt11>
   <sats>` says how much to send for an invoice that leaves the figure to
   the payer; it used to be refused outright. There is nowhere on the LUD-25
