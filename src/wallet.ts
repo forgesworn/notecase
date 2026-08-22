@@ -52,6 +52,15 @@ import {
   type MintBackupKey
 } from './mintbackup.ts'
 import {
+  encodeCounters,
+  encodeNote,
+  fetchStore,
+  forRelay,
+  mergeCounters,
+  publishEvent,
+  type SyncedNote
+} from './notesync.ts'
+import {
   BOOTSTRAP_RELAYS,
   NotANoteWrapError,
   fetchWraps,
@@ -92,6 +101,18 @@ export type ReconcileEvent = {kind: string; detail: string}
 
 // What a sweep of every note against its mint found. Nothing here is
 // applied unless the caller asks for it.
+// What one pass over the relay store did to this wallet.
+export type NoteSyncResult = {
+  added: NoteRecord[]
+  updated: NoteRecord[]
+  // Notes this wallet still thought were live, which another device on the
+  // same seed had already burned.
+  spentElsewhere: NoteRecord[]
+  // How many mints' derivation counters moved up to match another device.
+  countersMoved: number
+  found: boolean
+}
+
 export type CheckReport = {
   checked: number
   spent: NoteRecord[]
@@ -626,6 +647,207 @@ export class Wallet {
     }
     await this.persist()
     return {added, pins, found: true}
+  }
+
+  // ---- the note store on relays ----
+  //
+  // The mint list above answers "where does this wallet bank". This
+  // answers "what does it hold", and that is a much larger thing to put on
+  // a relay, because the records carry k1s and a k1 IS the money. Same
+  // unlinkable seed-derived key, same NIP-44-to-itself envelope, and off
+  // unless the holder asks for it - separately from the list, because
+  // agreeing to one is not agreeing to the other.
+  //
+  // One addressable event per note, keyed by note id, so there is no
+  // whole-store record for a fresh wallet to flatten. The failure that
+  // caught the mint list out - a wallet with nothing publishing its
+  // nothing over a good backup - cannot be written here.
+
+  noteSyncEnabled(): boolean {
+    return this.data.settings.noteSync === true
+  }
+
+  // Switching it on LOOKS first. For a wallet restored from words this is
+  // the recovery step, and it must find the notes rather than start a
+  // second, emptier purse beside them.
+  async setNoteSync(on: boolean, transport?: NostrTransport): Promise<void> {
+    if (on && !this.data.seedHex) {
+      throw new WalletUsageError('This wallet has no seed, so there is no key to keep a note store under.')
+    }
+    this.data.settings.noteSync = on
+    if (!on) delete this.data.settings.noteSyncPushed
+    await this.persist()
+    if (on && transport) {
+      try {
+        await this.pullNotes(transport)
+      } catch {
+        // Relays that cannot be reached mean nothing was found. Nothing
+        // has been published from here yet either, so no store is at risk.
+      }
+    }
+  }
+
+  // This device's name among the devices sharing one seed. Made once and
+  // kept: it says which counter record is ours to write, and two wallets
+  // sharing one would be back to colliding.
+  async deviceId(): Promise<string> {
+    const existing = this.data.settings.deviceId
+    if (existing) return existing
+    const made = bytesToHex(randomBytes(8))
+    this.data.settings.deviceId = made
+    await this.persist()
+    return made
+  }
+
+  // The reserved slot in the pushed map for this device's counters. Note
+  // ids are 64 hex characters, so nothing can collide with it.
+  private static readonly COUNTERS_SLOT = '#counters'
+
+  private noteFingerprint(note: NoteRecord): string {
+    return JSON.stringify(forRelay(note))
+  }
+
+  // Which records travel. Everything the wallet is still holding, plus the
+  // spent ones it has published before - those are how the other device
+  // learns a note was burned here. A spent note that was never published
+  // is local history and stays local.
+  private syncableNotes(): NoteRecord[] {
+    const pushed = this.data.settings.noteSyncPushed ?? {}
+    return this.data.notes.filter(note => note.state !== 'spent' || pushed[note.id] !== undefined)
+  }
+
+  async pushNotes(transport: NostrTransport): Promise<{pushed: string[]; failed: string[]}> {
+    const key = this.mintBackupKey()
+    const relays = this.nostrRelays()
+    const pushed = {...(this.data.settings.noteSyncPushed ?? {})}
+    const done: string[] = []
+    const failed: string[] = []
+
+    for (const note of this.syncableNotes()) {
+      const fingerprint = this.noteFingerprint(note)
+      if (pushed[note.id] === fingerprint) continue
+      const result = await publishEvent(transport, relays, encodeNote(key, note))
+      // Only counted where a relay actually took it, so a failed push is
+      // retried rather than remembered as done.
+      if (result.ok.length > 0) {
+        pushed[note.id] = fingerprint
+        done.push(note.id)
+      } else {
+        failed.push(note.id)
+      }
+    }
+
+    const deviceId = await this.deviceId()
+    const counters = {...(this.data.counters ?? {})}
+    const countersFingerprint = JSON.stringify(counters)
+    if (Object.keys(counters).length > 0 && pushed[Wallet.COUNTERS_SLOT] !== countersFingerprint) {
+      const result = await publishEvent(transport, relays, encodeCounters(key, deviceId, counters))
+      if (result.ok.length > 0) {
+        pushed[Wallet.COUNTERS_SLOT] = countersFingerprint
+        done.push(Wallet.COUNTERS_SLOT)
+      } else {
+        failed.push(Wallet.COUNTERS_SLOT)
+      }
+    }
+
+    this.data.settings.noteSyncPushed = pushed
+    await this.persist()
+    return {pushed: done, failed}
+  }
+
+  // Reads the store back and merges it in. The rules, in the order they
+  // matter:
+  //
+  //   - spent is sticky and travels. A note the relay says is burned is
+  //     burned, whichever device burned it, because the alternative is a
+  //     wallet that offers to spend money that is already gone.
+  //   - a locally spent note is never resurrected by a stale relay copy.
+  //   - otherwise the newer record wins, field for field, except that a
+  //     secret is never replaced by an absent one.
+  //
+  // The mint is the final arbiter, not the relay: syncNotes runs the check
+  // sweep over anything this wallet had not seen before.
+  async pullNotes(transport: NostrTransport): Promise<NoteSyncResult> {
+    const key = this.mintBackupKey()
+    const {notes, counters} = await fetchStore(transport, this.nostrRelays(), key)
+
+    const added: NoteRecord[] = []
+    const updated: NoteRecord[] = []
+    const spentElsewhere: NoteRecord[] = []
+
+    // What the store is known to hold, so a record learned from a relay can
+    // be republished later - the device that pulled a note is the one that
+    // has to say so when it spends it.
+    const held = {...(this.data.settings.noteSyncPushed ?? {})}
+    const heldFingerprint = (note: SyncedNote): string => JSON.stringify(note)
+
+    for (const remote of notes) {
+      const local = this.data.notes.find(note => note.id === remote.id)
+      if (!local) {
+        // A burn on another device, for a note this wallet never held.
+        // Nothing to learn and nothing to spend.
+        if (remote.state === 'spent') continue
+        const record = {...remote} as NoteRecord
+        this.data.notes.push(record)
+        held[record.id] = heldFingerprint(remote)
+        added.push(record)
+        continue
+      }
+      if (remote.state === 'spent' && local.state !== 'spent') {
+        // The other device's timestamp, not ours: this wallet is agreeing
+        // with a record the store already holds, not making a new claim.
+        local.state = 'spent'
+        local.updatedAt = remote.updatedAt
+        local.detail = 'burned on another device sharing this seed'
+        held[local.id] = heldFingerprint(remote)
+        spentElsewhere.push(local)
+        continue
+      }
+      if (local.state === 'spent') continue
+      if (remote.updatedAt <= local.updatedAt) continue
+      Object.assign(local, {...remote, k1: remote.k1 === '' ? local.k1 : remote.k1})
+      held[local.id] = heldFingerprint(remote)
+      updated.push(local)
+    }
+    this.data.settings.noteSyncPushed = held
+
+    // Every device's highest claimed index, so the next mint here does not
+    // derive a secret another device already used.
+    const merged = mergeCounters(counters)
+    this.data.counters ??= {}
+    let countersMoved = 0
+    for (const [host, value] of Object.entries(merged)) {
+      if ((this.data.counters[host] ?? 0) >= value) continue
+      this.data.counters[host] = value
+      countersMoved += 1
+    }
+
+    await this.persist()
+    return {
+      added,
+      updated,
+      spentElsewhere,
+      countersMoved,
+      found: notes.length > 0 || counters.length > 0
+    }
+  }
+
+  // Pull, let the mint settle anything new, then push. In that order: a
+  // record this wallet learned from a relay is somebody else's claim about
+  // money until the mint agrees, and publishing before checking would
+  // spread an unverified claim further.
+  async syncNotes(
+    transport: NostrTransport,
+    options: {check?: boolean} = {}
+  ): Promise<NoteSyncResult & {pushed: string[]; failed: string[]; checked: CheckReport | null}> {
+    if (!this.noteSyncEnabled()) {
+      throw new WalletUsageError('The note store is off. Turn it on before syncing.')
+    }
+    const pulled = await this.pullNotes(transport)
+    const checked =
+      options.check !== false && pulled.added.length > 0 ? await this.checkNotes({apply: true}) : null
+    const pushed = await this.pushNotes(transport)
+    return {...pulled, ...pushed, checked}
   }
 
   counterFor(host: string): number {

@@ -60,6 +60,7 @@ notecase address [claim <name> --mint <host>]
 notecase balance | list [--all] | reconcile | verify <note>
 notecase nwc set <uri> / status / clear
 notecase backup export | shares [--threshold N --count M] | recover-key
+notecase sync [on|off|status]   # notes themselves on relays, several devices, one seed
 
 Amounts are sats (--msat for msat). PIN via prompt or $NOTECASE_PIN.
 NOTECASE_HOME relocates the store; NOTECASE_ALLOW_PRIVATE=1 admits LAN mints;
@@ -79,6 +80,14 @@ host is the exact lowercase host[:port]; i is decimal from 0, one counter
 per mint. Restore walks i upward asking the mint about each secret and
 stops after 20 consecutive unknowns.
 
+With the note store on (`sync`), the records themselves live on relays as
+kind 30078, d = "lnurlcash-note:<note id>", NIP-44 to sha256(seed ||
+"lnurlcash-mint-backup") - the same unlinkable key the mint list uses, and
+never the wallet's npub. Counters travel as d = "lnurlcash-counters:<device
+id>", merged by max. A note in a terminal state travels with an empty k1.
+Merge rules: spent is sticky locally and travels globally; otherwise the
+newer updatedAt wins; the mint, not the relay, decides what is spendable.
+
 ## Library API
 
 openWallet({pin?, home?}) / initWallet(...) -> {data, save, encrypted, storeKey}
@@ -92,7 +101,9 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   sendOffline(msat, host?, {acceptOverpay?}), receiveOffline(input),
   namePriceMsat(host?), registerName({name, mintHost?}), lightningAddress(),
   hasSeed(), counterFor(host), restoreFromMint(host), restoreAll(),
-  legacyNotes(), adoptLegacyNotes()
+  legacyNotes(), adoptLegacyNotes(),
+  noteSyncEnabled(), setNoteSync(on, transport?), deviceId(),
+  pullNotes(transport) -> NoteSyncResult, pushNotes(transport), syncNotes(transport)
 initWallet({pin?, home?, mnemonic?}) -> {..., mnemonic} returned ONCE
 newMnemonic() / seedFromMnemonic(words) - BIP39, English, no passphrase
 createWalletFetch({allowPrivate?, proxy?}) - DNS-pinned fetch, loopback

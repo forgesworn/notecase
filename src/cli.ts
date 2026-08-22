@@ -49,6 +49,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase heartwood send <id> --to <npub> | heartwood unlink
   notecase backup export | backup shares [--threshold N --count M] | backup recover-key
   notecase backup nostr on|off|push|pull
+  notecase sync on|off|status | sync
 
 Offline mode is asked for, never guessed at: --offline on send and receive
 means no call is made to any mint at all. The ladder and prepare commands
@@ -973,6 +974,81 @@ const main = async (): Promise<void> => {
         console.log('NWC connection removed.')
       } else {
         console.log('nwc set <uri> | nwc status | nwc clear')
+      }
+      return
+    }
+
+    case 'sync': {
+      const action = rest[0]
+
+      if (action === 'on' || action === 'off') {
+        // Switching on LOOKS first, the same as the mint list: for a
+        // wallet restored from words this IS the recovery step.
+        const lookup = action === 'on' ? poolTransport() : null
+        try {
+          await wallet.setNoteSync(action === 'on', lookup ?? undefined)
+        } finally {
+          lookup?.close()
+        }
+        if (action === 'off') {
+          console.log('Note store off. What is already on the relays stays there until it is replaced.')
+          return
+        }
+        console.log(`Note store on, under ${wallet.mintBackupPubkey().slice(0, 16)}\u2026`)
+        console.log('  Your NOTES travel now, not just your mint list: the records carry the k1s')
+        console.log('  that ARE the money, encrypted under a key derived from your seed. Anyone')
+        console.log('  holding your seed holds your wallet - which was already true - but a relay')
+        console.log('  now holds the ciphertext too. Lose the seed and it is gone; leak it and so')
+        console.log('  is the money.')
+        return
+      }
+
+      if (action === 'status') {
+        console.log(`Note store: ${wallet.noteSyncEnabled() ? 'on' : 'off'}`)
+        if (!wallet.noteSyncEnabled()) return
+        console.log(`  publishing as: ${wallet.mintBackupPubkey().slice(0, 16)}\u2026`)
+        console.log(`  this device:   ${await wallet.deviceId()}`)
+        console.log(`  relays:        ${(store.data.settings.nostrRelays ?? []).join(', ') || 'defaults'}`)
+        return
+      }
+
+      if (action !== undefined) {
+        console.log('sync | sync on | sync off | sync status')
+        return
+      }
+
+      if (!wallet.noteSyncEnabled()) {
+        throw new WalletUsageError('The note store is off - `notecase sync on` first.')
+      }
+      const transport = poolTransport()
+      try {
+        const result = await wallet.syncNotes(transport)
+        if (!result.found && !result.pushed.length) {
+          console.log('Nothing on the relays yet, and nothing here to publish.')
+          return
+        }
+        if (result.added.length) {
+          console.log(`Took in ${result.added.length} note(s) from another device.`)
+        }
+        if (result.spentElsewhere.length) {
+          const total = result.spentElsewhere.reduce((sum, note) => sum + note.amountMsat, 0)
+          console.log(`${result.spentElsewhere.length} note(s) worth ${sats(total)} were spent elsewhere - marked spent.`)
+        }
+        if (result.updated.length) console.log(`Updated ${result.updated.length} note(s).`)
+        if (result.countersMoved) {
+          console.log(`Moved the derivation counter forward at ${result.countersMoved} mint(s).`)
+        }
+        if (result.checked) {
+          console.log(`Asked the mints about ${result.checked.checked} note(s); ${result.checked.spent.length} were already burned.`)
+        }
+        const notes = result.pushed.filter(id => id !== '#counters').length
+        if (notes) console.log(`Published ${notes} record(s).`)
+        if (result.failed.length) {
+          console.log(`${result.failed.length} record(s) reached no relay - run sync again.`)
+        }
+        console.log(`Balance: ${sats(wallet.balanceMsat())}`)
+      } finally {
+        transport.close()
       }
       return
     }
