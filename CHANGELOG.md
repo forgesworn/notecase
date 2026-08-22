@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.3.0] - unreleased
+
+- **One wallet on several devices: the notes themselves can live on your
+  relays.** `notecase sync on`, off until you ask for it, and separate from
+  the mint-list backup - agreeing to publish where you bank is not agreeing
+  to publish what you hold. Every note record travels as its own
+  addressable event (kind 30078, `d` = `lnurlcash-note:<id>`), NIP-44 to
+  the same seed-derived key the mint list uses, which is deliberately not
+  your npub. Derivation counters travel too, one record per device, merged
+  by taking the highest anyone has claimed - which is what stops two
+  wallets on one seed handing out the same index, the one thing the
+  recovery words could not do on their own.
+
+  `notecase sync` pulls, lets the mints settle anything new, then publishes
+  what changed. Two rules the merge will not break: a note this wallet has
+  spent is never returned to spendable by a relay copy, however new that
+  copy is, and a note any device reports as spent is spent everywhere. The
+  relay is not the arbiter of what is spendable; the mint is, and the check
+  sweep runs over anything a sync brings in that this wallet had not seen.
+
+  A note in a terminal state travels without its secret - the record is how
+  the other device learns the note is gone, and a burned k1 has no reason
+  to sit on a relay. THREAT-MODEL.md has a section on what this costs: your
+  seed was always the whole wallet, and this makes it sufficient as well as
+  necessary, because the money becomes fetchable from a public relay by
+  anyone holding your words.
+
+  The PWA gets an "Across devices" card in Settings carrying both switches,
+  which also puts the mint-list backup within reach of a phone for the
+  first time - a wallet restored from words on a new device could not
+  recover its own mint list without it.
+- The README no longer tells you to build from source and clone four
+  sibling repos. It has been on npm since 0.2.0.
+
 ## [0.2.0] - 2026-08-22
 
 Needs `lnurlcash-kit` 0.2.0.

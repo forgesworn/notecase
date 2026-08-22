@@ -206,6 +206,20 @@ export type WalletData = {
     // something actually changed rather than on a flag that a crash can
     // lose or a restore can carry in wrongly.
     mintBackupPushed?: string
+    // Keeping the NOTES on relays too, so a second device on the same seed
+    // holds the same money rather than a second, separate purse. A much
+    // bigger thing to switch on than the mint list: relays then hold
+    // ciphertext of bearer secrets. Off unless asked for, and separately
+    // from the list.
+    noteSync?: boolean
+    // What was last published per note id, so a push carries the records
+    // that actually changed rather than the whole purse every time.
+    noteSyncPushed?: Record<string, string>
+    // This wallet's own name among the devices sharing one seed. Counters
+    // are published per device and merged by taking the highest, so each
+    // device needs to know which record is its own to write. Random, local,
+    // and never shown to a mint.
+    deviceId?: string
     nostrSeenWrapIds?: string[]
     nostrLastCheck?: number
     // A lightning address claimed at a mint, as name@host. Payments to it

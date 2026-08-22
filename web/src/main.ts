@@ -2896,6 +2896,91 @@ const viewSettings = (): void => {
     nostr.append(publish)
     body.append(nostr)
 
+    // Across devices: the mint list, and - much bigger - the notes.
+    //
+    // Two switches, never one. Agreeing to publish WHERE you bank is not
+    // agreeing to publish WHAT YOU HOLD, and the second one puts bearer
+    // secrets on a relay. Each says what it does before it is flipped.
+    const across = el(`<div class="card"><h3>Across devices</h3>
+      <p class="warn" style="text-align:left;padding-top:12px">Both of these publish under a key derived from your recovery words - never your npub - so nobody can tell they are yours. Both need those words, and only those words, to read back.</p>
+    </div>`)
+
+    const switchRow = (
+      label: string,
+      detail: string,
+      on: boolean,
+      flip: (next: boolean) => Promise<void>
+    ): HTMLElement => {
+      const wrap = el(`<div style="padding-top:12px"></div>`)
+      const button = el(
+        `<button class="btn ${on ? '' : 'btn-ghost'}">${on ? icons.check : icons.upload}<span></span></button>`
+      )
+      button.querySelector('span')!.textContent = on ? `${label}: on` : `Turn on ${label.toLowerCase()}`
+      button.addEventListener('click', () =>
+        busy(button as HTMLButtonElement, async () => {
+          await flip(!on)
+          viewSettings()
+        })
+      )
+      const note = el(`<p class="fineline" style="text-align:left;padding-top:6px"></p>`)
+      note.textContent = detail
+      wrap.append(button, note)
+      return wrap
+    }
+
+    if (!w.hasSeed()) {
+      across.append(
+        el(`<p class="fineline" style="text-align:left;padding-top:12px">This wallet was made before recovery words existed, so there is no key to publish under.</p>`)
+      )
+    } else {
+      across.append(
+        switchRow(
+          'Mint list',
+          'Which mints you use and which keys you pinned. Not your notes, not your balance. Without it, your words alone cannot tell a new device where to ask.',
+          w.mintBackupEnabled(),
+          async next => {
+            await withRelays(t => w.setMintBackup(next, t))
+            if (next) {
+              const result = await withRelays(t => w.pushMintBackup(t))
+              toast(result.ok.length ? `Mint list on ${result.ok.length} relay(s)` : 'No relay took the mint list', result.ok.length ? 'ok' : 'err')
+            } else toast('Mint list backup off.')
+          }
+        )
+      )
+      across.append(
+        switchRow(
+          'Note store',
+          'The notes themselves, so this device and your others hold one purse instead of several. The records carry the secrets that ARE the money: encrypted, but on a relay. Anyone with your words can then take it without your phone.',
+          w.noteSyncEnabled(),
+          async next => {
+            await withRelays(t => w.setNoteSync(next, t))
+            toast(next ? 'Note store on.' : 'Note store off.', next ? 'ok' : '')
+          }
+        )
+      )
+      if (w.noteSyncEnabled()) {
+        const syncNow = el(`<button class="btn btn-ghost" style="margin-top:12px">${icons.refresh}<span>Sync now</span></button>`)
+        syncNow.addEventListener('click', () =>
+          busy(syncNow as HTMLButtonElement, async () => {
+            const result = await withRelays(t => w.syncNotes(t))
+            const parts: string[] = []
+            if (result.added.length) parts.push(`took in ${result.added.length}`)
+            if (result.spentElsewhere.length) parts.push(`${result.spentElsewhere.length} spent elsewhere`)
+            if (result.updated.length) parts.push(`${result.updated.length} updated`)
+            const published = result.pushed.filter(id => id !== '#counters').length
+            if (published) parts.push(`published ${published}`)
+            toast(
+              parts.length ? `${parts.join(', ')} - balance ${sats(w.balanceMsat())} sat` : 'Everything already matches.',
+              'ok'
+            )
+            viewSettings()
+          })
+        )
+        across.append(syncNow)
+      }
+    }
+    body.append(across)
+
     // lightning address
     const address = el(`<div class="card"><h3>Lightning address</h3>
       <p class="warn" style="text-align:left;padding-top:12px">An address anyone can pay from any Lightning wallet. What arrives is a note sealed to this wallet's Nostr key, so it is yours seconds after it is paid, and the mint holds it for no longer than that.</p>

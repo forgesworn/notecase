@@ -94,16 +94,38 @@ secret, before its hash goes anywhere**. A crash between the two wastes an
 index, which costs nothing. The other order would hand a mint a secret the
 wallet could never find its way back to.
 
-Two things the words cannot do. They will not find a note somebody handed
-you that you have not rotated yet, because that secret came off their
-seed - the wallet lists those and `notecase adopt` moves them onto yours
-with one free rotate each. And two devices on one seed will hand out the
-same index twice; this is a single-device wallet plus restore, which is
-exactly what the words promise and no more.
+One thing the words cannot do on their own: they will not find a note
+somebody handed you that you have not rotated yet, because that secret
+came off their seed - the wallet lists those and `notecase adopt` moves
+them onto yours with one free rotate each.
 
 The passphrase-sealed export (`notecase backup export`) is still there and
 still worth having: it carries mints, pins, history and pending outcomes,
 none of which the words can rebuild.
+
+### One wallet on several devices
+
+The words find your notes again; they do not let two devices hold the same
+notes at once. `notecase sync on` does, and it is off until you say so.
+
+Every note record - k1 included - goes to your relays as one addressable
+event per note, encrypted NIP-44 under a key derived from your seed that
+is deliberately not your npub. Your derivation counters go too, one record
+per device, merged by taking the highest anyone has claimed, so two
+wallets on one seed stop handing out the same index. `notecase sync` pulls,
+lets the mints settle anything new, then publishes what changed.
+
+Read [THREAT-MODEL.md](THREAT-MODEL.md) before you turn it on. The short
+version: your seed was always the whole wallet, and this makes the seed
+sufficient as well as necessary - the money becomes fetchable from a
+public relay by anyone who has your words. What a relay sees is
+ciphertext, how many records there are, and when they change.
+
+Two rules the merge will not break. A note this wallet has spent is never
+returned to spendable by a relay copy, however new that copy is. A note
+any device reports as spent is spent everywhere. The relay is not the
+arbiter of what is spendable - the mint is, and the check sweep runs over
+anything a sync brings in that this wallet had not seen before.
 
 ## What the mint knows
 
@@ -143,18 +165,14 @@ is the trade, stated plainly, so you can decide whether you like it.
 
 ## Use
 
-Not on npm yet - build from source, with the sibling repos it links
-against until those publish:
+```bash
+npm install -g @forgesworn/notecase
+```
+
+Or from source:
 
 ```bash
-git clone https://github.com/TheCryptoDonkey/lnurlcash-kit
-git clone https://github.com/TheCryptoDonkey/lnurlcash-conformance
-git clone https://github.com/forgesworn/keystore-kit
-git clone https://github.com/forgesworn/moneyer
 git clone https://github.com/forgesworn/notecase
-(cd lnurlcash-kit && npm install && npm run build)
-(cd keystore-kit && npm install)   # its prepare script builds it
-(cd moneyer && npm install && npm run build)
 cd notecase && npm install && npm run build
 alias notecase="node $PWD/dist/cli.js"
 ```
@@ -193,6 +211,9 @@ notecase heartwood trust <npub|nip05>  # the device stores notes from this sende
 notecase heartwood pair [label]        # mints a bunker URI for another wallet, one hold; first pairing needs the cable
 notecase heartwood collect             # brings in what arrived at the device by wrap
 notecase backup shares --threshold 2 --count 3
+notecase sync on                       # keep the notes themselves on your relays
+notecase sync                          # pull, let the mints settle, publish what changed
+notecase sync status
 ```
 
 ### Checking your notes
