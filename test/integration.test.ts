@@ -14,7 +14,7 @@ import {makeWallet} from './helpers.ts'
 // conserved at every step, both sides' books balancing.
 
 let mint: {moneyer: Moneyer; backend: FakeBackend} | null = null
-const startMint = async () => {
+const startMint = async (overrides: {mintFee?: {baseFeeMsat: number; feePpm: number}} = {}) => {
   const backend = createFakeBackend()
   const moneyer = await createMoneyer(
     {
@@ -26,6 +26,7 @@ const startMint = async () => {
       maxSendableMsat: 100_000_000,
       minMintMsat: 1000,
       mintFee: null,
+      ...overrides,
       signingKey: bytesToHex(randomBytes(32)),
       dbPath: ':memory:',
       backend: {kind: 'fake'},
@@ -155,5 +156,49 @@ describe('notecase against moneyer', () => {
     expect(events.some(event => event.kind === 'melt-returned')).toBe(true)
     expect(wallet.wallet.balanceMsat()).toBe(21_000)
     expect(moneyer.store.outstandingLiabilityMsat()).toBe(21_000)
+  })
+
+  // The mint keeps whole sats: LUD-25 says nothing about rounding, and both
+  // moneyer and dni's reference mint ceiling the fee, which is the LOW end
+  // of what the advertised formula allows. A wallet that quotes the other
+  // end promises a holder more than it can hand over. This is the arithmetic
+  // that used to disagree, run against the mint itself rather than a model
+  // of it.
+  it('is credited the floor of the fee band, not the hope', async () => {
+    // The live posture: 1 sat plus 0.2%, which on this amount leaves the
+    // fee 300 msat short of a whole sat and forces the question.
+    const {moneyer, backend} = await startMint({mintFee: {baseFeeMsat: 1000, feePpm: 2000}})
+    const wallet = makeWallet()
+    await wallet.wallet.addMint(`mint@${new URL(moneyer.url).host}`)
+
+    const {pending} = await wallet.wallet.startMint(150_000)
+    expect(pending.expectedNetMsat).toBe(148_700)
+    expect(pending.minNetMsat).toBe(148_000)
+
+    backend.control.settleInvoice(pending.id)
+    const claimed = await wallet.wallet.awaitMint(pending, {timeoutMs: 5_000, intervalMs: 20})
+
+    // What the mint actually credited. Showing expectedNetMsat would have
+    // been a 700 msat lie told to the holder before they paid.
+    expect(claimed?.note.amountMsat).toBe(pending.minNetMsat)
+    expect(claimed!.note.amountMsat).toBeLessThan(pending.expectedNetMsat)
+    expect(claimed!.note.amountMsat % 1000).toBe(0)
+    expect(moneyer.store.outstandingLiabilityMsat()).toBe(claimed!.note.amountMsat)
+  })
+
+  it('states one figure when the fee lands on a whole sat anyway', async () => {
+    // Nothing to hedge about here: 1 sat flat on any amount is already
+    // whole, so both ends of the band agree and the wallet must not
+    // manufacture a range out of it.
+    const {moneyer, backend} = await startMint({mintFee: {baseFeeMsat: 1000, feePpm: 0}})
+    const wallet = makeWallet()
+    await wallet.wallet.addMint(`mint@${new URL(moneyer.url).host}`)
+
+    const {pending} = await wallet.wallet.startMint(150_000)
+    expect(pending.minNetMsat).toBe(pending.expectedNetMsat)
+
+    backend.control.settleInvoice(pending.id)
+    const claimed = await wallet.wallet.awaitMint(pending, {timeoutMs: 5_000, intervalMs: 20})
+    expect(claimed?.note.amountMsat).toBe(149_000)
   })
 })
