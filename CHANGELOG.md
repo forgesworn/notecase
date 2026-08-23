@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.1] - 2026-08-23
+
+- **A heartwood in relay mode now says which door to use.** Found on the
+  bench: the device answered the cable with `use heartwood_note_* over the
+  relay`, which the wallet passed through as raw firmware text. That
+  refusal is correct and deliberate - the USB note surface is closed while
+  the relay loop runs, because its gated commands block for thirty seconds
+  on a button press and would stall it - so the wallet now explains it,
+  says the cable path wants a device in USB mode with the radio off, and
+  offers a button straight to the Hardware signer screen, which speaks the
+  surface that device is actually serving.
+- An unrecognised refusal is still passed through word for word. A reason
+  nobody has seen before is more use than "unsupported".
+
 ## [0.9.0] - 2026-08-23
 
 - **An error you can actually quote.** A toast was gone in 3.4 seconds and

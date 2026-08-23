@@ -396,6 +396,15 @@ spent and approving it is bookkeeping. Refusing that second prompt does
 not lose anything: the money is here, and the vault's own picture is what
 is stale.
 
+**A heartwood in relay mode will refuse the cable, and that is correct.**
+Its USB note surface is closed while the relay loop runs, because the
+gated commands block for thirty seconds on a button press and that would
+stall the relay. The locker is served over Nostr instead, as
+`heartwood_note_*` NIP-46 extensions, which is the Hardware signer screen
+- so the wallet says so and offers the button rather than reporting a
+fault. The cable path wants a device in USB mode, radio off, or dni's
+lnurl-vault.
+
 The device's identity is checked with a challenge it cannot have prepared
 for - a fresh nonce every time, the signature verified here - and pinned
 on first sight. A vault answering with a different key later is either a
