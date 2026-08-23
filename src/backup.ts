@@ -69,6 +69,12 @@ const isWalletData = (data: unknown): data is WalletData => {
   if (!isRecord(data.settings)) return false
   if (data.settings.defaultMintHost !== undefined && typeof data.settings.defaultMintHost !== 'string') return false
   if (data.settings.nwcUri !== undefined && typeof data.settings.nwcUri !== 'string') return false
+  if (
+    data.settings.vaultPubkey !== undefined &&
+    (typeof data.settings.vaultPubkey !== 'string' || !HEX64.test(data.settings.vaultPubkey))
+  ) {
+    return false
+  }
 
   if (!isRecord(data.pubkeyPins)) return false
   if (Object.values(data.pubkeyPins).some(pin => typeof pin !== 'string' || !HEX.test(pin))) return false

@@ -44,6 +44,16 @@ import {
   type BrowserStore
 } from './browser-store.ts'
 import {nfcAvailable, scanAvailable, scanNfc, scanQr, writeNfc} from './scanner.ts'
+import {connectVault, serialSupported} from './vaultserial.ts'
+import {
+  VaultClient,
+  collectFromVault,
+  depositToVault,
+  storageAdvice,
+  type VaultError,
+  type VaultInfo,
+  type VaultNote
+} from '../../src/vault.ts'
 import {icons} from './icons.ts'
 import {rosette} from './guilloche.ts'
 import {banknote} from './banknote.ts'
@@ -2884,6 +2894,174 @@ const viewCheck = (): void => {
   })
 }
 
+// ---------- a hardware vault on the end of a cable ----------
+
+// The signer screen above reaches the same device through a relay. This
+// one reaches it through the wire, speaking the lnurl-vault command
+// protocol - which means it also works with a vault that has never been
+// paired for Nostr at all, and with nothing on the network in the loop.
+let vaultClient: VaultClient | null = null
+
+const viewVault = (): void => {
+  const w = wallet!
+  let info: VaultInfo | null = null
+  let deviceNotes: VaultNote[] = []
+  let identity: string | null = null
+
+  // Asks the device what it is and what it holds, and checks its identity
+  // against the one this wallet pinned. A vault answering with a different
+  // key is either a different device or a wiped one, and both are worth
+  // stopping for.
+  const refresh = async (): Promise<void> => {
+    info = await vaultClient!.info()
+    try {
+      const answered = await vaultClient!.identify()
+      identity = answered.pubkey
+      const pinned = w.data.settings.vaultPubkey
+      if (!pinned) {
+        w.data.settings.vaultPubkey = answered.pubkey
+        await store!.save()
+      } else if (pinned !== answered.pubkey) {
+        toast('This is NOT the vault this wallet knows - its identity key has changed.', 'err')
+      }
+    } catch (err) {
+      // A build with no identity is not a broken one: say nothing rather
+      // than warn about a feature the device never claimed to have.
+      if ((err as VaultError).code !== 'unsupported') throw err
+    }
+    deviceNotes = (await vaultClient!.listNotes()).notes
+  }
+
+  const draw = (): void => {
+    show(() => {
+      const view = el('<div class="view"></div>')
+      view.append(topBar('Hardware vault', viewSettings))
+      const body = el('<div class="stack"></div>')
+      view.append(body)
+
+      if (!vaultClient) {
+        body.append(
+          el(`<div class="hint">${icons.info}<span><b>Plug the vault in and connect.</b> It makes its own note secrets and never hands one over without a press on the device, so what it holds cannot be spent from this machine alone.</span></div>`)
+        )
+        const connect = el(`<button class="btn btn-silver">${icons.shield}<span>Connect over USB</span></button>`) as HTMLButtonElement
+        connect.addEventListener('click', () =>
+          busy(connect, async () => {
+            const {transport} = await connectVault()
+            vaultClient = new VaultClient(transport)
+            await refresh()
+            draw()
+          })
+        )
+        body.append(connect)
+        return view
+      }
+
+      // What it is, and whether anything it says about its notes can be
+      // believed. A vault that cannot read its own storage reports zero
+      // notes, and repeating that at someone is telling them their money
+      // is gone.
+      const card = el('<div class="card"><h3>The device</h3></div>')
+      const rows = el('<div class="stack" style="gap:4px;padding-top:12px"></div>')
+      const row = (label: string, value: string) => {
+        const line = el('<div class="kv"><span></span><b></b></div>')
+        line.querySelector('span')!.textContent = label
+        line.querySelector('b')!.textContent = value
+        rows.append(line)
+      }
+      if (info?.fwVersion) row('firmware', info.fwVersion)
+      if (info?.board) row('board', info.board)
+      row('notes', String(info?.noteCount ?? 0))
+      if (identity) row('identity', `${identity.slice(0, 16)}…`)
+      card.append(rows)
+      if (info?.storage && info.storage !== 'ok') {
+        card.append(el(`<p class="warn"><strong>${esc(info.storage)}.</strong> ${esc(storageAdvice(info.storage))}</p>`))
+      }
+      if (info?.capabilities?.gated === false) {
+        card.append(
+          el('<p class="warn"><strong>This build has no on-device confirmation.</strong> It cannot release a secret at all, so nothing can be collected off it here.</p>')
+        )
+      }
+      for (const [name, state] of Object.entries(info?.inputs ?? {})) {
+        if (state !== 'stuck') continue
+        card.append(
+          el(`<p class="warn">Its <b>${esc(name)}</b> button has been held down since it booted, so it cannot answer a prompt. That is a broken button rather than a security problem - but every prompt on this device can now only be approved or left to time out.</p>`)
+        )
+      }
+      body.append(card)
+
+      const holdings = deviceNotes.filter(note => note.state === 'confirmed')
+      const off = el('<div class="card"><h3>On the vault</h3></div>')
+      if (!holdings.length) {
+        off.append(
+          el(`<p class="warn" style="text-align:left;padding-top:12px">${
+            info?.storage && info.storage !== 'ok'
+              ? 'Nothing readable - see above. That is not the same as nothing there.'
+              : 'Nothing on it yet.'
+          }</p>`)
+        )
+      }
+      for (const note of holdings) {
+        const line = el('<div class="row"><div class="stack" style="gap:2px"><b></b><span class="fineline"></span></div></div>')
+        line.querySelector('b')!.textContent = `${sats(note.amountMsat)} sat`
+        line.querySelector('span')!.textContent = `${note.host} · ${note.id}`
+        const take = el(`<button class="btn btn-ghost">${icons.download}<span>Collect</span></button>`) as HTMLButtonElement
+        take.addEventListener('click', () =>
+          busy(take, async () => {
+            toast('Two presses on the device: one to release it, one to write it off.')
+            const result = await collectFromVault(w, vaultClient!, note)
+            toast(`Collected ${sats(result.received.note.amountMsat)} sat`, 'ok')
+            if (!result.clearedOnDevice) {
+              toast('The money is here, but the vault still lists it - collect again to clear it.', 'err')
+            }
+            result.received.warnings.forEach(warning => toast(warning, 'err'))
+            await refresh()
+            draw()
+          })
+        )
+        line.append(take)
+        off.append(line)
+      }
+      body.append(off)
+
+      const live = w.liveNotes().sort((a, b) => b.amountMsat - a.amountMsat)
+      const onto = el(`<div class="card"><h3>Put a note on it</h3>
+        <p class="warn" style="text-align:left;padding-top:12px">The vault makes a fresh secret, the mint rotates the note into it, and this wallet's own secret never goes down the cable. No press needed: nothing is being disclosed for anyone to approve.</p></div>`)
+      if (!live.length) onto.append(el('<p class="fineline">Nothing here to move.</p>'))
+      for (const note of live.slice(0, 12)) {
+        const line = el('<div class="row"><div class="stack" style="gap:2px"><b></b><span class="fineline"></span></div></div>')
+        line.querySelector('b')!.textContent = `${sats(note.amountMsat)} sat`
+        line.querySelector('span')!.textContent = `${note.mintHost} · ${note.id.slice(0, 8)}`
+        const put = el(`<button class="btn btn-ghost">${icons.upload}<span>Deposit</span></button>`) as HTMLButtonElement
+        put.addEventListener('click', () =>
+          busy(put, async () => {
+            const result = await depositToVault(w, vaultClient!, note)
+            toast(`${sats(note.amountMsat)} sat moved onto the vault`, 'ok')
+            if (!result.confirmedOnDevice) {
+              toast('The vault holds it but did not record it - it shows as pending until it does.', 'err')
+            }
+            await refresh()
+            draw()
+          })
+        )
+        line.append(put)
+        onto.append(line)
+      }
+      body.append(onto)
+
+      const disconnect = el(`<button class="btn btn-ghost">${icons.x}<span>Disconnect</span></button>`)
+      disconnect.addEventListener('click', () => {
+        vaultClient?.close()
+        vaultClient = null
+        draw()
+      })
+      body.append(disconnect)
+      return view
+    })
+  }
+
+  draw()
+}
+
 // ---------- settings ----------
 
 const viewSettings = (): void => {
@@ -2966,6 +3144,20 @@ const viewSettings = (): void => {
     openSigner.addEventListener('click', viewSigner)
     signer.append(openSigner)
     body.append(signer)
+
+    // hardware vault over USB
+    const vaultCard = el(`<div class="card"><h3>Hardware vault</h3>
+      <p class="warn" style="text-align:left;padding-top:12px">${
+        serialSupported()
+          ? 'A vault plugged into this machine holds note secrets it generates itself and never discloses. Move notes onto it, and take them off when you want to spend.'
+          : 'A vault talks to this wallet over USB, which needs Web Serial - Chrome or Edge on a desktop. This browser has not got it.'
+      }</p></div>`)
+    if (serialSupported()) {
+      const openVault = el(`<button class="btn">${icons.shield}<span>Open vault</span></button>`)
+      openVault.addEventListener('click', viewVault)
+      vaultCard.append(openVault)
+    }
+    body.append(vaultCard)
 
     // nostr
     const nostr = el(`<div class="card"><h3>Nostr</h3>

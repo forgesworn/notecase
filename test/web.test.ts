@@ -271,6 +271,20 @@ describe('the web wallet', () => {
     plan.mockRestore()
   })
 
+  it('says plainly that this browser cannot reach a vault over USB', async () => {
+    // happy-dom has no Web Serial, which is the same position Safari and
+    // Firefox are in. A button that cannot work must not be offered, and
+    // the reason has to be on screen - otherwise someone plugs a vault in
+    // and concludes it is broken.
+    document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
+    await until(() => button('Lock now') !== undefined, 'the settings screen')
+    expect(document.body.textContent).toContain('Hardware vault')
+    expect(document.body.textContent).toContain('needs Web Serial')
+    expect(button('Open vault')).toBeUndefined()
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(onHome, 'home')
+  })
+
   it('opens the check screen from settings and comes back', async () => {
     document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
     await until(

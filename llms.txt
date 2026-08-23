@@ -124,6 +124,18 @@ new NwcService({wallet, transport, persist, log?}) - NIP-47 service runtime,
   (alias/balanceMsat/makeInvoice/payInvoice/lookupInvoice), so the runtime
   fronts anything that can invoice and pay. walletBridge(wallet, opts) is
   the bearer-note one. newConnection(...), connectionUri(c), validateGrant(...)
+new VaultClient(transport) - the lnurl-vault command protocol over a wire:
+  info(), identify() (fresh nonce, signature verified here, TOFU-pinned),
+  listNotes() (pages; total is the count, one page is not), newSecret(),
+  newSecretPair(), confirm(), discard(), exportSecret() (gated),
+  importSecret(), markSpent() (gated). storageAdvice(state) says what to do.
+collectFromVault(wallet, client, note) - export -> receive (rotates at the
+  mint) -> mark_spent. Two device presses; the second failing does not lose
+  the money, it leaves the device's picture stale (clearedOnDevice: false).
+depositToVault(wallet, client, note) - new_secret on the device -> the mint
+  rotates into that hash -> confirm. The wallet's OWN secret never crosses
+  the cable, and no press is needed. web/src/vaultserial.ts has the WebSerial
+  transport for both framings (newline JSON, and heartwood's HW binary frame).
 createWalletFetch({allowPrivate?, proxy?}) - DNS-pinned fetch, loopback
   passthrough; with a socks5:// proxy it tunnels instead and resolves remotely
 payWithNwc(uri, pr) / invoiceFromNwc(uri, amountMsat, desc) / nwcStatus(uri)

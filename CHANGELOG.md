@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.7.0] - 2026-08-23
+
+- **A hardware vault on the end of a cable.** notecase already reached a
+  heartwood signer through a relay as a NIP-46 bunker; it now also speaks
+  the lnurl-vault command protocol straight down USB, which dni's vault
+  serves and heartwood answers verbatim. No relay, no network, and it
+  works with a device that has never been paired for Nostr at all.
+  Settings → Hardware vault, on a browser with Web Serial - and where
+  there is none, the screen says so rather than offering a button that
+  cannot work.
+- **Putting a note on the vault never sends its secret down the cable.**
+  The device generates a fresh secret, discloses only its hash, and the
+  mint rotates the note into it, so the value ends up under something this
+  machine has never seen. No button press: nothing is being disclosed for
+  anyone to approve.
+- **Taking one off costs two presses, and the screen says so first.** One
+  to release the secret, one to write the note off. Refusing the second
+  loses nothing - the money is here and the vault's picture is what is
+  stale, which is what the caller is told.
+- Both serial framings are handled without asking anyone which they have:
+  newline-delimited JSON, and heartwood's binary frame. A frame whose CRC
+  does not hold is dropped rather than acted on.
+- The device's identity is proved against a fresh nonce every time, the
+  signature verified here, and pinned on first sight. `get_info`'s storage
+  state is read before any note count is believed: a vault that cannot
+  read its own index reports zero notes, and repeating that at someone is
+  telling them their money is gone.
+- `Wallet.markDeposited` writes a note off when its value has been rotated
+  into a secret something else holds.
+
 ## [0.6.0] - 2026-08-23
 
 - **Something else can now spend from this wallet.** `nwc set` pointed
