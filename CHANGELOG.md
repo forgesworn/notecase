@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.1] - 2026-08-23
+
+- **A vault that refuses now says so, instead of hanging.** The firmware
+  answers at the frame layer with a NACK carrying a reason, and those were
+  being dropped: a **locked** device answers `get_info` normally and NACKs
+  everything after it, so connecting worked, the device appeared, and the
+  note list then sat for fifteen seconds before reporting that the vault
+  did not answer. It was answering. It was locked.
+- A build that serves its notes over a relay rather than the cable NACKs
+  the note frame outright, and read as "not a vault at all". It now says
+  to pair it as a signer instead.
+- A refusal during the connect probe is reported as what the device said,
+  rather than as an empty port. Silence, refusal and an answer are three
+  different things and a client that renders them the same sends its owner
+  hunting for a cable fault that is not there.
+
 ## [0.8.0] - 2026-08-23
 
 - **Connected apps, in the wallet you carry.** 0.6.0 could grant a NIP-47
