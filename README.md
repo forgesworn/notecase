@@ -207,6 +207,9 @@ notecase melt <bolt11> --notes c3e3,b8b4 # choose which notes fund it
 notecase transfer 50 --from a.example --to b.example   # move between mints
 notecase reconcile                     # resolves anything uncertain
 notecase nwc set                       # prompts for the connection URI
+notecase nwc grant <name> [--methods a,b] [--budget <sats>] [--max <sats>]
+notecase nwc grants | nwc revoke <name> | nwc refill <name> [--budget <sats>]
+notecase nwc serve                     # answer NIP-47 for the grants above
 notecase nostr init                    # your npub + publishes your inbox relays (kind 10050)
 notecase heartwood link bunker://...   # a heartwood signer as a note locker
 notecase heartwood inbox               # publishes the device's inbox relays (kind 10050), one hold
@@ -289,6 +292,66 @@ mint cannot invent a sender.
 
 If the mint refuses the name, the note that was going to pay for it comes
 straight home under a fresh secret.
+
+### Letting something else spend from this wallet
+
+`nwc set` points notecase at somebody else's Lightning. The other
+direction is `nwc grant`: a NIP-47 connection over **this** wallet, so an
+app that speaks Nostr Wallet Connect can be paid by it, or paid into it,
+without ever seeing a note.
+
+```
+notecase nwc grant shop                                   # invoice-only, the default
+notecase nwc grant agent --methods get_info,pay_invoice --budget 5000 --max 500
+notecase nwc grants                                       # what exists, and what it has spent
+notecase nwc revoke agent
+notecase nwc refill agent --budget 5000
+notecase nwc serve                                        # it answers only while this runs
+```
+
+What a connection may do is an allowlist, and the default grants no
+spending and does not even disclose the balance: `get_info`,
+`make_invoice`, `lookup_invoice`. Both of the others are opt-in, per
+connection, and **a connection that can spend must carry a budget** -
+there is no unlimited grant to hand out by accident. `--max` caps any
+single payment on top of that.
+
+That strictness is not caution for its own sake. A bearer note that leaves
+is cash: no chargeback, no invoice to dispute, nobody to ring. So:
+
+- A request is answered **once**. Its id is written down and persisted
+  *before* the payment is attempted, so a process that dies mid-melt comes
+  back knowing not to try again - a relay will happily hand the same
+  signed request over twice, and a wallet that treats the second one as
+  new has paid twice.
+- Requests on one connection are **serialised**, so two arriving together
+  cannot both read the same remaining budget and both decide there is room.
+- A request older than five minutes is not answered, whatever its own
+  `expiration` tag claims about itself.
+- Each connection has **its own service key**, so two grants share nothing
+  a relay can correlate, and revoking one is deleting a key rather than
+  re-issuing everybody else's.
+- The budget is charged what the **invoice** says, decoded here. A budget
+  checked against a figure the payer supplied is not a budget. It is
+  charged before the attempt and given back only when the wallet refused
+  outright - anything ambiguous keeps the charge, the same rule the melt
+  path already follows.
+
+`pay_invoice` is a melt, and a melt returns "in flight" rather than
+"paid". NIP-47 promises a preimage and a careful client checks it against
+the invoice, so the service waits for LUD-21 verify to prove settlement
+and answers with an error rather than a hopeful blank if it cannot. The
+`fees_paid` it reports is measured, not guessed: what the balance actually
+lost beyond the invoice amount.
+
+`make_invoice` is a mint quote. The note appears when the invoice is paid,
+which the serve loop's reconcile tick claims.
+
+Restoring a backup brings grants back **revoked**. The client secret that
+spends through one is in the file, so whoever wrote the file may still
+hold it, and a restore is exactly when somebody hands you one. They are
+listed rather than dropped; re-granting is one command and issues a fresh
+secret.
 
 ### Notes on a tag
 

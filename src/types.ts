@@ -14,6 +14,8 @@
 //              note can be reclaimed if the recipient never takes it
 //   spent      burned at the mint; kept for history
 
+import type {NwcConnection} from './nwcservice.ts'
+
 export type NoteState = 'live' | 'staged' | 'ambiguous' | 'melting' | 'sent' | 'spent'
 
 export type NoteOrigin = 'mint' | 'receive' | 'rotate' | 'split' | 'change' | 'merge' | 'recovered'
@@ -241,6 +243,10 @@ export type WalletData = {
   notes: NoteRecord[]
   pendingMints: PendingMint[]
   melts: MeltRecord[]
+  // Capabilities handed out over NIP-47: what someone else may ask this
+  // wallet to do, and what it may cost them. Each one carries a spending
+  // secret, so the store holding this must stay encrypted.
+  nwcConnections?: NwcConnection[]
 }
 
 export const emptyWallet = (): WalletData => ({

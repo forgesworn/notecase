@@ -58,7 +58,14 @@ notecase ladder [set <sats,...>] [--copies n] | prepare [--apply]
 notecase send <sats> --offline [--overpay] [--notes <id,..>] | receive --offline
 notecase address [claim <name> --mint <host>]
 notecase balance | list [--all] | reconcile | verify <note>
-notecase nwc set <uri> / status / clear
+notecase nwc set <uri> / status / clear          # spend THROUGH another wallet
+notecase nwc grant <name> [--methods a,b] [--budget <sats>] [--max <sats>]
+notecase nwc grants / revoke <name|id> / refill <name|id> [--budget <sats>] / serve
+  - the service side: NIP-47 over THIS wallet. allowlist defaults to
+    get_info,make_invoice,lookup_invoice; pay_invoice and get_balance are
+    opt-in and pay_invoice REQUIRES a budget. one request answered once
+    (id persisted before the melt), per-connection service keys, 5 min
+    request age cap. answers only while `nwc serve` runs.
 notecase backup export | shares [--threshold N --count M] | recover-key
 notecase sync [on|off|status]   # notes themselves on relays, several devices, one seed
 
@@ -105,10 +112,18 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   namePriceMsat(host?), registerName({name, mintHost?}), lightningAddress(),
   hasSeed(), counterFor(host), restoreFromMint(host), restoreAll(),
   legacyNotes(), adoptLegacyNotes(),
+  awaitMeltProof(melt, {timeoutMs?, intervalMs?}) -> MeltRecord | null (LUD-21 proof),
+  nwcGrants(), nwcGrant(idOrName), grantNwc({name, relays?, methods?, budgetMsat?, maxPaymentMsat?}),
+  revokeNwc(idOrName), refillNwc(idOrName, budgetMsat?),
   noteSyncEnabled(), setNoteSync(on, transport?), deviceId(),
   pullNotes(transport) -> NoteSyncResult, pushNotes(transport), syncNotes(transport)
 initWallet({pin?, home?, mnemonic?}) -> {..., mnemonic} returned ONCE
 newMnemonic() / seedFromMnemonic(words) - BIP39, English, no passphrase
+new NwcService({wallet, transport, persist, log?}) - NIP-47 service runtime,
+  .serve(connection) / .stop(id) / .close(); wallet is an NwcServiceWallet
+  (alias/balanceMsat/makeInvoice/payInvoice/lookupInvoice), so the runtime
+  fronts anything that can invoice and pay. walletBridge(wallet, opts) is
+  the bearer-note one. newConnection(...), connectionUri(c), validateGrant(...)
 createWalletFetch({allowPrivate?, proxy?}) - DNS-pinned fetch, loopback
   passthrough; with a socks5:// proxy it tunnels instead and resolves remotely
 payWithNwc(uri, pr) / invoiceFromNwc(uri, amountMsat, desc) / nwcStatus(uri)

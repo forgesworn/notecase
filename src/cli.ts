@@ -9,6 +9,8 @@ import {initWallet, openWallet, BadMnemonicError, NoWalletError, WrongPinError, 
 import {Wallet, BadSignatureError, InsufficientFundsError, PinMismatchError, WalletUsageError} from './wallet.ts'
 import {createWalletFetch} from './fetchguard.ts'
 import {invoiceFromNwc, nwcStatus, payWithNwc} from './nwc.ts'
+import {NwcService, connectionUri} from './nwcservice.ts'
+import {walletBridge} from './nwcbridge.ts'
 import {npubOf, poolTransport} from './nostr.ts'
 import type {NoteRecord} from './types.ts'
 
@@ -93,6 +95,51 @@ const resolveNoteIds = (wallet: Wallet, spec: string): string[] => {
     if (hits.length === 0) throw new WalletUsageError(`No live note here starts with ${prefix}.`)
     if (hits.length > 1) throw new WalletUsageError(`${prefix} matches ${hits.length} notes - give more of the id.`)
     return hits[0]!.id
+  })
+}
+
+// The service loop. Every live grant gets its own subscription under its
+// own key; a reconcile tick alongside them claims mint quotes that have
+// been paid and finishes melts the mint has since proved, because neither
+// of those happens on a request - they happen while nobody is asking.
+const serveNwc = async (wallet: Wallet, save: () => Promise<void>, everyMs: number): Promise<void> => {
+  const live = wallet.nwcGrants().filter(grant => !grant.revokedAt)
+  if (!live.length) {
+    throw new WalletUsageError('Nothing to serve - `notecase nwc grant <name>` hands out a connection first.')
+  }
+  const transport = poolTransport()
+  const service = new NwcService({
+    wallet: walletBridge(wallet),
+    transport,
+    persist: save,
+    log: message => console.log(`[nwc] ${message}`)
+  })
+  for (const grant of live) await service.serve(grant)
+  console.log(`Serving ${live.length} connection${live.length === 1 ? '' : 's'}. Ctrl-C to stop.`)
+  console.log('  This wallet answers only while this is running.')
+
+  let stopping = false
+  const stop = () => {
+    if (stopping) return
+    stopping = true
+    clearInterval(timer)
+    service.close()
+    transport.close()
+    console.log('\nStopped. Nothing is answered until it runs again.')
+  }
+  const timer = setInterval(() => {
+    void wallet
+      .reconcile()
+      .then(events => {
+        for (const event of events) console.log(`[nwc] ${event.kind}: ${event.detail}`)
+      })
+      .catch(err => console.log(`[nwc] reconcile failed: ${(err as Error).message}`))
+  }, everyMs)
+  process.on('SIGINT', stop)
+  process.on('SIGTERM', stop)
+  await new Promise<void>(resolve => {
+    process.on('SIGINT', resolve)
+    process.on('SIGTERM', resolve)
   })
 }
 
@@ -194,6 +241,9 @@ const main = async (): Promise<void> => {
       offline: {type: 'boolean', default: false},
       overpay: {type: 'boolean', default: false},
       copies: {type: 'string'},
+      methods: {type: 'string'},
+      budget: {type: 'string'},
+      max: {type: 'string'},
       file: {type: 'string'}
     }
   })
@@ -1013,8 +1063,61 @@ const main = async (): Promise<void> => {
         delete store.data.settings.nwcUri
         await store.save()
         console.log('NWC connection removed.')
+      } else if (sub === 'grant') {
+        // The other direction: a capability over THIS wallet, handed to
+        // somebody else. Spending is opt-in and, when granted, has to
+        // carry a budget - a bearer note that leaves cannot be recalled.
+        const name = uri ?? rest[2]
+        if (!name) throw new WalletUsageError('Give the connection a name: `notecase nwc grant <name>`.')
+        const methods = values.methods
+          ? values.methods.split(',').map(part => part.trim()).filter(Boolean)
+          : undefined
+        const grant = await wallet.grantNwc({
+          name,
+          ...(methods ? {methods} : {}),
+          ...(values.budget === undefined ? {} : {budgetMsat: parseAmountMsat(values.budget, values.msat)}),
+          ...(values.max === undefined ? {} : {maxPaymentMsat: parseAmountMsat(values.max, values.msat)})
+        })
+        console.log(`Granted ${grant.name} (${grant.id}): ${grant.methods.join(', ')}`)
+        if (grant.budgetMsat !== undefined) {
+          console.log(
+            `  budget: ${sats(grant.budgetMsat)}${grant.maxPaymentMsat === undefined ? '' : `, at most ${sats(grant.maxPaymentMsat)} per payment`}`
+          )
+        }
+        console.log('\nHand this to the app - whoever holds it can do the above, and only that:\n')
+        console.log(connectionUri(grant))
+        console.log('\n`notecase nwc serve` has to be running for it to answer.')
+      } else if (sub === 'grants') {
+        const grants = wallet.nwcGrants()
+        if (!grants.length) {
+          console.log('No connections granted. `notecase nwc grant <name>` makes one.')
+          return
+        }
+        for (const grant of grants) {
+          const state = grant.revokedAt ? 'revoked' : 'live'
+          const budget =
+            grant.budgetMsat === undefined
+              ? 'no spending'
+              : `${sats(grant.spentMsat)} of ${sats(grant.budgetMsat)} spent`
+          console.log(`${grant.id}  ${state.padEnd(8)} ${grant.name}`)
+          console.log(`  ${grant.methods.join(', ')}  |  ${budget}`)
+          if (grant.lastUsedAt) console.log(`  last used ${new Date(grant.lastUsedAt).toISOString()}`)
+        }
+      } else if (sub === 'revoke') {
+        const grant = await wallet.revokeNwc(uri ?? '')
+        console.log(`Revoked ${grant.name} (${grant.id}). It is answered no more.`)
+      } else if (sub === 'refill') {
+        const grant = await wallet.refillNwc(
+          uri ?? '',
+          values.budget === undefined ? undefined : parseAmountMsat(values.budget, values.msat)
+        )
+        console.log(`${grant.name} has ${sats(grant.budgetMsat ?? 0)} to spend again.`)
+      } else if (sub === 'serve') {
+        await serveNwc(wallet, store.save, values.wait ? Number(values.wait) * 1000 : 20_000)
       } else {
         console.log('nwc set <uri> | nwc status | nwc clear')
+        console.log('nwc grant <name> [--methods a,b] [--budget <sats>] [--max <sats>] | nwc grants')
+        console.log('nwc revoke <name|id> | nwc refill <name|id> [--budget <sats>] | nwc serve')
       }
       return
     }
