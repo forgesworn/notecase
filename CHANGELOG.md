@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.2] - 2026-08-23
+
+Both of these came off a real board, which is the point of benching.
+
+- **A missing `identify` is no longer fatal.** Identity is optional in the
+  vault protocol, and a device that has never heard of the command is
+  saying the same thing as one answering `unsupported` - heartwood answers
+  `bad_request: unknown cmd identify`. That was being treated as a fault,
+  which took the rest of the connect down with it.
+- **A refused write now says which kind it was.** `storage_full` has two
+  causes that want opposite responses from the owner: genuinely out of
+  room, where the answer is to spend or delete something, and an index the
+  device could not read this boot, where the answer is to reboot and
+  emphatically **not** to wipe - every note is still on flash and a wipe is
+  what would destroy them. The wallet re-reads the storage state and says
+  which. It never suggests a wipe under any of them, and a test holds it to
+  that.
+
 ## [0.9.1] - 2026-08-23
 
 - **A heartwood in relay mode now says which door to use.** Found on the

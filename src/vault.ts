@@ -164,7 +164,19 @@ export class VaultClient {
   // who has it. Physical possession is still the model.
   async identify(): Promise<{pubkey: string; nonce: string}> {
     const nonce = bytesToHex(randomBytes32())
-    const reply = await this.send<{pubkey: string; sig: string}>({cmd: 'identify', nonce})
+    const reply = await this.send<{pubkey: string; sig: string}>({cmd: 'identify', nonce}).catch(
+      (err: VaultError) => {
+        // A device that has never heard of the command is saying the same
+        // thing as one that answers `unsupported`: it has no identity to
+        // prove. heartwood answers `bad_request: unknown cmd identify`,
+        // and treating that as a fault would make an optional capability
+        // fatal to everything after it.
+        if (err.code === 'bad_request' && /unknown cmd/i.test(err.message)) {
+          throw new VaultError('unsupported', 'This device has no identity to prove.')
+        }
+        throw err
+      }
+    )
     if (!/^[0-9a-f]{64}$/i.test(reply.pubkey ?? '') || !/^[0-9a-f]{128}$/i.test(reply.sig ?? '')) {
       throw new VaultError('bad_request', 'The vault answered an identity challenge with the wrong shape.')
     }
@@ -280,7 +292,10 @@ const vaultReason = (code: string): string => {
     case 'unsupported':
       return 'This device cannot do that - it has no on-device confirmation wired.'
     case 'storage_full':
-      return 'The vault has no room to write. Read its storage state before doing anything else.'
+      // Deliberately vague on its own: this code has two causes wanting
+      // opposite responses, and only get_info's storage state tells them
+      // apart. storageFullMeans() is what a caller should show instead.
+      return 'The vault would not write. Its storage state says why - read that before doing anything else.'
     case 'not_found':
       return 'The vault has no note by that name.'
     case 'invalid_state':
@@ -302,6 +317,24 @@ const identityMessage = (nonceHex: string): Uint8Array => {
   message[prefix.length] = 0
   message.set(nonce, prefix.length + 1)
   return message
+}
+
+// What a refused write actually meant, which `storage_full` alone does not
+// say. The two causes want opposite responses from the owner, and getting
+// it the wrong way round is the one mistake here that destroys money: a
+// vault whose index is unreadable still holds every note, and wiping it to
+// "free space" throws away exactly what the refusal was protecting.
+export const storageFullMeans = (storage: string | undefined): string => {
+  if (storage === 'full') {
+    return 'The vault is genuinely out of room. Spend or delete some of what it holds, then try again. Do not wipe it.'
+  }
+  if (storage && STORAGE_UNREADABLE.has(storage)) {
+    return `${storageAdvice(storage)} Nothing can be written until that is sorted, and nothing you hold has been lost.`
+  }
+  if (storage === 'ok') {
+    return 'The vault refused to write although it reports its storage as healthy, which should not happen. Do not wipe it - report this instead.'
+  }
+  return 'This build does not report its storage state, so why it refused cannot be told from here. Do not wipe it.'
 }
 
 const randomBytes32 = (): Uint8Array => {

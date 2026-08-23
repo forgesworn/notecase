@@ -10,6 +10,7 @@ import {
   collectFromVault,
   depositToVault,
   storageAdvice,
+  storageFullMeans,
   type VaultNote,
   type VaultTransport
 } from '../src/vault.ts'
@@ -351,6 +352,34 @@ describe('putting a note onto the vault', () => {
   })
 })
 
+describe('a vault that will not write', () => {
+  // storage_full has two causes that want opposite responses, and getting
+  // it the wrong way round is the one mistake here that destroys money.
+  it('never suggests a wipe, whatever the storage state says', () => {
+    for (const state of ['full', 'index_unreadable', 'version_unsupported', 'unavailable', 'ok', undefined]) {
+      const said = storageFullMeans(state)
+      // wipe may be mentioned, but only ever to forbid it
+      if (/wipe/i.test(said)) expect(said).toMatch(/(do not|don't|never) wipe/i)
+    }
+  })
+
+  it('tells the two causes apart, because the answers are opposite', () => {
+    // genuinely out of room: make space
+    expect(storageFullMeans('full')).toMatch(/out of room/)
+    expect(storageFullMeans('full')).toMatch(/Spend or delete/)
+    // index unreadable: reboot, and emphatically do not wipe - the notes
+    // are all still on flash and a wipe is what would destroy them
+    expect(storageFullMeans('index_unreadable')).toMatch(/Reboot/)
+    expect(storageFullMeans('index_unreadable')).toMatch(/nothing you hold has been lost/)
+    expect(storageFullMeans('index_unreadable')).toMatch(/do NOT wipe/i)
+  })
+
+  it('says so plainly when the device claims to be healthy', () => {
+    expect(storageFullMeans('ok')).toMatch(/should not happen/)
+    expect(storageFullMeans(undefined)).toMatch(/does not report its storage state/)
+  })
+})
+
 describe('telling one vault from another', () => {
   it('checks the signature over a nonce it chose itself', async () => {
     const vault = fakeVault()
@@ -363,6 +392,23 @@ describe('telling one vault from another', () => {
     const second = await client.identify()
     expect(second.nonce).not.toBe(first.nonce)
     expect(second.pubkey).toBe(first.pubkey)
+  })
+
+  it('treats a device that has never heard of identify as one with no identity', async () => {
+    // heartwood answers `bad_request: unknown cmd identify`. Identity is
+    // optional in this protocol, so a fault there must not be fatal to
+    // everything after it - which is what the bench found.
+    const vault = fakeVault()
+    const client = new VaultClient(vault.transport)
+    const original = vault.transport.request.bind(vault.transport)
+    vault.transport.request = async (command, timeoutMs) =>
+      command.cmd === 'identify'
+        ? {ok: false, error: 'bad_request', message: 'unknown cmd identify'}
+        : original(command, timeoutMs)
+
+    await expect(client.identify()).rejects.toMatchObject({code: 'unsupported'})
+    // and the rest of the device still works
+    await expect(client.info()).resolves.toMatchObject({noteCount: 0})
   })
 
   it('refuses an answer that does not actually sign the challenge', async () => {
