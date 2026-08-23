@@ -78,7 +78,7 @@ export const STORAGE_UNREADABLE = new Set(['full', 'version_unsupported', 'unava
 export const storageAdvice = (storage: string): string => {
   switch (storage) {
     case 'full':
-      return 'The vault is out of room. Every note is still on it and none can be read - spend or delete some.'
+      return 'The vault is out of room. Every note is still on it and none can be read - free space first from the signer side (an unused app pairing or persona), then from notes already spent.'
     case 'index_unreadable':
       return 'The vault could not read its own index this boot. Reboot it. Do NOT wipe: the notes are still there and a wipe is what would destroy them.'
     case 'version_unsupported':
@@ -326,7 +326,17 @@ const identityMessage = (nonceHex: string): Uint8Array => {
 // "free space" throws away exactly what the refusal was protecting.
 export const storageFullMeans = (storage: string | undefined): string => {
   if (storage === 'full') {
-    return 'The vault is genuinely out of room. Spend or delete some of what it holds, then try again. Do not wipe it.'
+    // Notes have their own namespace but share the flash partition with
+    // the signer's identities, personas, app pairings and settings. On a
+    // device that is also a signer they are usually the bulk of it, so
+    // sending somebody to spend a note to free space would have them
+    // destroying value to reclaim room something else is using.
+    return [
+      'The vault is genuinely out of room. Nothing is damaged and nothing has been lost.',
+      'Its notes share one flash partition with the signer\'s identities, personas and app pairings, so free the cheap things first: remove an unused app pairing or persona.',
+      'Then clear out notes already spent. Spending a live one to make room is the last resort, not the first.',
+      'Do not wipe it.'
+    ].join(' ')
   }
   if (storage && STORAGE_UNREADABLE.has(storage)) {
     return `${storageAdvice(storage)} Nothing can be written until that is sorted, and nothing you hold has been lost.`

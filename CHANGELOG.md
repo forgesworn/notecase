@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.3] - 2026-08-23
+
+- **A full vault no longer points at your money first.** The advice on a
+  genuinely full device said to spend or delete what it holds. On a
+  heartwood that is wrong and expensive: the note locker has its own
+  namespace but shares one flash partition with the signer's identities,
+  personas, app pairings and settings, and on a device that is also a
+  signer those are usually the bulk of it. Somebody following that advice
+  would have spent a note - destroyed value - to reclaim room something
+  else was using. It now names the cheap fixes first, in order: an unused
+  app pairing or persona, then notes already spent, and only then spending
+  a live one. Still never a wipe.
+
 ## [0.9.2] - 2026-08-23
 
 Both of these came off a real board, which is the point of benching.

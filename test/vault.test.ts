@@ -364,9 +364,15 @@ describe('a vault that will not write', () => {
   })
 
   it('tells the two causes apart, because the answers are opposite', () => {
-    // genuinely out of room: make space
-    expect(storageFullMeans('full')).toMatch(/out of room/)
-    expect(storageFullMeans('full')).toMatch(/Spend or delete/)
+    // Genuinely out of room. The notes share a partition with the signer's
+    // identities and app pairings, so the cheap fix comes first: sending
+    // somebody to spend a note would have them destroying value to
+    // reclaim room something else is using.
+    const full = storageFullMeans('full')
+    expect(full).toMatch(/out of room/)
+    expect(full).toMatch(/share one flash partition/)
+    expect(full.indexOf('app pairing')).toBeLessThan(full.indexOf('Spending a live one'))
+    expect(full).toMatch(/last resort, not the first/)
     // index unreadable: reboot, and emphatically do not wipe - the notes
     // are all still on flash and a wipe is what would destroy them
     expect(storageFullMeans('index_unreadable')).toMatch(/Reboot/)
