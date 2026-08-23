@@ -227,6 +227,10 @@ export type WalletData = {
     // A lightning address claimed at a mint, as name@host. Payments to it
     // arrive as notes sealed to this wallet's Nostr key.
     lightningAddress?: string
+    // The hardware vault this wallet has met over the wire, by the identity
+    // key it proved. Trust on first use: a different key later is either a
+    // different device or a wiped one, and both deserve a stop.
+    vaultPubkey?: string
     // A paired heartwood signer holding notes of its own (heartwood.ts).
     // The client key is what the device bound; the store guards it.
     heartwood?: {uri: string; devicePubkey: string; relays: string[]; clientSecretHex: string}

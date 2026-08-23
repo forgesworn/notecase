@@ -353,6 +353,55 @@ hold it, and a restore is exactly when somebody hands you one. They are
 listed rather than dropped; re-granting is one command and issues a fresh
 secret.
 
+### A hardware vault on the end of a cable
+
+notecase already reaches a heartwood signer through a relay, as a NIP-46
+bunker. It now also reaches a vault straight down the wire, speaking the
+[lnurl-vault](https://github.com/dni/lnurl-vault) command protocol - which
+dni's vault serves and heartwood answers verbatim. No relay, no network,
+no third party, and it works with a device that has never been paired for
+Nostr at all.
+
+Settings → **Hardware vault** in the web wallet, on a browser with Web
+Serial (Chrome or Edge on a desktop; Safari and Firefox have not got it,
+and the screen says so rather than offering a button that cannot work).
+
+Both framings are handled, and which one is on the end of the cable is not
+something to ask a person: newline-delimited JSON for lnurl-vault, and
+heartwood's binary frame (`HW`, type, length, payload, CRC32) for a device
+whose serial port also carries signing traffic. A frame whose CRC does not
+hold is dropped rather than acted on - the command times out and is
+retried, which is the safe end of that trade when the message says whether
+a note was confirmed.
+
+**Putting a note on the vault never sends its secret down the cable.** The
+device generates a fresh secret, discloses only its hash, and the mint
+rotates the note into it, so the value ends up under something this
+machine has never seen and never could. That costs no button press,
+because nothing is being disclosed for anyone to approve.
+
+**Taking one off costs two presses**, and the screen says so before it
+starts: one to release the secret, one to write the note off afterwards.
+The order matters - the mint burns the device's secret during the receive,
+which rotates, so by the time the second prompt appears the note really is
+spent and approving it is bookkeeping. Refusing that second prompt does
+not lose anything: the money is here, and the vault's own picture is what
+is stale.
+
+The device's identity is checked with a challenge it cannot have prepared
+for - a fresh nonce every time, the signature verified here - and pinned
+on first sight. A vault answering with a different key later is either a
+different device or a wiped one, and both are worth stopping for. What
+that proves is narrow, and worth saying plainly: the thing answering now
+holds the same key as the thing that answered before. Not what it is, and
+not who has it. Physical possession is still the model.
+
+`get_info`'s storage state is read before any count is believed. A vault
+that cannot read its own index reports zero notes, and repeating that at
+someone is telling them their money is gone - so `index_unreadable` is
+shown with the one instruction that matters, which is reboot and
+emphatically do not wipe.
+
 ### Notes on a tag
 
 A note is one URL, so it fits in an NDEF URI record and a tag becomes a

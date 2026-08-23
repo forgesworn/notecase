@@ -1382,6 +1382,27 @@ export class Wallet {
     await this.persist()
   }
 
+  // The value left this wallet without being handed to a person: it was
+  // rotated into a secret something else now holds - a hardware vault on
+  // the end of a cable, typically. The mint has already burned this k1 by
+  // the time this is called, so the record is written off rather than
+  // offered back; a note left looking live is a balance that lies.
+  async markDeposited(note: NoteRecord, detail: string): Promise<void> {
+    if (note.state !== 'live' && note.state !== 'staged') {
+      throw new WalletUsageError(`Only a live note can be deposited, and that one is ${note.state}.`)
+    }
+    this.touch(note, 'spent')
+    note.detail = detail
+    await this.persist()
+  }
+
+  // The kit options this wallet drives its mint calls with, for a caller
+  // composing its own mutation - the vault flows do, because the device
+  // supplies the output hash and the kit call has to be made out here.
+  get options(): LnurlcashOptions {
+    return this.opts
+  }
+
   // The note as a URL: secret, amount, and - where the mint gave one - the
   // signature over both. The signature is the mint's own public statement
   // about this note, and carrying it is what lets a recipient check the
