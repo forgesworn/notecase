@@ -45,6 +45,8 @@ import {
 } from './browser-store.ts'
 import {nfcAvailable, scanAvailable, scanNfc, scanQr, writeNfc} from './scanner.ts'
 import {connectVault, serialSupported} from './vaultserial.ts'
+import {NwcService, connectionUri} from '../../src/nwcservice.ts'
+import {walletBridge} from '../../src/nwcbridge.ts'
 import {
   VaultClient,
   collectFromVault,
@@ -2894,6 +2896,169 @@ const viewCheck = (): void => {
   })
 }
 
+// ---------- connected apps ----------
+
+// The other side of the NWC screen in settings: not this wallet spending
+// through somebody else's Lightning, but somebody else spending through
+// this one.
+//
+// Issuing a grant from the CLI and being unable to see it here would be
+// the wrong way round. A capability you cannot revoke from the device in
+// your pocket is a bad capability, whichever machine issued it - so the
+// list, the budgets and the revoke are here whether or not this device is
+// the one answering.
+let nwcService: NwcService | null = null
+
+const viewConnections = (): void => {
+  const w = wallet!
+
+  const draw = (): void => {
+    show(() => {
+      const view = el('<div class="view"></div>')
+      view.append(topBar('Connected apps', viewSettings))
+      const body = el('<div class="stack"></div>')
+      view.append(body)
+      body.append(
+        el(`<div class="hint">${icons.info}<span><b>Letting something else use this wallet.</b> Each connection is a capability over your notes, so it may do only what you granted, spend only what you budgeted, and stops the moment you revoke it.</span></div>`)
+      )
+
+      // ---- what exists ----
+      const grants = w.nwcGrants()
+      const list = el('<div class="card"><h3>Connections</h3></div>')
+      if (!grants.length) {
+        list.append(el(`<p class="warn" style="text-align:left;padding-top:12px">None yet.</p>`))
+      }
+      for (const grant of grants) {
+        const row = el('<div class="stack" style="gap:4px;padding-top:12px"></div>')
+        const head = el('<div class="row"><div class="stack" style="gap:2px"><b></b><span class="fineline"></span></div></div>')
+        head.querySelector('b')!.textContent = grant.name
+        head.querySelector('span')!.textContent = grant.revokedAt
+          ? 'revoked'
+          : grant.methods.join(', ')
+        if (!grant.revokedAt) {
+          const revoke = el(`<button class="btn btn-ghost">${icons.x}<span>Revoke</span></button>`) as HTMLButtonElement
+          revoke.addEventListener('click', () =>
+            busy(revoke, async () => {
+              await w.revokeNwc(grant.id)
+              nwcService?.stop(grant.id)
+              toast(`${grant.name} revoked. It is answered no more.`, 'ok')
+              draw()
+            })
+          )
+          head.append(revoke)
+        }
+        row.append(head)
+        if (grant.budgetMsat !== undefined) {
+          const spent = el(`<p class="fineline"></p>`)
+          spent.textContent = `${sats(grant.spentMsat)} of ${sats(grant.budgetMsat)} sat spent${
+            grant.maxPaymentMsat === undefined ? '' : `, at most ${sats(grant.maxPaymentMsat)} sat per payment`
+          }`
+          row.append(spent)
+        } else if (!grant.revokedAt) {
+          row.append(el(`<p class="fineline">Cannot spend.</p>`))
+        }
+        if (!grant.revokedAt) {
+          const copy = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy its URI</span></button>`)
+          copy.addEventListener('click', () => void copyText(connectionUri(grant), 'Connection URI', true))
+          row.append(copy)
+        }
+        list.append(row)
+      }
+      body.append(list)
+
+      // ---- issue one ----
+      const make = el(`<div class="card"><h3>Let an app in</h3>
+        <div class="stack" style="gap:10px;padding-top:12px">
+          <div class="field"><label>What is it for</label><input data-name placeholder="the shop till" autocomplete="off" /></div>
+          <label class="kv" style="cursor:pointer"><span>May ask to be paid</span><input type="checkbox" data-invoice checked /></label>
+          <label class="kv" style="cursor:pointer"><span>May spend</span><input type="checkbox" data-spend /></label>
+          <label class="kv" style="cursor:pointer"><span>May see the balance</span><input type="checkbox" data-balance /></label>
+        </div></div>`)
+      const budget = el(`<div class="stack" hidden>
+        <p class="warn">A connection that can spend needs a budget. There is no unlimited one to hand out by accident.</p>
+        <div class="amount-input"><input data-budget inputmode="numeric" placeholder="0" /><span class="unit">sat budget</span></div>
+        <div class="amount-input"><input data-max inputmode="numeric" placeholder="0" /><span class="unit">sat per payment, optional</span></div>
+      </div>`)
+      const spend = make.querySelector('[data-spend]') as HTMLInputElement
+      spend.addEventListener('change', () => {
+        budget.hidden = !spend.checked
+      })
+      make.append(budget)
+      const issue = el(`<button class="btn btn-silver">${icons.plus}<span>Grant a connection</span></button>`) as HTMLButtonElement
+      issue.addEventListener('click', () =>
+        busy(issue, async () => {
+          const name = (make.querySelector('[data-name]') as HTMLInputElement).value.trim()
+          const methods = ['get_info', 'lookup_invoice']
+          if ((make.querySelector('[data-invoice]') as HTMLInputElement).checked) methods.push('make_invoice')
+          if ((make.querySelector('[data-balance]') as HTMLInputElement).checked) methods.push('get_balance')
+          const wholeSats = (selector: string): number | undefined => {
+            const raw = (budget.querySelector(selector) as HTMLInputElement).value.trim()
+            if (!raw) return undefined
+            const amount = Number(raw)
+            if (!Number.isSafeInteger(amount) || amount <= 0) {
+              throw new WalletUsageError('Give the budget in whole sats.')
+            }
+            return amount * 1000
+          }
+          if (spend.checked) methods.push('pay_invoice')
+          const budgetMsat = spend.checked ? wholeSats('[data-budget]') : undefined
+          if (spend.checked && budgetMsat === undefined) {
+            throw new WalletUsageError('Say what it may spend. There is no unlimited connection to hand out.')
+          }
+          const grant = await w.grantNwc({
+            name,
+            methods,
+            ...(budgetMsat === undefined ? {} : {budgetMsat}),
+            ...(spend.checked && wholeSats('[data-max]') !== undefined
+              ? {maxPaymentMsat: wholeSats('[data-max]')!}
+              : {})
+          })
+          if (nwcService) await nwcService.serve(grant)
+          await copyText(connectionUri(grant), 'Connection URI', true)
+          toast(`${grant.name} granted, and its URI copied.`, 'ok')
+          draw()
+        })
+      )
+      make.append(issue)
+      body.append(make)
+
+      // ---- answering them ----
+      const live = grants.filter(grant => !grant.revokedAt)
+      const serving = el(`<div class="card"><h3>Answering</h3>
+        <p class="warn" style="text-align:left;padding-top:12px">A connection is answered only while something is listening for it. This wallet can do that while this screen is open - close the tab and it stops. For a connection that has to work overnight, run <b>notecase nwc serve</b> on a machine that stays up.</p></div>`)
+      const toggle = el(
+        `<button class="btn ${nwcService ? 'btn-ghost' : ''}">${nwcService ? icons.x : icons.bolt}<span>${nwcService ? 'Stop answering' : 'Answer while this is open'}</span></button>`
+      ) as HTMLButtonElement
+      toggle.addEventListener('click', () =>
+        busy(toggle, async () => {
+          if (nwcService) {
+            nwcService.close()
+            nwcService = null
+            toast('Stopped. Nothing is answered until it runs again.')
+            draw()
+            return
+          }
+          if (!live.length) throw new WalletUsageError('Nothing to answer yet - grant a connection first.')
+          const service = new NwcService({
+            wallet: walletBridge(w),
+            transport: poolTransport(),
+            persist: () => store!.save()
+          })
+          for (const grant of live) await service.serve(grant)
+          nwcService = service
+          toast(`Answering ${live.length} connection${live.length === 1 ? '' : 's'}.`, 'ok')
+          draw()
+        })
+      )
+      serving.append(toggle)
+      body.append(serving)
+      return view
+    })
+  }
+
+  draw()
+}
+
 // ---------- a hardware vault on the end of a cable ----------
 
 // The signer screen above reaches the same device through a relay. This
@@ -3158,6 +3323,18 @@ const viewSettings = (): void => {
       vaultCard.append(openVault)
     }
     body.append(vaultCard)
+
+    // connections handed out over NIP-47
+    const apps = el(`<div class="card"><h3>Connected apps</h3>
+      <p class="warn" style="text-align:left;padding-top:12px">${
+        w.nwcGrants().filter(grant => !grant.revokedAt).length
+          ? `${w.nwcGrants().filter(grant => !grant.revokedAt).length} connection(s) may use this wallet. See what each may do, what it has spent, and revoke any of them.`
+          : 'Let an app be paid by this wallet, or spend from it up to a budget you set. Nothing can until you say so.'
+      }</p></div>`)
+    const openApps = el(`<button class="btn">${icons.bolt}<span>Connected apps</span></button>`)
+    openApps.addEventListener('click', viewConnections)
+    apps.append(openApps)
+    body.append(apps)
 
     // nostr
     const nostr = el(`<div class="card"><h3>Nostr</h3>
