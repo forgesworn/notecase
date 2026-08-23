@@ -52,10 +52,10 @@ Draft spec: https://github.com/lnurl/luds/pull/301
 notecase init [--insecure-plaintext] [--restore] | seed | restore | adopt
 notecase mints add <address|lnurl> / list / use <host>
 notecase mint <sats> [--manual] [--mint <host>]
-notecase receive <note> [--force] | send <sats> | melt <bolt11 [sats] | sats --to <addr> | sats --to-nwc> [--notes <id,..>]
+notecase receive <note> [--force] | send <sats> [--notes <id,..>] | melt <bolt11 [sats] | sats --to <addr> | sats --to-nwc> [--notes <id,..>]
 notecase check [--apply] [--resign] [--mint <host>]
 notecase ladder [set <sats,...>] [--copies n] | prepare [--apply]
-notecase send <sats> --offline [--overpay] | receive --offline
+notecase send <sats> --offline [--overpay] [--notes <id,..>] | receive --offline
 notecase address [claim <name> --mint <host>]
 notecase balance | list [--all] | reconcile | verify <note>
 notecase nwc set <uri> / status / clear
@@ -92,14 +92,16 @@ newer updatedAt wins; the mint, not the relay, decides what is spendable.
 
 openWallet({pin?, home?}) / initWallet(...) -> {data, save, encrypted, storeKey}
 new Wallet(data, save, {fetch?, timeoutMs?}) ->
-  receive(input, {acceptBadSignature?}), send(amountMsat), prepareExact(amountMsat),
+  receive(input, {acceptBadSignature?}), send(msat, host?, noteIds?), prepareExact(amountMsat),
   melt(pr, target), startMint(grossMsat), claimMint(pending, preimage),
   awaitMint(pending), reconcile(), checkNotes({apply?, mintHost?}) -> CheckReport,
   balanceMsat(), unrotatedMsat(), verifyNoteOffline(input), addMint(input),
   ladderFor(host), setLadder(host, sats[], copies), ladderPlan(host) -> LadderPlan,
   prepareExactFrom(msat, noteIds) - caller-chosen selection, refused if it cannot work,
-  prepareOffline(host), planOfflineSend(msat, host?) -> OfflineSelection,
-  sendOffline(msat, host?, {acceptOverpay?}), receiveOffline(input),
+  prepareOffline(host), planOfflineSend(msat, host?, noteIds?) -> OfflineSelection,
+  sendOffline(msat, host?, {acceptOverpay?, noteIds?}), receiveOffline(input),
+  - noteIds offline is the hand-over itself, not a pool: short pays nothing,
+    over needs acceptOverpay. sendToNostr(t, msat, to, host?, {noteIds?, memo?})
   namePriceMsat(host?), registerName({name, mintHost?}), lightningAddress(),
   hasSeed(), counterFor(host), restoreFromMint(host), restoreAll(),
   legacyNotes(), adoptLegacyNotes(),

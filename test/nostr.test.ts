@@ -2,7 +2,7 @@ import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
 import {finalizeEvent, generateSecretKey, getPublicKey, matchFilter, type Event, type Filter} from 'nostr-tools'
 import {nip44} from 'nostr-tools'
-import {Wallet} from '../src/wallet.ts'
+import {InsufficientFundsError, Wallet} from '../src/wallet.ts'
 import {
   GIFT_WRAP_KIND,
   INBOX_RELAYS_KIND,
@@ -192,6 +192,35 @@ describe('sending to an npub', () => {
     await expect(alice.reclaim(sent.note)).rejects.toThrow()
     await alice.markTaken(sent.note)
     expect(alice.sentNotes()).toHaveLength(0)
+  })
+
+  // The same choice the melt and hand-over paths give, on the path that
+  // seals a note to somebody's key: which note funds it is the holder's to
+  // make, and a selection that cannot work is refused rather than swapped.
+  it('cuts the note out of the ones the sender chose', async () => {
+    const theMint = await start()
+    const {transport} = fakeRelays()
+    const {wallet: alice} = makeWallet()
+    const {wallet: bob} = makeWallet()
+    const keep = (await alice.receive(fund(theMint, 40_000))).note
+    const spend = (await alice.receive(fund(theMint, 60_000))).note
+    await withIdentity(alice, ['wss://a.example'])
+    const bobId = await withIdentity(bob, ['wss://bob-inbox.example'])
+    await bob.publishInbox(transport)
+
+    const sent = await alice.sendToNostr(transport, 25_000, bobId.npub, undefined, {noteIds: [spend.id]})
+
+    expect(sent.note.amountMsat).toBe(25_000)
+    // The 40k note would have been the wallet's own first reach.
+    expect(alice.noteById(keep.id)?.state).toBe('live')
+    expect(alice.noteById(spend.id)?.state).toBe('spent')
+    expect(alice.balanceMsat()).toBe(75_000)
+
+    await expect(
+      alice.sendToNostr(transport, 50_000, bobId.npub, undefined, {noteIds: [keep.id]})
+    ).rejects.toThrow(InsufficientFundsError)
+    expect(alice.noteById(keep.id)?.state).toBe('live')
+    expect(alice.balanceMsat()).toBe(75_000)
   })
 
   it('falls back to our own relays, and says so, when the recipient has no inbox list', async () => {

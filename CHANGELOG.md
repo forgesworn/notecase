@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.0] - 2026-08-23
+
+- **Choose which notes to send, and which to hand over offline.** The
+  picker arrived on the melt screen in 0.4.0; it is now on Send too, on all
+  three paths - a note cut for someone, a note sealed to an npub, and an
+  offline hand-over. `notecase send <sats> --notes <id,id>` says the same
+  thing on the command line.
+- **Offline, the choice is the hand-over itself.** With no mint in the loop
+  nothing can be cut to size, so the notes ticked are what changes hands
+  rather than a pool to search within. What that costs is quoted before
+  anything moves: a selection worth more than the asking price names the
+  difference and needs accepting, and one worth less is refused rather than
+  topped up from a note nobody chose. `Wallet.planOfflineSend` and
+  `sendOffline` take the selection, `sendOffline` refusing with both
+  figures; `sendToNostr` takes it as `{noteIds}`.
+- A note that has never met its mint can be handed over offline. Splitting
+  one is refused, because that needs the mint - but passing it straight on
+  asks the mint for nothing, and a note taken offline is stored unrotated
+  until reconcile, so refusing there would have stranded exactly the notes
+  the offline path exists for.
+
 ## [0.4.0] - 2026-08-22
 
 - **Choose which notes to spend.** The wallet picks for you by default and
