@@ -44,6 +44,7 @@ import {bytesToHex, hexToBytes, randomBytes} from '@noble/hashes/utils.js'
 import {tryDecodeBolt11} from 'farrier-kit/bolt11'
 import {verifyPreimage} from 'farrier-kit/preimage'
 import type {MeltRecord, MintEntry, MintInfo, NoteOrigin, NoteRecord, PaymentRequestRecord, PendingMint, WalletData} from './types.ts'
+import {newConnection, type NwcConnection} from './nwcservice.ts'
 import {
   buildMintBackup,
   fetchMintBackup,
@@ -2295,6 +2296,46 @@ export class Wallet {
     }
   }
 
+  // Waits for a melt to prove itself. A melt's OK means in flight; the
+  // proof is LUD-21 verify handing back a preimage that really does settle
+  // the invoice, which anyone can check against its payment hash without
+  // trusting the mint. Returns the record once proven, null on timeout -
+  // never a guess, because the one caller that needs this is answering a
+  // payer who will check the preimage themselves.
+  async awaitMeltProof(
+    melt: MeltRecord,
+    options: {timeoutMs?: number; intervalMs?: number} = {}
+  ): Promise<MeltRecord | null> {
+    const timeoutMs = options.timeoutMs ?? 60_000
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new WalletUsageError('The wait must be a positive, finite number of milliseconds.')
+    }
+    if (!melt.verifyUrl) {
+      throw new WalletUsageError(
+        'That mint offers no LUD-21 verify, so this melt cannot be proved - `notecase reconcile` settles it instead.'
+      )
+    }
+    const deadline = now() + timeoutMs
+    for (;;) {
+      const verification = await fetchInvoiceVerification(melt.verifyUrl, this.opts)
+      if (
+        verification.settled &&
+        verification.preimage &&
+        verifyPreimage(verification.preimage, melt.paymentHash)
+      ) {
+        melt.proofPreimage = verification.preimage
+        melt.state = 'settled'
+        melt.updatedAt = now()
+        const note = this.noteById(melt.noteId)
+        if (note && note.state !== 'spent') this.touch(note, 'spent')
+        await this.persist()
+        return melt
+      }
+      if (now() > deadline) return null
+      await new Promise(resolve => setTimeout(resolve, options.intervalMs ?? 1_000))
+    }
+  }
+
   // ---- moving value between mints ----
 
   // A transfer is a mint at the destination paid for by a melt at the
@@ -2434,6 +2475,84 @@ export class Wallet {
       await this.persist()
       throw err
     }
+  }
+
+  // ---- capabilities handed out over NIP-47 ----
+  //
+  // The other side of nwcUri: not this wallet spending through somebody
+  // else's Lightning, but somebody else spending through this one. The
+  // runtime is nwcservice.ts; what lives here is the list, because a
+  // capability that is not written down is one that cannot be revoked.
+
+  nwcGrants(): NwcConnection[] {
+    return [...(this.data.nwcConnections ?? [])].sort((a, b) => b.createdAt - a.createdAt)
+  }
+
+  nwcGrant(idOrName: string): NwcConnection | undefined {
+    const wanted = idOrName.trim().toLowerCase()
+    const grants = this.nwcGrants()
+    return (
+      grants.find(grant => grant.id === wanted) ??
+      grants.find(grant => grant.name.toLowerCase() === wanted) ??
+      grants.find(grant => grant.id.startsWith(wanted))
+    )
+  }
+
+  async grantNwc(input: {
+    name: string
+    relays?: string[]
+    methods?: string[]
+    budgetMsat?: number
+    maxPaymentMsat?: number
+  }): Promise<NwcConnection> {
+    const name = input.name.trim()
+    if (!name) throw new WalletUsageError('A connection needs a name - it is how you revoke the right one later.')
+    if (name.length > 60) throw new WalletUsageError('That name is too long.')
+    if (this.nwcGrants().some(grant => !grant.revokedAt && grant.name.toLowerCase() === name.toLowerCase())) {
+      throw new WalletUsageError(`There is already a live connection called ${name}.`)
+    }
+    const relays = input.relays?.length ? input.relays : this.nostrRelays()
+    const connection = newConnection({
+      name,
+      relays,
+      ...(input.methods === undefined ? {} : {methods: input.methods}),
+      ...(input.budgetMsat === undefined ? {} : {budgetMsat: input.budgetMsat}),
+      ...(input.maxPaymentMsat === undefined ? {} : {maxPaymentMsat: input.maxPaymentMsat})
+    })
+    this.data.nwcConnections = [...(this.data.nwcConnections ?? []), connection]
+    await this.persist()
+    return connection
+  }
+
+  // Revoking is local and immediate: the service stops answering that
+  // pubkey. Nothing is published, because there is nothing to publish to -
+  // the holder of the URI simply stops being answered.
+  async revokeNwc(idOrName: string): Promise<NwcConnection> {
+    const grant = this.nwcGrant(idOrName)
+    if (!grant) throw new WalletUsageError(`No connection here called ${idOrName}.`)
+    if (grant.revokedAt) return grant
+    grant.revokedAt = now()
+    await this.persist()
+    return grant
+  }
+
+  // Puts the budget back where it started, for a grant that has spent what
+  // it was given and is trusted with more. Deliberately separate from
+  // granting: topping up is a decision, not a side effect of use.
+  async refillNwc(idOrName: string, budgetMsat?: number): Promise<NwcConnection> {
+    const grant = this.nwcGrant(idOrName)
+    if (!grant) throw new WalletUsageError(`No connection here called ${idOrName}.`)
+    if (grant.revokedAt) throw new WalletUsageError('That connection is revoked - grant a new one.')
+    if (grant.budgetMsat === undefined) throw new WalletUsageError('That connection cannot spend, so it has no budget.')
+    if (budgetMsat !== undefined) {
+      if (!Number.isSafeInteger(budgetMsat) || budgetMsat <= 0) {
+        throw new WalletUsageError('The budget must be a positive integer of milli-satoshis.')
+      }
+      grant.budgetMsat = budgetMsat
+    }
+    grant.spentMsat = 0
+    await this.persist()
+    return grant
   }
 
   // ---- reconciliation ----

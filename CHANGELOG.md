@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.6.0] - 2026-08-23
+
+- **Something else can now spend from this wallet.** `nwc set` pointed
+  notecase at somebody else's Lightning; `nwc grant` is the other
+  direction, a NIP-47 connection over this wallet that an app can be paid
+  by or paid into without ever seeing a note. `notecase nwc serve` answers
+  it, and it answers only while that runs.
+- **The policy is the feature, not a later hardening pass.** A bearer note
+  that leaves is cash. So the method list is an allowlist defaulting to no
+  spending and no balance disclosure; a connection that can spend must
+  carry a budget, and there is no unlimited grant to hand out by accident;
+  a request is answered once, its id persisted *before* the melt is
+  attempted, because a relay will hand the same signed request over twice;
+  requests on one connection are serialised so two cannot both read the
+  same remaining budget; a request older than five minutes is not answered
+  whatever its own expiration tag claims; and each connection has its own
+  service key, so two grants share nothing a relay can correlate.
+- The budget is charged what the invoice says, decoded here rather than
+  taken from the request, and given back only when the wallet refused
+  outright. `pay_invoice` waits for LUD-21 verify to prove settlement and
+  errors rather than answering with a preimage it cannot stand behind.
+- `Wallet.awaitMeltProof` waits for a melt's LUD-21 proof, which is what
+  that needed - useful anywhere a melt has to be provable, not just here.
+- Restoring a backup brings NIP-47 grants back **revoked**: the secret
+  that spends through one is in the file, and a restore is exactly when
+  somebody hands you one.
+
 ## [0.5.0] - 2026-08-23
 
 - **Choose which notes to send, and which to hand over offline.** The

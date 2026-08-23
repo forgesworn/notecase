@@ -127,6 +127,50 @@ const isWalletData = (data: unknown): data is WalletData => {
     if (!isTimestamp(pending.createdAt) || !isTimestamp(pending.updatedAt)) return false
   }
 
+  // A grant is a spending capability, and its client secret is in this
+  // file. Whoever wrote the file could keep a copy, so a restored grant is
+  // never live (see importBackup) - but it still has to be shaped like one
+  // before it is allowed anywhere near the wallet.
+  if (data.nwcConnections !== undefined) {
+    if (!Array.isArray(data.nwcConnections)) return false
+    for (const connection of data.nwcConnections) {
+      if (!isRecord(connection)) return false
+      if (typeof connection.id !== 'string' || connection.id.length > 64) return false
+      if (typeof connection.name !== 'string' || connection.name.length > 200) return false
+      for (const key of ['serviceSecretHex', 'clientSecretHex'] as const) {
+        if (typeof connection[key] !== 'string' || !HEX64.test(connection[key])) return false
+      }
+      for (const key of ['servicePubkey', 'clientPubkey'] as const) {
+        if (typeof connection[key] !== 'string' || !HEX64.test(connection[key])) return false
+      }
+      if (!Array.isArray(connection.relays) || connection.relays.length > 32) return false
+      if (connection.relays.some(relay => typeof relay !== 'string' || relay.length > 512)) return false
+      if (!Array.isArray(connection.methods) || connection.methods.length > 32) return false
+      if (connection.methods.some(method => typeof method !== 'string' || !/^[a-z_]{1,40}$/.test(method))) {
+        return false
+      }
+      // spent starts at zero, so this one is not isAmount's positive
+      if (
+        typeof connection.spentMsat !== 'number' ||
+        !Number.isSafeInteger(connection.spentMsat) ||
+        connection.spentMsat < 0
+      ) {
+        return false
+      }
+      for (const key of ['budgetMsat', 'maxPaymentMsat'] as const) {
+        if (connection[key] !== undefined && !isAmount(connection[key])) return false
+      }
+      if (connection.seen !== undefined) {
+        if (!Array.isArray(connection.seen) || connection.seen.length > 1024) return false
+        if (connection.seen.some(id => typeof id !== 'string' || !HEX64.test(id))) return false
+      }
+      if (!isTimestamp(connection.createdAt)) return false
+      for (const key of ['lastUsedAt', 'revokedAt'] as const) {
+        if (connection[key] !== undefined && !isTimestamp(connection[key])) return false
+      }
+    }
+  }
+
   if (!Array.isArray(data.melts)) return false
   for (const melt of data.melts) {
     if (!isRecord(melt)) return false
@@ -208,6 +252,14 @@ export const importBackup = async (contents: string, passphrase: string): Promis
   if (data.version === 1) {
     data.version = 2
     data.counters ??= {}
+  }
+  // Every restored NIP-47 grant comes back revoked. The client secret that
+  // spends through it is in this file, so whoever wrote the file may still
+  // hold it - and a restore is exactly when somebody hands you one. They
+  // are listed rather than dropped, because seeing what existed is worth
+  // something; re-granting is one command, and it issues a fresh secret.
+  for (const connection of data.nwcConnections ?? []) {
+    connection.revokedAt ??= Date.now()
   }
   return data
 }
