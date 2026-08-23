@@ -328,6 +328,40 @@ describe('the web wallet', () => {
     await until(onHome, 'home')
   })
 
+  it('keeps an error where it can be read and copied, not only in a toast', async () => {
+    // Twice this session a real failure could not be reported because the
+    // only copy of it was a toast that had already gone. An error nobody
+    // can quote is an error nobody can fix.
+    document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
+    await until(() => button('Lock now') !== undefined, 'the settings screen')
+    button('Connected apps')!.click()
+    await until(() => button('Grant a connection') !== undefined, 'the connections screen')
+
+    // provoke a real refusal: spending with no budget
+    const box = document.querySelector<HTMLInputElement>('[data-spend]')!
+    if (!box.checked) box.click()
+    document.querySelector<HTMLInputElement>('[data-name]')!.value = 'greedy'
+    button('Grant a connection')!.click()
+    await until(
+      () => document.querySelector('.toast.err') !== null,
+      'the error toast',
+    )
+    const toast = document.querySelector<HTMLElement>('.toast.err')!
+    // selectable, and a tap copies it
+    expect(toast.style.userSelect).toBe('text')
+    expect(toast.title).toBe('Tap to copy')
+
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(() => button('Lock now') !== undefined, 'settings again')
+    // and it survives the toast: still readable, still copyable
+    expect(document.body.textContent).toContain('Recent problems')
+    expect(document.body.textContent).toContain('no unlimited connection')
+    expect(button('Copy them all')).toBeDefined()
+
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(onHome, 'home')
+  })
+
   it('opens the check screen from settings and comes back', async () => {
     document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
     await until(

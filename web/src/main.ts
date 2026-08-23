@@ -293,14 +293,43 @@ const when = (at: number): string => {
   return new Date(at).toLocaleDateString('en-GB', {day: 'numeric', month: 'short'})
 }
 
+// Errors this session, newest last. A toast is gone in a few seconds and
+// cannot be selected on a phone, so an error that is only ever a toast is
+// an error nobody can report - which has now twice meant reading a
+// failure back off a screen by eye. They are kept here so Settings can
+// show them, and copied on a tap while they are still up.
+//
+// In memory only, and never persisted: these strings carry whatever the
+// mint, a device or a relay said, and a wallet file is not the place to
+// accumulate somebody else's prose.
+const problems: Array<{at: number; message: string}> = []
+const PROBLEM_LIMIT = 20
+
+export const recentProblems = (): ReadonlyArray<{at: number; message: string}> => problems
+
 const toast = (message: string, kind: 'ok' | 'err' | '' = ''): void => {
   const node = el(`<div class="toast ${kind}"></div>`)
   node.textContent = message
+  if (kind === 'err') {
+    problems.push({at: Date.now(), message})
+    if (problems.length > PROBLEM_LIMIT) problems.splice(0, problems.length - PROBLEM_LIMIT)
+    // Selectable, and a tap takes a copy. An error is the one message a
+    // person actually needs the words of.
+    node.style.userSelect = 'text'
+    node.style.cursor = 'copy'
+    node.title = 'Tap to copy'
+    node.addEventListener('click', () => void copyText(message, 'Error'))
+  }
   document.getElementById('toasts')!.append(node)
   animate(node, {opacity: [0, 1], y: [16, 0], duration: 320, ease: 'outCubic'})
-  setTimeout(() => {
-    animate(node, {opacity: 0, y: 10, duration: 280, ease: 'inCubic', onComplete: () => node.remove()})
-  }, 3400)
+  setTimeout(
+    () => {
+      animate(node, {opacity: 0, y: 10, duration: 280, ease: 'inCubic', onComplete: () => node.remove()})
+    },
+    // An error gets longer on screen than a confirmation: one is news the
+    // reader has to act on, the other is a receipt.
+    kind === 'err' ? 9_000 : 3_400
+  )
 }
 
 // bearer: what was copied IS the money, so a plain "copied" is not enough -
@@ -3072,6 +3101,7 @@ const viewVault = (): void => {
   let info: VaultInfo | null = null
   let deviceNotes: VaultNote[] = []
   let identity: string | null = null
+  let lastRefusal: string | null = null
 
   // Asks the device what it is and what it holds, and checks its identity
   // against the one this wallet pinned. A vault answering with a different
@@ -3108,12 +3138,31 @@ const viewVault = (): void => {
         body.append(
           el(`<div class="hint">${icons.info}<span><b>Plug the vault in and connect.</b> It makes its own note secrets and never hands one over without a press on the device, so what it holds cannot be spent from this machine alone.</span></div>`)
         )
+        if (lastRefusal) {
+          const said = el(`<div class="card"><h3>The vault refused</h3></div>`)
+          const words = el(`<p class="warn" style="text-align:left;padding-top:12px;user-select:text"></p>`)
+          words.textContent = lastRefusal
+          said.append(words)
+          const copy = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy this</span></button>`)
+          copy.addEventListener('click', () => void copyText(lastRefusal!, 'Error'))
+          said.append(copy)
+          body.append(said)
+        }
         const connect = el(`<button class="btn btn-silver">${icons.shield}<span>Connect over USB</span></button>`) as HTMLButtonElement
         connect.addEventListener('click', () =>
           busy(connect, async () => {
-            const {transport} = await connectVault()
-            vaultClient = new VaultClient(transport)
-            await refresh()
+            try {
+              const {transport} = await connectVault()
+              vaultClient = new VaultClient(transport)
+              await refresh()
+            } catch (err) {
+              // A connect failure is a diagnostic, and a diagnostic that
+              // vanishes with the toast is one nobody can act on. It stays
+              // on the screen until the next attempt replaces it.
+              lastRefusal = (err as Error).message
+              draw()
+              throw err
+            }
             draw()
           })
         )
@@ -3323,6 +3372,30 @@ const viewSettings = (): void => {
       vaultCard.append(openVault)
     }
     body.append(vaultCard)
+
+    // What went wrong, in words that can be copied. A toast is gone in
+    // seconds and cannot be selected on a phone, so without this the only
+    // way to report a failure is to read it off the screen by eye.
+    if (recentProblems().length) {
+      const problems = el(`<div class="card"><h3>Recent problems</h3>
+        <p class="warn" style="text-align:left;padding-top:12px">This session only, and never written to disk. Copy them into a bug report.</p></div>`)
+      for (const entry of [...recentProblems()].reverse().slice(0, 5)) {
+        const line = el(`<p class="fineline" style="user-select:text"></p>`)
+        line.textContent = `${when(entry.at)} — ${entry.message}`
+        problems.append(line)
+      }
+      const copyAll = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy them all</span></button>`)
+      copyAll.addEventListener('click', () =>
+        void copyText(
+          recentProblems()
+            .map(entry => `${new Date(entry.at).toISOString()}  ${entry.message}`)
+            .join('\n'),
+          'Problems'
+        )
+      )
+      problems.append(copyAll)
+      body.append(problems)
+    }
 
     // connections handed out over NIP-47
     const apps = el(`<div class="card"><h3>Connected apps</h3>
