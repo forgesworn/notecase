@@ -3146,6 +3146,14 @@ const viewVault = (): void => {
           const copy = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy this</span></button>`)
           copy.addEventListener('click', () => void copyText(lastRefusal!, 'Error'))
           said.append(copy)
+          // A device in relay mode is not a broken device - it is the wrong
+          // door. Send them to the right one rather than leaving them to
+          // work out that a screen they have already got would have done.
+          if (lastRefusal.includes('relay mode')) {
+            const toSigner = el(`<button class="btn">${icons.shield}<span>Open Hardware signer</span></button>`)
+            toSigner.addEventListener('click', viewSigner)
+            said.append(toSigner)
+          }
           body.append(said)
         }
         const connect = el(`<button class="btn btn-silver">${icons.shield}<span>Connect over USB</span></button>`) as HTMLButtonElement

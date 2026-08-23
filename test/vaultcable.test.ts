@@ -65,13 +65,36 @@ describe('the device on the other end', () => {
     connection.transport.close()
   })
 
-  it('explains a build that serves its notes over a relay instead', async () => {
-    // That one NACKs the note frame outright, with no reason attached.
-    const connection = openConnection(fakePort(() => frame(new Uint8Array(0), NOTE_NACK)))
+  it('sends a device in relay mode to the surface that does work', async () => {
+    // The firmware's own words, verbatim: in relay mode the cable's note
+    // frame is closed on purpose, because its gated commands block for
+    // thirty seconds on a button and that would stall the relay loop.
+    // Nothing is broken and nothing needs reflashing - the locker is just
+    // served somewhere else, and this wallet already speaks that surface.
+    const connection = openConnection(
+      fakePort(() =>
+        frame(new TextEncoder().encode('use heartwood_note_* over the relay'), NOTE_NACK)
+      )
+    )
     connection.speak('frame')
     const refused = connection.transport.request({cmd: 'get_info'}, 1_000)
-    await expect(refused).rejects.toMatchObject({code: 'unsupported'})
-    await expect(refused).rejects.toThrow(/pair it as a signer/)
+    await expect(refused).rejects.toMatchObject({code: 'wrong_surface'})
+    await expect(refused).rejects.toThrow(/relay mode/)
+    await expect(refused).rejects.toThrow(/Hardware signer/)
+    // and it says what a cable-capable device would need to be
+    await expect(refused).rejects.toThrow(/USB mode/)
+    connection.transport.close()
+  })
+
+  it('passes an unrecognised refusal through rather than flattening it', async () => {
+    // A reason nobody has seen before is still more use than "unsupported".
+    const connection = openConnection(
+      fakePort(() => frame(new TextEncoder().encode('something new'), NOTE_NACK))
+    )
+    connection.speak('frame')
+    await expect(connection.transport.request({cmd: 'get_info'}, 1_000)).rejects.toThrow(
+      /refused that: something new/
+    )
     connection.transport.close()
   })
 

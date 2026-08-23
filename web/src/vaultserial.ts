@@ -161,10 +161,21 @@ const nackError = (reason: string): VaultError => {
       'The vault is locked. It will say what it holds, and nothing else, until it is unlocked on the device.'
     )
   }
+  // The device is in relay mode, where the cable's note surface is closed
+  // on purpose: its gated commands block for thirty seconds on a button,
+  // and that would stall the relay loop. Nothing is broken and nothing
+  // needs reflashing - the locker is simply served somewhere else, and
+  // this wallet already speaks that surface.
+  if (said.includes('heartwood_note_')) {
+    return new VaultError(
+      'wrong_surface',
+      'This device is in relay mode, so it serves its notes over Nostr rather than the cable - pair it under Hardware signer instead. The cable path needs a device set to USB mode, radio off.'
+    )
+  }
   if (!said) {
     return new VaultError(
       'unsupported',
-      'The vault refused that outright. On a build that serves its notes over a relay rather than the cable, this is expected - pair it as a signer instead.'
+      'The vault refused that outright, with no reason given.'
     )
   }
   return new VaultError('unsupported', `The vault refused that: ${said}.`)
