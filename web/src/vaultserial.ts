@@ -22,6 +22,13 @@ import {VaultError} from '../../src/vault.ts'
 const MAGIC = [0x48, 0x57] as const
 const NOTE_CMD = 0x70
 export const NOTE_RESP = 0x71
+// The firmware's refusal. A locked device answers get_info and NACKs
+// everything else with the reason "locked"; a build that serves its locker
+// over the relay instead NACKs the note frame outright. Dropping these
+// would turn "it answered and refused" into a fifteen-second hang and
+// "the vault did not answer", which sends somebody hunting for a cable
+// fault that is not there.
+export const NOTE_NACK = 0x15
 const HEADER = 5
 const PROBE_MS = 2_000
 
@@ -72,7 +79,8 @@ export const frame = (payload: Uint8Array, type: number = NOTE_CMD): Uint8Array 
 // boundaries of its own - a reply can arrive in six chunks or share one
 // with the next - so both framings are parsed as "keep bytes until a
 // complete message is in hand".
-export type Parser = {feed(chunk: Uint8Array): string[]}
+export type Framed = {type: number; text: string}
+export type Parser = {feed(chunk: Uint8Array): Framed[]}
 
 export const lineParser = (): Parser => {
   let buffer = ''
@@ -80,13 +88,15 @@ export const lineParser = (): Parser => {
   return {
     feed(chunk) {
       buffer += decoder.decode(chunk, {stream: true})
-      const out: string[] = []
+      const out: Framed[] = []
       for (;;) {
         const end = buffer.indexOf('\n')
         if (end < 0) return out
         const line = buffer.slice(0, end).trim()
         buffer = buffer.slice(end + 1)
-        if (line) out.push(line)
+        // newline framing carries no refusal of its own: every line is an
+        // answer, and a refusal is `ok: false` inside it
+        if (line) out.push({type: NOTE_RESP, text: line})
       }
     }
   }
@@ -101,7 +111,7 @@ export const frameParser = (): Parser => {
       joined.set(buffer)
       joined.set(chunk, buffer.length)
       buffer = joined
-      const out: string[] = []
+      const out: Framed[] = []
       for (;;) {
         // Resynchronise on the magic rather than giving up: a device that
         // logs a line to the same port would otherwise wedge the stream
@@ -133,13 +143,34 @@ export const frameParser = (): Parser => {
         // Dropping it is right: the command times out and is retried, which
         // is far better than acting on a corrupted response about money.
         if (declared !== crc32(covered)) continue
-        if (type === NOTE_RESP) out.push(text)
+        if (type === NOTE_RESP || type === NOTE_NACK) out.push({type, text})
       }
     }
   }
 }
 
-type PortLike = {
+// What the device meant by refusing the frame itself. The reasons are
+// short strings the firmware writes; anything unrecognised is passed
+// through rather than flattened, because a reason nobody has seen before
+// is still more use than "unsupported".
+const nackError = (reason: string): VaultError => {
+  const said = reason.trim()
+  if (said === 'locked') {
+    return new VaultError(
+      'locked',
+      'The vault is locked. It will say what it holds, and nothing else, until it is unlocked on the device.'
+    )
+  }
+  if (!said) {
+    return new VaultError(
+      'unsupported',
+      'The vault refused that outright. On a build that serves its notes over a relay rather than the cable, this is expected - pair it as a signer instead.'
+    )
+  }
+  return new VaultError('unsupported', `The vault refused that: ${said}.`)
+}
+
+export type PortLike = {
   readable: ReadableStream<Uint8Array> | null
   writable: WritableStream<Uint8Array> | null
   open(options: {baudRate: number}): Promise<void>
@@ -153,9 +184,12 @@ type PortLike = {
 // connection. Only the parser is swappable, because working out which
 // framing a device speaks means asking it the same question twice - and a
 // port whose reader has been cancelled cannot be asked anything again.
-const openConnection = (port: PortLike) => {
+// Exported for testing: the bench-critical behaviour is what happens when
+// a device answers, refuses, or says nothing, and that cannot be reached
+// through connectVault without a real navigator.serial.
+export const openConnection = (port: PortLike) => {
   const encoder = new TextEncoder()
-  const waiting: Array<(message: string) => void> = []
+  const waiting: Array<(message: Framed) => void> = []
   const reader = port.readable!.getReader()
   const writer = port.writable!.getWriter()
   let parser: Parser = frameParser()
@@ -178,7 +212,7 @@ const openConnection = (port: PortLike) => {
   const transport: VaultTransport = {
     async request(command, timeoutMs) {
       if (closed) throw new VaultError('unsupported', 'The vault is not connected.')
-      const answer = new Promise<string>((resolve, reject) => {
+      const answer = new Promise<Framed>((resolve, reject) => {
         const timer = setTimeout(() => {
           const index = waiting.indexOf(settle)
           if (index >= 0) waiting.splice(index, 1)
@@ -191,7 +225,7 @@ const openConnection = (port: PortLike) => {
             )
           )
         }, timeoutMs)
-        const settle = (message: string) => {
+        const settle = (message: Framed) => {
           clearTimeout(timer)
           resolve(message)
         }
@@ -199,9 +233,12 @@ const openConnection = (port: PortLike) => {
       })
       const json = JSON.stringify(command)
       await writer.write(framing === 'frame' ? frame(encoder.encode(json)) : encoder.encode(`${json}\n`))
-      const text = await answer
+      const reply = await answer
+      // A refusal at the frame layer, before the command was ever read.
+      // The device is right there and talking; what it will not do is this.
+      if (reply.type === NOTE_NACK) throw nackError(reply.text)
       try {
-        return JSON.parse(text) as Record<string, unknown>
+        return JSON.parse(reply.text) as Record<string, unknown>
       } catch {
         throw new VaultError('bad_request', 'The vault answered with something that is not JSON.')
       }
@@ -244,8 +281,14 @@ export const connectVault = async (): Promise<{transport: VaultTransport; framin
     try {
       const reply = await connection.transport.request({cmd: 'get_info'}, PROBE_MS)
       if (reply.ok === true) return {transport: connection.transport, framing}
-    } catch {
-      // not this framing, or not answering at all
+    } catch (err) {
+      // A refusal is not a failure to find the device - it IS the device,
+      // declining. Say what it said rather than reporting an empty port.
+      if (err instanceof VaultError && err.code !== 'timeout') {
+        connection.transport.close()
+        throw err
+      }
+      // otherwise: not this framing, or nothing answering at all
     }
   }
   connection.transport.close()

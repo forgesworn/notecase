@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {crc32, frame, frameParser, lineParser, NOTE_RESP} from '../web/src/vaultserial.ts'
+import {crc32, frame, frameParser, lineParser, NOTE_NACK, NOTE_RESP} from '../web/src/vaultserial.ts'
 
 // The cable, byte by byte.
 //
@@ -25,14 +25,14 @@ describe('the heartwood frame', () => {
     expect(bytes[1]).toBe(0x57)
     expect(bytes[2]).toBe(0x71)
     const parser = frameParser()
-    expect(parser.feed(bytes)).toEqual([JSON.stringify({ok: true, note_count: 3})])
+    expect(parser.feed(bytes)).toEqual([{type: NOTE_RESP, text: JSON.stringify({ok: true, note_count: 3})}])
   })
 
   it('reassembles a reply that arrives one byte at a time', () => {
     const bytes = reply({ok: true, k1: 'ab'.repeat(32)})
     const parser = frameParser()
     const out: string[] = []
-    for (const byte of bytes) out.push(...parser.feed(new Uint8Array([byte])))
+    for (const byte of bytes) out.push(...parser.feed(new Uint8Array([byte])).map(f => f.text))
     expect(out).toHaveLength(1)
     expect(JSON.parse(out[0]!)).toMatchObject({ok: true})
   })
@@ -43,7 +43,7 @@ describe('the heartwood frame', () => {
     const both = new Uint8Array(first.length + second.length)
     both.set(first)
     both.set(second, first.length)
-    expect(frameParser().feed(both).map(text => JSON.parse(text).id)).toEqual(['one', 'two'])
+    expect(frameParser().feed(both).map(f => JSON.parse(f.text).id)).toEqual(['one', 'two'])
   })
 
   it('resynchronises past junk rather than wedging for good', () => {
@@ -53,7 +53,7 @@ describe('the heartwood frame', () => {
     const stream = new Uint8Array(junk.length + good.length)
     stream.set(junk)
     stream.set(good, junk.length)
-    expect(frameParser().feed(stream).map(text => JSON.parse(text).id)).toEqual(['after'])
+    expect(frameParser().feed(stream).map(f => JSON.parse(f.text).id)).toEqual(['after'])
   })
 
   it('drops a frame whose CRC does not hold', () => {
@@ -64,12 +64,24 @@ describe('the heartwood frame', () => {
     const parser = frameParser()
     expect(parser.feed(bytes)).toEqual([])
     // and the stream is still usable afterwards
-    expect(parser.feed(reply({ok: true, id: 'next'})).map(text => JSON.parse(text).id)).toEqual(['next'])
+    expect(parser.feed(reply({ok: true, id: 'next'})).map(f => JSON.parse(f.text).id)).toEqual(['next'])
   })
 
-  it('ignores a frame that is not a note response', () => {
-    // 0x15 is the firmware's NACK: a real frame, not an answer to this.
-    expect(frameParser().feed(frame(encode({ok: false}), 0x15))).toEqual([])
+  it('carries a refusal through rather than dropping it', () => {
+    // 0x15 is the firmware's NACK, and the reason is the whole point: a
+    // locked device answers get_info and NACKs the rest with "locked".
+    // Dropping it turns that into a fifteen-second hang and "the vault did
+    // not answer", which sends somebody looking for a cable fault.
+    const nack = frame(new TextEncoder().encode('locked'), NOTE_NACK)
+    expect(frameParser().feed(nack)).toEqual([{type: NOTE_NACK, text: 'locked'}])
+    // an empty one still arrives, because silence and refusal differ
+    expect(frameParser().feed(frame(new Uint8Array(0), NOTE_NACK))).toEqual([
+      {type: NOTE_NACK, text: ''}
+    ])
+  })
+
+  it('still ignores a frame that is neither an answer nor a refusal', () => {
+    expect(frameParser().feed(frame(encode({ok: true}), 0x06))).toEqual([])
   })
 })
 
@@ -77,13 +89,15 @@ describe('the newline framing', () => {
   it('reads one object per line, however the chunks fall', () => {
     const parser = lineParser()
     expect(parser.feed(new TextEncoder().encode('{"ok":true,"a":'))).toEqual([])
-    expect(parser.feed(new TextEncoder().encode('1}\n{"ok":true,"a":2}\n'))).toEqual([
+    expect(parser.feed(new TextEncoder().encode('1}\n{"ok":true,"a":2}\n')).map(f => f.text)).toEqual([
       '{"ok":true,"a":1}',
       '{"ok":true,"a":2}'
     ])
   })
 
   it('skips blank lines rather than answering with one', () => {
-    expect(lineParser().feed(new TextEncoder().encode('\n\n{"ok":true}\n'))).toEqual(['{"ok":true}'])
+    expect(lineParser().feed(new TextEncoder().encode('\n\n{"ok":true}\n')).map(f => f.text)).toEqual([
+      '{"ok":true}'
+    ])
   })
 })

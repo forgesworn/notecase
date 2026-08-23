@@ -273,6 +273,8 @@ const vaultReason = (code: string): string => {
       return 'The device asked and nobody answered.'
     case 'display_unavailable':
       return 'The device could not ask - its screen never came up, so there is nobody to approve. Power it off and on.'
+    case 'locked':
+      return 'The vault is locked. Unlock it on the device.'
     case 'unsupported':
       return 'This device cannot do that - it has no on-device confirmation wired.'
     case 'storage_full':
