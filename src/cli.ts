@@ -29,8 +29,8 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase check [--apply] [--resign] [--mint <host>]
   notecase ladder [set <sats,sats,...>] [--copies <n>] [--mint <host>]
   notecase prepare [--apply] [--mint <host>]
-  notecase send <sats> [--mint <host>] [--offline] [--overpay]
-  notecase send <sats> --to <npub|nip05>
+  notecase send <sats> [--mint <host>] [--offline] [--overpay] [--notes <id,id>]
+  notecase send <sats> --to <npub|nip05> [--notes <id,id>]
   notecase address | address claim <name> [--mint <host>]
   notecase inbox
   notecase request <sats> [--memo <text>] [--wait <seconds>] [--mint <host>]
@@ -69,8 +69,16 @@ payment preimage becomes the note that lands. Both mints charge for it, so
 you always receive less than you send.
 
 Sending to an npub or a NIP-05 address (name@host) seals the note to that
-key and leaves it on their inbox relays; they need no wallet yet to be paid. \`inbox\` opens what was sent to
-you and claims it at once, which burns the copy on the relay.`
+key and leaves it on their inbox relays; they need no wallet yet to be paid.
+\`inbox\` opens what was sent to you and claims it at once, which burns the
+copy on the relay.
+
+--notes says which notes to spend, by the short ids \`list\` prints, instead
+of leaving the choice to the wallet. A selection that cannot work is
+refused with the reason rather than quietly swapped for one that can. With
+--offline it means more than a preference: those notes are the hand-over,
+because nothing can be cut to size without the mint, so a selection worth
+more than the asking price needs --overpay.`
 
 // Short ids as `list` prints them, turned into the full ones the wallet
 // keys on. An ambiguous or unknown one is refused by name: quietly
@@ -586,10 +594,17 @@ const main = async (): Promise<void> => {
 
     case 'send': {
       const amountMsat = parseAmountMsat(rest[0], values.msat)
+      // --notes says which notes to spend, by the short ids `list` prints,
+      // instead of leaving the choice to the wallet. Offline it means
+      // something stronger: those notes are the hand-over, since nothing
+      // can be cut to size without the mint.
+      const noteIds = values.notes ? resolveNoteIds(wallet, values.notes) : undefined
       if (values.to) {
         const transport = poolTransport()
         try {
-          const sent = await wallet.sendToNostr(transport, amountMsat, values.to, values.mint)
+          const sent = await wallet.sendToNostr(transport, amountMsat, values.to, values.mint, {
+            ...(noteIds ? {noteIds} : {})
+          })
           console.log(`Sent ${sats(sent.note.amountMsat)} to ${npubOf(sent.recipientHex)} (${shortId(sent.note)}).`)
           if (!sent.inboxKnown) {
             console.log('  warning: they publish no inbox relays (kind 10050) - the wrap went to your relays and they may not look there.')
@@ -606,7 +621,10 @@ const main = async (): Promise<void> => {
       if (values.offline) {
         // Offline is a promise, never a guess: no wire call is made here
         // at all, which is why it has to be asked for.
-        const handed = await wallet.sendOffline(amountMsat, values.mint, {acceptOverpay: values.overpay})
+        const handed = await wallet.sendOffline(amountMsat, values.mint, {
+          acceptOverpay: values.overpay,
+          ...(noteIds ? {noteIds} : {})
+        })
         console.log(
           handed.notes.length === 1
             ? `A bearer note for ${sats(handed.totalMsat)} - whoever sees this owns it:\n`
@@ -623,7 +641,7 @@ const main = async (): Promise<void> => {
         console.log('If it is never claimed, `notecase reclaim` takes it back.')
         return
       }
-      const note = await wallet.send(amountMsat, values.mint)
+      const note = await wallet.send(amountMsat, values.mint, noteIds)
       const url = wallet.noteUrlFor(note)
       console.log(`A bearer note for ${sats(note.amountMsat)} - whoever sees this owns it:\n`)
       console.log(url)

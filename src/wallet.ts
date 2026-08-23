@@ -1272,12 +1272,13 @@ export class Wallet {
   // selection step is replaced - and a selection that cannot work is
   // refused, saying why, rather than quietly falling back to a different
   // one. Being overruled without being told is worse than being refused.
-  async prepareExactFrom(amountMsat: number, noteIds: string[]): Promise<NoteRecord> {
-    if (!Number.isSafeInteger(amountMsat) || amountMsat <= 0) {
-      throw new WalletUsageError('The amount must be a positive integer of milli-satoshis.')
-    }
+  //
+  // A selection is checked whole: an id that names nothing, or a note that
+  // cannot be spent, refuses the lot rather than being dropped. A selection
+  // quietly reduced to the notes that happened to work is a different
+  // selection from the one the holder made.
+  private chosenNotes(noteIds: string[], needsMint: boolean): NoteRecord[] {
     if (noteIds.length === 0) throw new WalletUsageError('Choose at least one note.')
-
     const chosen: NoteRecord[] = []
     for (const id of noteIds) {
       const note = this.data.notes.find(record => record.id === id)
@@ -1286,18 +1287,28 @@ export class Wallet {
         throw new WalletUsageError(`One of those notes is ${note.state}, so it cannot be spent.`)
       }
       // Same reason prepareExact skips these: money, but nothing can be
-      // split or merged out of it until reconcile has rotated it.
-      if (!note.callback) {
+      // split or merged out of it until reconcile has rotated it. Handing a
+      // note over offline asks the mint for nothing, so that path does not
+      // need one.
+      if (needsMint && !note.callback) {
         throw new WalletUsageError('One of those notes has not met its mint yet - reconcile first.')
       }
       if (chosen.some(already => already.id === note.id)) continue
       chosen.push(note)
     }
-
     const host = chosen[0]!.mintHost
     if (chosen.some(note => note.mintHost !== host)) {
       throw new WalletUsageError('Notes from different mints cannot be combined - choose from one mint.')
     }
+    return chosen
+  }
+
+  async prepareExactFrom(amountMsat: number, noteIds: string[]): Promise<NoteRecord> {
+    if (!Number.isSafeInteger(amountMsat) || amountMsat <= 0) {
+      throw new WalletUsageError('The amount must be a positive integer of milli-satoshis.')
+    }
+    const chosen = this.chosenNotes(noteIds, true)
+    const host = chosen[0]!.mintHost
 
     const total = chosen.reduce((sum, note) => sum + note.amountMsat, 0)
     if (total < amountMsat) {
@@ -1525,9 +1536,29 @@ export class Wallet {
   // What could be handed over for an amount with no mint in the loop.
   // Nothing is committed here: an inexact answer is for the payer to
   // accept or refuse, and they cannot do that if it has already happened.
-  planOfflineSend(amountMsat: number, mintHost?: string): OfflineSelection {
+  //
+  // A selection the holder made is the hand-over itself, not a pool to
+  // search within: every note they ticked goes over. Offline there is no
+  // way to give change, so a selection worth more than the asking price
+  // overpays - and whether to accept that is theirs to say, exactly as it
+  // is when the wallet picks.
+  planOfflineSend(amountMsat: number, mintHost?: string, noteIds?: string[]): OfflineSelection {
     if (!Number.isSafeInteger(amountMsat) || amountMsat <= 0) {
       throw new WalletUsageError('The amount must be a positive integer of milli-satoshis.')
+    }
+    if (noteIds?.length) {
+      const chosen = this.chosenNotes(noteIds, false)
+      const host = chosen[0]!.mintHost
+      if (mintHost && host !== mintHost) {
+        throw new WalletUsageError(`Those notes are at ${host}, not ${mintHost}.`)
+      }
+      const totalMsat = chosen.reduce((sum, note) => sum + note.amountMsat, 0)
+      if (totalMsat < amountMsat) {
+        throw new InsufficientFundsError(
+          `Those notes come to ${totalMsat} msat, short of the ${amountMsat} msat asked for - and offline, nothing can be split or combined.`
+        )
+      }
+      return {mintHost: host, notes: chosen, totalMsat, overpayMsat: totalMsat - amountMsat, capped: false}
     }
     const byHost = new Map<string, NoteRecord[]>()
     for (const note of this.liveNotes()) {
@@ -1571,12 +1602,14 @@ export class Wallet {
   async sendOffline(
     amountMsat: number,
     mintHost?: string,
-    options: {acceptOverpay?: boolean} = {}
+    options: {acceptOverpay?: boolean; noteIds?: string[]} = {}
   ): Promise<OfflineHandover> {
-    const selection = this.planOfflineSend(amountMsat, mintHost)
+    const selection = this.planOfflineSend(amountMsat, mintHost, options.noteIds)
     if (selection.overpayMsat > 0 && !options.acceptOverpay) {
       throw new WalletUsageError(
-        `No notes at ${selection.mintHost} add up to exactly ${amountMsat} msat, and offline nothing can be split. The nearest is ${selection.totalMsat} msat, which overpays by ${selection.overpayMsat} msat.`
+        options.noteIds?.length
+          ? `Those notes come to ${selection.totalMsat} msat, which is ${selection.overpayMsat} msat more than the ${amountMsat} msat asked for, and offline nothing can be split to give change.`
+          : `No notes at ${selection.mintHost} add up to exactly ${amountMsat} msat, and offline nothing can be split. The nearest is ${selection.totalMsat} msat, which overpays by ${selection.overpayMsat} msat.`
       )
     }
     for (const note of selection.notes) {
@@ -1696,7 +1729,7 @@ export class Wallet {
     amountMsat: number,
     recipient: string,
     mintHost?: string,
-    extras: {requestId?: string; memo?: string} = {}
+    extras: {requestId?: string; memo?: string; noteIds?: string[]} = {}
   ): Promise<{note: NoteRecord; recipientHex: string; relays: string[]; failed: string[]; inboxKnown: boolean; wrapId: string}> {
     const recipientHex = await resolveRecipient(recipient, this.opts.fetch ?? fetch)
     const identity = await this.ensureNostrIdentity()
@@ -1706,7 +1739,7 @@ export class Wallet {
     const inboxKnown = inbox.length > 0
     const relays = inboxKnown ? inbox : this.nostrRelays()
 
-    const note = await this.send(amountMsat, mintHost)
+    const note = await this.send(amountMsat, mintHost, extras.noteIds)
     note.sentTo = recipientHex
     if (extras.memo) note.memo = extras.memo
     if (extras.requestId) note.requestId = extras.requestId

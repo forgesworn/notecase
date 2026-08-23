@@ -128,3 +128,105 @@ describe('spending notes the holder chose', () => {
     expect(made.data.melts[0]!.amountMsat).toBe(21_000)
   })
 })
+
+// Offline the choice means something stronger. With no mint in the loop
+// nothing can be cut to size, so the notes ticked are not a pool to search
+// within - they are the hand-over itself. What that costs the payer is
+// theirs to see and accept before anything leaves the wallet.
+describe('handing over notes the holder chose, offline', () => {
+  it('hands over exactly those notes and leaves the rest alone', async () => {
+    const mint = await start()
+    const made = makeWallet()
+    await made.wallet.addMint(`mint@${new URL(mint.url).host}`)
+    const keep = await fund(made, mint, 10_000)
+    const a = await fund(made, mint, 20_000)
+    const b = await fund(made, mint, 30_000)
+
+    const handed = await made.wallet.sendOffline(50_000, undefined, {noteIds: [a.id, b.id]})
+
+    expect(handed.notes.map(note => note.id).sort()).toEqual([a.id, b.id].sort())
+    expect(handed.totalMsat).toBe(50_000)
+    expect(handed.overpayMsat).toBe(0)
+    expect(handed.urls).toHaveLength(2)
+    // The wallet's own search would have taken the 10k and 20k and 30k in
+    // whatever order it liked; the small note is untouched.
+    expect(made.wallet.noteById(keep.id)?.state).toBe('live')
+    expect(made.wallet.noteById(a.id)?.state).toBe('sent')
+    expect(made.wallet.noteById(b.id)?.state).toBe('sent')
+    expect(made.wallet.balanceMsat()).toBe(10_000)
+  })
+
+  it('shows what a chosen hand-over overpays, and refuses until that is accepted', async () => {
+    const mint = await start()
+    const made = makeWallet()
+    await made.wallet.addMint(`mint@${new URL(mint.url).host}`)
+    const exact = await fund(made, mint, 20_000)
+    const big = await fund(made, mint, 50_000)
+
+    // Nothing is committed by asking.
+    const plan = made.wallet.planOfflineSend(20_000, undefined, [big.id])
+    expect(plan.totalMsat).toBe(50_000)
+    expect(plan.overpayMsat).toBe(30_000)
+    expect(made.wallet.noteById(big.id)?.state).toBe('live')
+
+    // And the refusal names both figures, rather than quietly reaching for
+    // the note that happens to make the amount exactly.
+    await expect(made.wallet.sendOffline(20_000, undefined, {noteIds: [big.id]})).rejects.toThrow(
+      /50000 msat.*30000 msat more/
+    )
+    expect(made.wallet.noteById(exact.id)?.state).toBe('live')
+    expect(made.wallet.noteById(big.id)?.state).toBe('live')
+
+    const handed = await made.wallet.sendOffline(20_000, undefined, {noteIds: [big.id], acceptOverpay: true})
+    expect(handed.totalMsat).toBe(50_000)
+    expect(made.wallet.noteById(exact.id)?.state).toBe('live')
+  })
+
+  it('refuses a chosen hand-over that is short, rather than adding a note to it', async () => {
+    const mint = await start()
+    const made = makeWallet()
+    await made.wallet.addMint(`mint@${new URL(mint.url).host}`)
+    const small = await fund(made, mint, 10_000)
+    const plenty = await fund(made, mint, 90_000)
+
+    await expect(made.wallet.sendOffline(50_000, undefined, {noteIds: [small.id]})).rejects.toThrow(
+      InsufficientFundsError
+    )
+    expect(made.wallet.noteById(small.id)?.state).toBe('live')
+    expect(made.wallet.noteById(plenty.id)?.state).toBe('live')
+    expect(made.wallet.balanceMsat()).toBe(100_000)
+  })
+
+  it('hands over a note that has never met its mint', async () => {
+    // A note taken offline is stored unrotated: the mint has not been
+    // spoken to, so there is no callback on it yet. Passing it straight on
+    // asks the mint for nothing either, so it must not be refused here -
+    // splitting it would be, and is.
+    const mint = await start()
+    const made = makeWallet()
+    await made.wallet.addMint(`mint@${new URL(mint.url).host}`)
+    const note = await fund(made, mint, 40_000)
+    made.wallet.noteById(note.id)!.callback = ''
+
+    await expect(made.wallet.prepareExactFrom(10_000, [note.id])).rejects.toThrow(/met its mint/)
+
+    const handed = await made.wallet.sendOffline(40_000, undefined, {noteIds: [note.id]})
+    expect(handed.totalMsat).toBe(40_000)
+    expect(made.wallet.noteById(note.id)?.state).toBe('sent')
+  })
+
+  it('refuses a chosen hand-over spread across two mints', async () => {
+    const one = await start()
+    const two = await start()
+    const made = makeWallet()
+    await made.wallet.addMint(`mint@${new URL(one.url).host}`)
+    await made.wallet.addMint(`mint@${new URL(two.url).host}`)
+    const here = await fund(made, one, 30_000)
+    const there = await fund(made, two, 30_000)
+
+    await expect(
+      made.wallet.sendOffline(60_000, undefined, {noteIds: [here.id, there.id]})
+    ).rejects.toThrow(/different mints/)
+    expect(made.wallet.balanceMsat()).toBe(60_000)
+  })
+})

@@ -199,6 +199,7 @@ notecase ladder                        # the cash drawer at your mint, and what 
 notecase ladder set 100,500,1000 --copies 2
 notecase prepare --apply               # cuts the small notes an offline payment needs
 notecase send 500 --offline            # hands over notes you already hold, nothing on the wire
+notecase send 500 --notes c3e3,b8b4    # choose which notes it comes out of (--offline: which ones go over)
 notecase receive --offline             # takes a note on the mint's signature alone
 notecase melt 21 --to you@wallet.com   # or a raw bolt11, or --to-nwc
 notecase melt <bolt11> 21              # an invoice that names no amount of its own
@@ -249,6 +250,14 @@ With a drawer stocked, `notecase send <sats> --offline` finds notes that
 add up to the amount exactly and hands them over as one or more URLs -
 no mint is called at all. Where no combination is exact it says so and
 names the nearest above, which `--overpay` accepts.
+
+`--notes c3e3,b8b4` says which notes to hand over instead, by the short
+ids `list` prints. Offline that is not a preference but the hand-over
+itself, since nothing can be cut to size without the mint: a selection
+worth more than the asking price is quoted before anything moves and
+needs `--overpay`, and one worth less is refused rather than topped up
+from a note nobody chose. The web wallet shows the same list under
+**Choose which notes to hand over** on the Send screen.
 
 `notecase receive --offline` takes a note on the mint's signature alone.
 It needs a pinned key for that mint, so a wallet that has never spoken to

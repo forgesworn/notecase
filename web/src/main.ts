@@ -741,6 +741,56 @@ const amountField = (options: {presets?: number[]; maxMsat?: number} = {}): {nod
   }
 }
 
+// Which notes fund a payment. Empty means the wallet chooses, which is
+// right for almost every one - but notes are visible objects with
+// histories, one from a stranger, one the change from something else, and
+// a holder who wants to spend a particular one should be able to say so.
+// The engine refuses a selection that cannot work, with the reason, rather
+// than quietly swapping it for one that can.
+//
+// Offline it means more than a preference: with no mint to cut anything to
+// size, the notes ticked are the hand-over itself, so the running total
+// says what would actually change hands.
+const notePicker = (
+  w: Wallet,
+  chosen: Set<string>,
+  options: {handover?: boolean; onChange?: () => void} = {}
+): HTMLElement => {
+  const notes = w.liveNotes().sort((a, b) => b.amountMsat - a.amountMsat)
+  const wrap = el(
+    `<details class="stack"><summary>${options.handover ? 'Choose which notes to hand over' : 'Choose which notes to spend'}</summary></details>`
+  )
+  if (notes.length === 0) {
+    wrap.append(el(`<p class="fineline">Nothing to choose from yet.</p>`))
+    return wrap
+  }
+  const running = el(`<p class="fineline" data-running></p>`)
+  const say = () => {
+    const total = notes.filter(note => chosen.has(note.id)).reduce((sum, note) => sum + note.amountMsat, 0)
+    running.textContent = chosen.size
+      ? `${chosen.size} note${chosen.size === 1 ? '' : 's'} chosen, ${sats(total)} sat${options.handover ? ' to hand over' : ''}`
+      : 'None chosen - the wallet will pick for you.'
+  }
+  for (const note of notes) {
+    const row = el(`<label class="kv" style="cursor:pointer"><span></span><input type="checkbox" /></label>`)
+    // note values and hosts are persisted strings: set as text, never
+    // interpolated into markup
+    row.querySelector('span')!.textContent = `${sats(note.amountMsat)} sat · ${note.mintHost} · ${note.id.slice(0, 8)}`
+    const box = row.querySelector('input') as HTMLInputElement
+    box.checked = chosen.has(note.id)
+    box.addEventListener('change', () => {
+      if (box.checked) chosen.add(note.id)
+      else chosen.delete(note.id)
+      say()
+      options.onChange?.()
+    })
+    wrap.append(row)
+  }
+  say()
+  wrap.append(running)
+  return wrap
+}
+
 // Reading a tag: the same shape as the camera button, and it renders only
 // where Web NFC exists at all, which is Chrome on Android.
 const tapButton = (onRead: (value: string) => void): HTMLElement | null => {
@@ -1803,7 +1853,13 @@ const viewSend = (): void => {
       <input data-npub type="text" placeholder="npub1… or name@domain" autocomplete="off" spellcheck="false" />
     </div>`)
     if (!offlineMode) body.append(to)
+    // Which notes go over. Empty means the wallet finds them, which is what
+    // almost everyone wants; ticking some says exactly which, and offline
+    // that IS the hand-over, since nothing can be cut to size without the
+    // mint.
+    const chosen = new Set<string>()
     const offer = el('<div class="stack" data-offer style="gap:14px"></div>')
+    body.append(notePicker(w, chosen, {handover: offlineMode, onChange: () => offer.replaceChildren()}))
     body.append(offer)
     body.append(
       el(`<button class="btn btn-silver" data-cut>${icons.send}<span>${offlineMode ? 'Find notes to hand over' : 'Cut a note'}</span></button>`)
@@ -1813,34 +1869,41 @@ const viewSend = (): void => {
     const cut = body.querySelector('[data-cut]') as HTMLButtonElement
     cut.addEventListener('click', () =>
       busy(cut, async () => {
+        const noteIds = chosen.size ? [...chosen] : undefined
         if (offlineMode) {
           offer.replaceChildren()
-          const selection = w.planOfflineSend(amount.msat())
+          const selection = w.planOfflineSend(amount.msat(), undefined, noteIds)
           if (selection.overpayMsat > 0) {
             // Nothing can be split offline, so the only honest options are
             // to hand over more than was asked for, or not to.
             const card = el(`<div class="card">
-              <h3>Nothing here makes that exactly</h3>
-              <p class="warn" style="text-align:left;padding-top:12px">Without a mint a note cannot be cut down. The closest these notes come is <b data-total></b>, which is <b data-over></b> more than you asked for.</p>
+              <h3>${noteIds ? 'That comes to more than you asked for' : 'Nothing here makes that exactly'}</h3>
+              <p class="warn" style="text-align:left;padding-top:12px">Without a mint a note cannot be cut down. ${
+                noteIds ? 'The notes you chose come to' : 'The closest these notes come is'
+              } <b data-total></b>, which is <b data-over></b> more than you asked for.</p>
             </div>`)
             card.querySelector('[data-total]')!.textContent = `${sats(selection.totalMsat)} sat`
             card.querySelector('[data-over]')!.textContent = `${sats(selection.overpayMsat)} sat`
             const anyway = el(`<button class="btn btn-ghost">${icons.send}<span>Hand over ${sats(selection.totalMsat)} sat</span></button>`)
             anyway.addEventListener('click', () =>
               busy(anyway as HTMLButtonElement, async () =>
-                handedOver(await w.sendOffline(amount.msat(), undefined, {acceptOverpay: true}))
+                handedOver(
+                  await w.sendOffline(amount.msat(), undefined, {acceptOverpay: true, ...(noteIds ? {noteIds} : {})})
+                )
               )
             )
             card.append(anyway)
             offer.append(card)
             return
           }
-          handedOver(await w.sendOffline(amount.msat()))
+          handedOver(await w.sendOffline(amount.msat(), undefined, noteIds ? {noteIds} : {}))
           return
         }
         const recipient = npubInput.value.trim()
         if (recipient) {
-          const sent = await withRelays(t => w.sendToNostr(t, amount.msat(), recipient))
+          const sent = await withRelays(t =>
+            w.sendToNostr(t, amount.msat(), recipient, undefined, noteIds ? {noteIds} : {})
+          )
           show(() => {
             const done = el('<div class="view"></div>')
             done.append(topBar('Sent over Nostr', viewHome))
@@ -1863,7 +1926,7 @@ const viewSend = (): void => {
           })
           return
         }
-        const note = await w.send(amount.msat())
+        const note = await w.send(amount.msat(), undefined, noteIds)
         const url = w.noteUrlFor(note)
         show(() => {
           const done = el('<div class="view"></div>')
@@ -2263,43 +2326,9 @@ const viewMelt = (prefillPr?: string): void => {
     // for almost every payment; a holder who wants a particular note - the
     // one from a stranger, the change from something else - can say so, and
     // is refused with a reason rather than quietly overruled.
-    let chosen = new Set<string>()
+    const chosen = new Set<string>()
     const pane = body.querySelector('[data-pane]')!
-
-    const picker = (): HTMLElement => {
-      const notes = w.liveNotes().sort((a, b) => b.amountMsat - a.amountMsat)
-      const wrap = el(`<details class="stack"><summary>Choose which notes to spend</summary></details>`)
-      if (notes.length === 0) {
-        wrap.append(el(`<p class="fineline">Nothing to choose from yet.</p>`))
-        return wrap
-      }
-      const running = el(`<p class="fineline" data-running></p>`)
-      const say = () => {
-        const total = notes
-          .filter(note => chosen.has(note.id))
-          .reduce((sum, note) => sum + note.amountMsat, 0)
-        running.textContent = chosen.size
-          ? `${chosen.size} note${chosen.size === 1 ? '' : 's'} chosen, ${sats(total)} sat`
-          : 'None chosen - the wallet will pick for you.'
-      }
-      for (const note of notes) {
-        const row = el(`<label class="kv" style="cursor:pointer"><span></span><input type="checkbox" /></label>`)
-        // note values and hosts are persisted strings: set as text, never
-        // interpolated into markup
-        row.querySelector('span')!.textContent = `${sats(note.amountMsat)} sat · ${note.mintHost} · ${note.id.slice(0, 8)}`
-        const box = row.querySelector('input') as HTMLInputElement
-        box.checked = chosen.has(note.id)
-        box.addEventListener('change', () => {
-          if (box.checked) chosen.add(note.id)
-          else chosen.delete(note.id)
-          say()
-        })
-        wrap.append(row)
-      }
-      say()
-      wrap.append(running)
-      return wrap
-    }
+    const picker = () => notePicker(w, chosen)
     const paint = () => {
       body.querySelectorAll('[data-tab]').forEach(button =>
         button.classList.toggle('on', (button as HTMLElement).dataset.tab === tab)
