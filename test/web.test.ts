@@ -285,6 +285,49 @@ describe('the web wallet', () => {
     await until(onHome, 'home')
   })
 
+  it('grants, shows and revokes a connection from the wallet you carry', async () => {
+    // A capability issued on one machine has to be revocable from the
+    // device in your pocket, or it is a bad capability.
+    document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
+    await until(() => button('Lock now') !== undefined, 'the settings screen')
+    button('Connected apps')!.click()
+    await until(() => button('Grant a connection') !== undefined, 'the connections screen')
+    expect(document.body.textContent).toContain('None yet')
+
+    const tick = (selector: string, on: boolean) => {
+      const box = document.querySelector<HTMLInputElement>(selector)!
+      if (box.checked !== on) box.click()
+    }
+    const name = () => document.querySelector<HTMLInputElement>('[data-name]')!
+
+    // Spending with no budget is refused, and says why.
+    name().value = 'greedy'
+    tick('[data-spend]', true)
+    button('Grant a connection')!.click()
+    await until(
+      () => document.body.textContent?.includes('no unlimited connection') ?? false,
+      'the refusal',
+    )
+    expect(button('Revoke')).toBeUndefined()
+
+    // Invoice-only goes through, and lands in the list.
+    tick('[data-spend]', false)
+    name().value = 'the shop till'
+    button('Grant a connection')!.click()
+    await until(() => button('Revoke') !== undefined, 'the granted connection')
+    expect(document.body.textContent).toContain('the shop till')
+    expect(document.body.textContent).toContain('Cannot spend')
+
+    button('Revoke')!.click()
+    await until(() => document.body.textContent?.includes('revoked') ?? false, 'the revocation')
+    expect(button('Revoke')).toBeUndefined()
+
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(() => button('Lock now') !== undefined, 'settings again')
+    document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+    await until(onHome, 'home')
+  })
+
   it('opens the check screen from settings and comes back', async () => {
     document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
     await until(

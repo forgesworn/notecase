@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.0] - 2026-08-23
+
+- **Connected apps, in the wallet you carry.** 0.6.0 could grant a NIP-47
+  connection from the command line and nowhere else. Settings → Connected
+  apps now lists what exists, what each may do, what it has spent, and
+  revokes any of it - because a capability issued on one machine has to be
+  revocable from the device in your pocket, or it is a bad capability.
+- Granting from the web asks the same questions in plain words, and refuses
+  the same things: ticking "may spend" without saying what it may spend is
+  refused before anything is issued.
+- The web wallet can answer its connections while that screen is open,
+  which is enough for a till on a counter. A connection that has to work
+  overnight wants `notecase nwc serve` on a machine that stays up, and the
+  screen says so rather than letting someone find out.
+
 ## [0.7.0] - 2026-08-23
 
 - **A hardware vault on the end of a cable.** notecase already reached a

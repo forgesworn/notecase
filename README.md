@@ -347,6 +347,14 @@ lost beyond the invoice amount.
 `make_invoice` is a mint quote. The note appears when the invoice is paid,
 which the serve loop's reconcile tick claims.
 
+The web wallet has the same list under Settings → **Connected apps**:
+what exists, what each may do, what it has spent, and a revoke. A
+capability issued on one machine has to be revocable from the device in
+your pocket, or it is a bad capability. It can also answer them while that
+screen is open, which is enough for a till on a counter; a connection that
+has to work overnight wants `notecase nwc serve` on a machine that stays
+up, and the screen says so rather than letting someone find out.
+
 Restoring a backup brings grants back **revoked**. The client secret that
 spends through one is in the file, so whoever wrote the file may still
 hold it, and a restore is exactly when somebody hands you one. They are
