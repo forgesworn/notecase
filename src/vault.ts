@@ -412,6 +412,18 @@ export const collectFromVault = async (
 // up under something this machine has never seen and never could - which
 // is the entire reason for the device, and it costs no button press,
 // because nothing is being disclosed for anyone to approve.
+// What the device will show for a deposited note. Kept inside the
+// firmware's 32-byte ceiling, and trimmed from the FRONT of the host so
+// what survives is the part that identifies the mint - the end of a
+// hostname says which mint, the start rarely does.
+export const VAULT_LABEL_MAX = 32
+const noteLabel = (mintHost: string): string => {
+  const prefix = 'notecase '
+  const room = VAULT_LABEL_MAX - prefix.length
+  const host = mintHost.length <= room ? mintHost : `…${mintHost.slice(-(room - 1))}`
+  return `${prefix}${host}`
+}
+
 export type DepositResult = {
   deviceNoteId: string
   // False when the mint has rotated the value onto the device's secret but
@@ -431,7 +443,11 @@ export const depositToVault = async (
   if (!note.callback) {
     throw new WalletUsageError('That note has not met its mint yet - reconcile first.')
   }
-  const fresh = await client.newSecret([], `from notecase, ${note.mintHost}`)
+  // The device caps a label at 32 bytes and refuses a longer one outright,
+  // so an unremarkable mint host would fail the whole deposit with a
+  // bad_request that says nothing about money. The label is a convenience;
+  // it must never be the reason a note cannot move.
+  const fresh = await client.newSecret([], noteLabel(note.mintHost))
   let signature: string | undefined
   try {
     signature = (await rotateNoteWithHash(note.callback, note.k1, fresh.h, wallet.options)).signature
