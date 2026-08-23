@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.9.0] - 2026-08-23
+
+- **An error you can actually quote.** A toast was gone in 3.4 seconds and
+  could not be selected, so twice in one day a real failure could only be
+  reported by reading it off the screen by eye. Error toasts now stay up
+  for nine seconds, are selectable, and copy themselves on a tap - and
+  Settings keeps a **Recent problems** list of this session's errors with a
+  copy-them-all, so one that has already faded is still recoverable. Held
+  in memory only: those strings carry whatever a mint, a device or a relay
+  said, and a wallet file is not the place to collect somebody else's
+  prose.
+- The vault screen keeps a refusal on screen rather than only in a toast.
+  A diagnostic that vanishes is one nobody can act on.
+- **Desktop uses the room it has.** The sheet was capped at 720px with
+  17.5px text, which on a monitor is a phone-width column asking somebody
+  to lean in to read their own money. It now widens to 900px past 1024px
+  and 1040px past 1440px, with the body and - more to the point - the
+  smallest mono and uppercase text scaled up with it. It stops short of
+  edge to edge on purpose: every screen here is a single column, and a
+  column much past 1100px stops being readable.
+
 ## [0.8.1] - 2026-08-23
 
 - **A vault that refuses now says so, instead of hanging.** The firmware

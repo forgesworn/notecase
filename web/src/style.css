@@ -638,3 +638,34 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-
 }
 .scanner p { position: relative; color: #fff; font-size: 15px; font-family: var(--mono); letter-spacing: 0.1em; text-align: center; text-shadow: 0 1px 8px rgba(0, 0, 0, 0.8); }
 .scanner .scanner-close { position: relative; max-width: 220px; background: rgba(255, 255, 255, 0.14); color: #fff; border-color: rgba(255, 255, 255, 0.3); }
+
+/* ---------- desktop: use the room ----------
+   The sheet is sized for a phone because that is where a wallet mostly
+   lives. On a monitor that leaves a narrow column in the middle of a wide
+   screen and asks somebody to lean in to read their own money, which is
+   the opposite of what all that space is for.
+
+   The container widens rather than filling edge to edge: a single column
+   of prose past about 1100px stops being readable, and every screen here
+   is a column. What the extra width actually buys is bigger type, more
+   air, and lists that stop wrapping. */
+@media (min-width: 1024px) {
+  body { font-size: 19px; }
+  #app { max-width: 900px; padding-left: 24px; padding-right: 24px; }
+  .warn, .hint { font-size: 17.5px; }
+  /* The smallest things on the screen are the ones that make a person
+     squint: mono, uppercase and wide-tracked is hard enough at 12px on a
+     phone held at arm's length, let alone on a monitor. */
+  .fineline { font-size: 13px; }
+  .kv { font-size: 18px; }
+  .kv span { font-size: 17px; }
+  .kv code { font-size: 12.5px; max-width: 44ch; }
+  .toast { font-size: 17px; max-width: min(680px, 92vw); }
+}
+
+@media (min-width: 1440px) {
+  body { font-size: 20px; }
+  #app { max-width: 1040px; }
+  .fineline { font-size: 13.5px; }
+  .kv code { max-width: 56ch; }
+}
