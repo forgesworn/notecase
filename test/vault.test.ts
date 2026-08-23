@@ -11,6 +11,7 @@ import {
   depositToVault,
   storageAdvice,
   storageFullMeans,
+  VAULT_LABEL_MAX,
   type VaultNote,
   type VaultTransport
 } from '../src/vault.ts'
@@ -304,6 +305,26 @@ describe('putting a note onto the vault', () => {
     expect(held.amountMsat).toBe(40_000)
     const info = await fetchNoteInfo(buildNoteUrl(note.baseUrl, held.k1, 40_000))
     expect(info.maxWithdrawable).toBe(40_000)
+  })
+
+  it('labels it within what the device will accept, however long the host is', async () => {
+    // The firmware caps a label at 32 bytes and refuses a longer one
+    // outright, so a label is never allowed to be the reason a note cannot
+    // move. What survives the trim is the END of the host, because that is
+    // the part that says which mint.
+    const mint = await start()
+    const made = await walletAt(mint)
+    const note = await fund(made, mint, 40_000)
+    note.mintHost = 'a-really-quite-long-mint-hostname.example.com'
+    const vault = fakeVault()
+    const client = new VaultClient(vault.transport)
+
+    await depositToVault(made.wallet, client, note)
+
+    const sent = vault.seen.find(command => command.cmd === 'new_secret')!
+    const label = String(sent.label)
+    expect(label.length).toBeLessThanOrEqual(VAULT_LABEL_MAX)
+    expect(label).toContain('example.com')
   })
 
   it('leaves the note here untouched when the mint refuses', async () => {

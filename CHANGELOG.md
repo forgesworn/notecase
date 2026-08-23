@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.4] - 2026-08-23
+
+- **A deposit can no longer be refused over its own label.** The device
+  caps a note label at 32 bytes and refuses a longer one outright, and the
+  label being sent was `from notecase, <mint host>` - fine for
+  `moneyer.dev`, and a `bad_request` that says nothing about money for any
+  host over seventeen characters. It is now trimmed to fit, from the front
+  of the host, so what survives is the end - the part that says which
+  mint. A label is a convenience and must never be the reason a note
+  cannot move.
+
 ## [0.9.3] - 2026-08-23
 
 - **A full vault no longer points at your money first.** The advice on a
