@@ -52,6 +52,7 @@ import {
   collectFromVault,
   depositToVault,
   storageAdvice,
+  storageFullMeans,
   type VaultError,
   type VaultInfo,
   type VaultNote
@@ -3256,7 +3257,22 @@ const viewVault = (): void => {
         const put = el(`<button class="btn btn-ghost">${icons.upload}<span>Deposit</span></button>`) as HTMLButtonElement
         put.addEventListener('click', () =>
           busy(put, async () => {
-            const result = await depositToVault(w, vaultClient!, note)
+            let result
+            try {
+              result = await depositToVault(w, vaultClient!, note)
+            } catch (err) {
+              // A refused write is the one failure here where the obvious
+              // reaction destroys money. Re-read the storage state and say
+              // which of its two meanings this was, rather than leaving
+              // "no room" to imply a wipe would help.
+              if ((err as VaultError).code === 'storage_full') {
+                info = await vaultClient!.info().catch(() => info)
+                toast(storageFullMeans(info?.storage), 'err')
+                draw()
+                return
+              }
+              throw err
+            }
             toast(`${sats(note.amountMsat)} sat moved onto the vault`, 'ok')
             if (!result.confirmedOnDevice) {
               toast('The vault holds it but did not record it - it shows as pending until it does.', 'err')
