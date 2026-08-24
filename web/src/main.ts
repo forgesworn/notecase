@@ -13,6 +13,15 @@ import {animate, stagger, svg as animeSvg, utils} from 'animejs'
 import {renderSVG} from 'uqr'
 import type {SetupBiometricResult} from 'keystore-kit'
 import {
+  createInstallWatcher,
+  installState,
+  persistenceState,
+  requestPersistence,
+  shouldOfferKeepSafe,
+  type InstallState,
+  type StorageState
+} from './persistence.ts'
+import {
   buildNoteUrl,
   hashK1,
   isBolt11Invoice,
@@ -270,6 +279,10 @@ const setOfflineMode = (on: boolean): void => {
 }
 
 // ---------- tiny DOM + motion helpers ----------
+
+// Chrome fires its install offer once, before any of this renders, so the
+// watcher goes up at module load rather than when a screen asks for it.
+const installer = createInstallWatcher(window)
 
 const el = (html: string): HTMLElement => {
   const template = document.createElement('template')
@@ -1024,10 +1037,7 @@ const viewSetup = (): void =>
               const fresh = freshWalletData()
               store = await createBrowserWallet(first, fresh.data)
               wallet = new Wallet(store.data, store.save, WALLET_OPTS)
-              viewWords(fresh.mnemonic, () => {
-                viewHome()
-                toast('Wallet created. Mint or receive your first note.', 'ok')
-              })
+              viewWords(fresh.mnemonic, () => void afterFirstRun())
               return 'ok'
             }
           })
@@ -1039,6 +1049,106 @@ const viewSetup = (): void =>
 
 // The twelve words, once, with a gate. Not a screen to hurry past: it is
 // the only thing that gets the money back if this device goes in a river.
+// ---------- keeping the wallet safe from the browser ----------
+
+// The store is a sealed blob in localStorage, and a browser is allowed to
+// throw that away for an origin it does not think matters. The twelve words
+// rebuild every note this wallet derived - but not one somebody handed over
+// that has not been rotated yet, and not the mints, pins, history or
+// pending outcomes. So this asks for the grant that makes eviction
+// unlikely, and where the browser refuses, offers the install that usually
+// earns it.
+//
+// It says what happened rather than what we wish had happened: `persist()`
+// is a request, not a control, and a refusal with no lever left is reported
+// as a refusal.
+
+const storageWords = (state: StorageState): string => {
+  if (state === 'granted') return 'kept - this browser has promised not to clear the wallet away'
+  if (state === 'denied') return 'refused - this browser may clear this wallet away to make room'
+  return 'unknown - this browser will not say whether it keeps the wallet'
+}
+
+const installWords = (state: InstallState): string => {
+  if (state === 'installed') return 'installed'
+  if (state === 'available') return 'not installed'
+  if (state === 'ios-manual') return 'not on your Home Screen'
+  return 'this browser cannot install it'
+}
+
+type SafetyState = {storage: StorageState; install: InstallState}
+
+const readSafety = async (): Promise<SafetyState> => ({
+  storage: await persistenceState(navigator.storage),
+  install: installState(installer.env())
+})
+
+const viewKeepSafe = (state: SafetyState, done: () => void): void =>
+  show(() => {
+    const view = el('<div class="view" data-keepsafe></div>')
+    const body = el(`<div class="stack" style="gap:22px">
+      <header class="masthead"><h1 class="wordmark">SAFE KEEPING</h1></header>
+      <div class="hint">${icons.shield}<span><b>A browser can clear this wallet away.</b> Your twelve words bring back every note this wallet makes for itself - but not a note somebody hands you before you rotate it, and not your mints, pins or history. One ask makes that unlikely.</span></div>
+      <div class="kv"><span>storage</span><b data-keepsafe-state></b></div>
+      <div class="kv"><span>installed</span><b data-keepsafe-install></b></div>
+    </div>`)
+
+    const paint = (next: SafetyState): void => {
+      body.querySelector('[data-keepsafe-state]')!.textContent = storageWords(next.storage)
+      body.querySelector('[data-keepsafe-install]')!.textContent = installWords(next.install)
+    }
+    paint(state)
+
+    const ask = el(`<button class="btn btn-silver" data-keepsafe-persist>${icons.shield}<span>Ask for safe keeping</span></button>`)
+    ask.addEventListener('click', () =>
+      busy(ask as HTMLButtonElement, async () => {
+        const storage = await requestPersistence(navigator.storage)
+        paint({storage, install: installState(installer.env())})
+        toast(storage === 'granted' ? 'This browser will keep the wallet.' : 'This browser would not promise.', storage === 'granted' ? 'ok' : 'err')
+        return 'ok'
+      })
+    )
+    body.append(ask)
+
+    const install = installState(installer.env())
+    if (install === 'available') {
+      const button = el(`<button class="btn" data-keepsafe-install-go>${icons.download}<span>Install notecase</span></button>`)
+      button.addEventListener('click', () =>
+        busy(button as HTMLButtonElement, async () => {
+          const outcome = await installer.fire()
+          if (outcome === 'accepted') paint(await readSafety())
+          return 'ok'
+        })
+      )
+      body.append(button)
+    } else if (install === 'ios-manual') {
+      body.append(
+        el(`<div class="hint">${icons.info}<span><b>On iPhone and iPad</b> the only way to earn this is the Home Screen: tap Share, then <b>Add to Home Screen</b>, and open notecase from there.</span></div>`)
+      )
+    }
+
+    const skip = el(`<button class="btn btn-ghost" data-keepsafe-skip>${icons.chevron}<span>Not now</span></button>`)
+    skip.addEventListener('click', done)
+    body.append(skip)
+    body.append(el(`<div class="fineline">You can change this later in Settings.</div>`))
+
+    view.append(body)
+    return view
+  })
+
+// After the twelve words on a fresh wallet: offer safe keeping only where
+// there is something to offer. A browser that already promised, or one with
+// no grant to give and no way to install, goes straight home.
+const afterFirstRun = async (): Promise<void> => {
+  const landHome = (): void => {
+    viewHome()
+    toast('Wallet created. Mint or receive your first note.', 'ok')
+  }
+  const state = await readSafety()
+  if (!shouldOfferKeepSafe(state.storage, state.install)) return landHome()
+  viewKeepSafe(state, landHome)
+}
+
 const viewWords = (mnemonic: string, done: () => void): void => {
   show(() => {
     const view = el('<div class="view"></div>')
@@ -3319,6 +3429,44 @@ const viewSettings = (): void => {
     const check = el(`<button class="btn">${icons.check}<span>Check your notes</span></button>`)
     check.addEventListener('click', () => viewCheck())
     body.append(check)
+
+    // Whether the browser has promised to keep the wallet, and the one
+    // lever that usually earns the promise where it has not. Stated as
+    // found: a refusal we cannot fix still reads as a refusal.
+    const storage = el(`<div class="card" data-storagecard><h3>Safe keeping</h3></div>`)
+    const storageRow = el(`<div class="kv"><span>storage</span><b>checking…</b></div>`)
+    storage.append(storageRow)
+    const paintStorage = (state: SafetyState): void => {
+      storageRow.querySelector('b')!.textContent = storageWords(state.storage)
+      storage.querySelectorAll('[data-storagefix]').forEach(node => node.remove())
+      if (state.storage === 'granted') return
+      const ask = el(`<button class="btn btn-ghost" data-storagefix>${icons.shield}<span>Ask for safe keeping</span></button>`)
+      ask.addEventListener('click', () =>
+        busy(ask as HTMLButtonElement, async () => {
+          await requestPersistence(navigator.storage)
+          paintStorage(await readSafety())
+          return 'ok'
+        })
+      )
+      storage.append(ask)
+      if (state.install === 'available') {
+        const go = el(`<button class="btn btn-ghost" data-storagefix>${icons.download}<span>Install notecase</span></button>`)
+        go.addEventListener('click', () =>
+          busy(go as HTMLButtonElement, async () => {
+            await installer.fire()
+            paintStorage(await readSafety())
+            return 'ok'
+          })
+        )
+        storage.append(go)
+      } else if (state.install === 'ios-manual') {
+        storage.append(
+          el(`<div class="fineline" data-storagefix>Safari grants this once notecase is on your Home Screen: Share, then Add to Home Screen.</div>`)
+        )
+      }
+    }
+    void readSafety().then(paintStorage)
+    body.append(storage)
 
     // nwc
     const nwc = el(`<div class="card"><h3>Lightning wallet (NWC)</h3></div>`)
