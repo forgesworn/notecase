@@ -11,5 +11,13 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src", "../src", "../test/web.test.ts", "../test/claim.test.ts", "../test/share-target.test.ts"]
+  "include": [
+    "src",
+    "../src",
+    "../test/web.test.ts",
+    "../test/claim.test.ts",
+    "../test/share-target.test.ts",
+    "../test/keep-safe.test.ts",
+    "../test/persistence.test.ts"
+  ]
 }
