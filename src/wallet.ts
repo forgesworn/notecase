@@ -1,6 +1,7 @@
 import {
   AmbiguousMintError,
   NoteSpentError,
+  HashLookupUnsupportedError,
   NoteUnknownError,
   PendingNoteError,
   ServiceRejectedError,
@@ -9,6 +10,7 @@ import {
   buildNoteUrl,
   defaultRandomSecret,
   deriveNoteRoot,
+  deriveNoteSecret,
   derivedSecretSource,
   fetchInvoiceVerification,
   fetchNoteInfo,
@@ -19,6 +21,7 @@ import {
   paymentRequestAmountMsat,
   type PaymentRequest,
   hashK1,
+  namesMintOutput,
   meltNote,
   mergeNotesWithHash,
   noteDeclaredAmount,
@@ -2238,7 +2241,43 @@ export class Wallet {
     // keep the cached fee current - mutations price themselves off it
     if (fee) entry.mintFee = fee
     else delete entry.mintFee
-    const invoice = await requestInvoice(pay.callback, grossMsat, this.opts)
+    // Name the note being bought, wherever the mint will honour it.
+    //
+    // Left unnamed, the note's k1 IS the invoice's payment preimage - and a
+    // mint offering LUD-21 verify publishes that preimage at a URL anyone
+    // holding the invoice can construct from its payment hash. The note is
+    // then only as private as the QR it was paid from. Naming it means the
+    // secret is drawn here and never leaves; the preimage becomes an
+    // ordinary payment proof that buys nothing.
+    //
+    // A seeded wallet takes the secret off the mint's own ladder, so twelve
+    // words find this note again; an unseeded one draws it at random, the
+    // same way a split's outputs are drawn. Neither needs to persist it
+    // before the request: the invoice this returns has not been shown to
+    // anybody yet, so a crash before the pending record lands leaves an
+    // unpaid invoice and no note, rather than a note with no secret.
+    let namedK1: string | undefined
+    let namedIndex: number | undefined
+    if (namesMintOutput(pay)) {
+      const root = this.noteRoot()
+      if (root !== null && this.opts.randomSecret === undefined) {
+        namedIndex = this.counterFor(entry.host)
+        namedK1 = deriveNoteSecret(root, entry.host, namedIndex)
+        // The hash is about to be disclosed, so the counter goes to disk
+        // first - the same order the split path uses, and for the same
+        // reason. A crash here wastes an index and costs nothing.
+        this.data.counters ??= {}
+        this.data.counters[entry.host] = namedIndex + 1
+        await this.persist()
+      } else {
+        namedK1 = (this.opts.randomSecret ?? defaultRandomSecret)()
+      }
+    }
+    const invoice = await requestInvoice(
+      pay.callback,
+      grossMsat,
+      namedK1 ? {...this.opts, h: hashK1(namedK1)} : this.opts
+    )
     const decoded = tryDecodeBolt11(invoice.pr)
     if (!decoded) throw new WalletUsageError('The mint returned an invoice this wallet cannot decode.')
     const pending: PendingMint = {
@@ -2246,6 +2285,8 @@ export class Wallet {
       mintHost: entry.host,
       baseUrl: fromLud17(pay.withdrawLink),
       pr: invoice.pr,
+      ...(namedK1 !== undefined ? {namedK1} : {}),
+      ...(namedIndex !== undefined ? {namedIndex} : {}),
       ...(invoice.verify ? {verifyUrl: invoice.verify} : {}),
       grossMsat,
       expectedNetMsat: fee ? mintFeeBand(grossMsat, fee).maxNetMsat : grossMsat,
@@ -2263,15 +2304,27 @@ export class Wallet {
   // preimage may come from LUD-21 verify or from the payer's own wallet
   // (an NWC pay result); either way it is checked against the payment hash
   // before anything is believed.
-  async claimMint(pending: PendingMint, preimageHex: string): Promise<ReceiveResult> {
-    if (!verifyPreimage(preimageHex, pending.id)) {
-      throw new WalletUsageError('That preimage does not settle this mint invoice.')
+  async claimMint(pending: PendingMint, preimageHex?: string): Promise<ReceiveResult> {
+    // A named mint's note is the secret this wallet chose and persisted at
+    // quote time, so there is no preimage to check and none to store: the
+    // money was never in the preimage to begin with. One is still accepted
+    // and ignored, so a caller polling verify need not know the difference.
+    const k1 = pending.namedK1 ?? preimageHex
+    if (!k1) {
+      throw new WalletUsageError(
+        'This mint invoice was not claimed to a named note, so claiming it needs the payment preimage.'
+      )
     }
-    // The preimage is the note's k1, so it is persisted with the claim
-    // BEFORE the receive runs: a failure from here to the note landing
-    // (timeout, crash, changed mint key) leaves reconcile() everything it
-    // needs to re-drive the receive, and the money is never memory-only.
-    pending.preimageHex = preimageHex
+    if (!pending.namedK1) {
+      if (!verifyPreimage(preimageHex!, pending.id)) {
+        throw new WalletUsageError('That preimage does not settle this mint invoice.')
+      }
+      // The preimage is the note's k1, so it is persisted with the claim
+      // BEFORE the receive runs: a failure from here to the note landing
+      // (timeout, crash, changed mint key) leaves reconcile() everything it
+      // needs to re-drive the receive, and the money is never memory-only.
+      pending.preimageHex = preimageHex!
+    }
     pending.state = 'claimed'
     pending.updatedAt = now()
     await this.persist()
@@ -2283,8 +2336,11 @@ export class Wallet {
     // only make receive() warn about our own guess.
     const floor = pending.minNetMsat ?? pending.expectedNetMsat
     const declared = floor === pending.expectedNetMsat ? pending.expectedNetMsat : undefined
-    const result = await this.receive(buildNoteUrl(pending.baseUrl, preimageHex, declared))
+    const result = await this.receive(buildNoteUrl(pending.baseUrl, k1, declared))
     delete pending.preimageHex
+    // Bookkeeping the split path already keeps: which rung of the mint's
+    // ladder this note came off.
+    if (pending.namedIndex !== undefined) result.note.index = pending.namedIndex
     pending.updatedAt = now()
     await this.persist()
     if (result.note.amountMsat > pending.expectedNetMsat || result.note.amountMsat < floor) {
@@ -2301,16 +2357,33 @@ export class Wallet {
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       throw new WalletUsageError('The wait must be a positive, finite number of milliseconds.')
     }
-    if (!pending.verifyUrl) {
+    // A named mint needs no verify at all: the note itself is the
+    // settlement signal, since the mint credits it the moment the invoice
+    // settles and nothing else can bring it into existence. That is worth
+    // preferring even where verify exists - it asks the mint about the
+    // wallet's own note rather than about an invoice anyone could be
+    // watching.
+    if (!pending.verifyUrl && !pending.namedK1) {
       throw new WalletUsageError(
         'This mint offers no LUD-21 verify - pay the invoice, then run `notecase receive` and paste <baseUrl>?k1=<payment preimage>.'
       )
     }
     const deadline = now() + timeoutMs
     for (;;) {
-      const verification = await fetchInvoiceVerification(pending.verifyUrl, this.opts)
-      if (verification.settled && verification.preimage) {
-        return this.claimMint(pending, verification.preimage)
+      if (pending.namedK1) {
+        try {
+          await fetchNoteInfo(buildNoteUrl(pending.baseUrl, pending.namedK1), this.opts)
+          return await this.claimMint(pending)
+        } catch (err) {
+          // Not minted yet is the expected answer until it settles.
+          // Anything else is the mint failing, not the invoice pending.
+          if (!(err instanceof NoteUnknownError)) throw err
+        }
+      } else {
+        const verification = await fetchInvoiceVerification(pending.verifyUrl!, this.opts)
+        if (verification.settled && verification.preimage) {
+          return this.claimMint(pending, verification.preimage)
+        }
       }
       if (now() > deadline) return null
       await new Promise(resolve => setTimeout(resolve, options.intervalMs ?? 1_000))
@@ -2834,7 +2907,17 @@ export class Wallet {
   // worth something. This is the whole reason the secrets are derived: a
   // wallet that has lost everything but twelve words and the name of a
   // mint can find its money by asking the mint.
-  async restoreFromMint(host: string, options: {gap?: number} = {}): Promise<{found: NoteRecord[]; next: number}> {
+  // `allowSecretDisclosure` is the caller's answer to a mint that will not
+  // answer lookups by hash. Without it the walk asks only by hash, which
+  // tells the mint which notes are being asked about but never the secrets
+  // that spend them. With it, every derived secret up to the gap goes on
+  // the wire in a query string - including the ones this wallet has not
+  // minted into yet - so it is a decision for whoever owns the money, not
+  // a default.
+  async restoreFromMint(
+    host: string,
+    options: {gap?: number; allowSecretDisclosure?: boolean} = {}
+  ): Promise<{found: NoteRecord[]; next: number; unresolved: number}> {
     const root = this.noteRoot()
     if (!root) throw new WalletUsageError('This wallet has no recovery words, so there is nothing to restore from.')
     const entry = this.mintEntry(host)
@@ -2846,24 +2929,40 @@ export class Wallet {
       entry.baseUrl = baseUrl
     }
 
-    const result = await restoreNotes(baseUrl, root, entry.host, {gap: options.gap ?? 20, start: 0}, this.opts)
+    let result
+    try {
+      result = await restoreNotes(
+        baseUrl,
+        root,
+        entry.host,
+        {
+          gap: options.gap ?? 20,
+          start: 0,
+          ...(options.allowSecretDisclosure ? {allowSecretDisclosure: true} : {})
+        },
+        this.opts
+      )
+    } catch (err) {
+      if (err instanceof HashLookupUnsupportedError) {
+        // Not "you have no notes here". The mint answered every private
+        // lookup the way it answers one for a note it has never issued, so
+        // an empty result would be a guess dressed as a fact.
+        throw new WalletUsageError(
+          `${entry.host} does not answer lookups by hash, so a restore there cannot tell an empty wallet from a mint that only takes raw secrets. Retry allowing disclosure to walk by secret instead - the mint, and anything logging its requests, will see every secret this wallet derives up to the gap.`
+        )
+      }
+      throw err
+    }
     const found: NoteRecord[] = []
     for (const restored of result.found) {
       const id = hashK1(restored.k1)
       if (this.data.notes.some(note => note.id === id)) continue
-      // A note URL carries no callback, so the mint is asked for one -
-      // and for what the note is really worth while it is answering. If
-      // it will not say, the record is kept anyway and marked for
-      // reconcile to finish: the secret is the money, not the callback.
-      let callback = ''
-      let amountMsat = restored.amountMsat ?? 0
-      try {
-        const info = await fetchNoteInfo(buildNoteUrl(baseUrl, restored.k1), this.opts)
-        callback = info.callback
-        amountMsat = info.maxWithdrawable
-      } catch {
-        // leave it for reconcile
-      }
+      // The callback came back with the lookup, so there is nothing to ask
+      // twice. Asking again by raw k1 - which is what this used to do -
+      // would have put every restored secret on the wire immediately after
+      // a walk that went to the trouble of keeping them off it.
+      const callback = restored.callback ?? ''
+      const amountMsat = restored.amountMsat ?? 0
       const record: NoteRecord = {
         id,
         k1: restored.k1,
@@ -2884,10 +2983,16 @@ export class Wallet {
     this.data.counters ??= {}
     this.data.counters[entry.host] = Math.max(this.counterFor(entry.host), result.next)
     await this.persist()
-    return {found, next: result.next}
+    // `unresolved` is indices the mint said something about that this
+    // version has no name for - a note state added since it was written.
+    // Not notes, and not recoverable here, but the caller should be able to
+    // say so rather than report a clean restore over the top of them.
+    return {found, next: result.next, unresolved: result.unresolved.length}
   }
 
-  async restoreAll(options: {gap?: number} = {}): Promise<Array<{host: string; found: NoteRecord[]; error?: string}>> {
+  async restoreAll(
+    options: {gap?: number; allowSecretDisclosure?: boolean} = {}
+  ): Promise<Array<{host: string; found: NoteRecord[]; error?: string}>> {
     const results: Array<{host: string; found: NoteRecord[]; error?: string}> = []
     for (const entry of [...this.data.mints]) {
       try {
