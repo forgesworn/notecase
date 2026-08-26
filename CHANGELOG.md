@@ -1,9 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [0.10.0] - 2026-08-26
 
-**Requires `lnurlcash-kit@^0.4.0`, which is unpublished. This will not
-install until it is.**
+- **The wallet asks the browser to keep it, and says so when it will not.**
+  A sealed blob in `localStorage` is storage a browser is allowed to evict.
+  The wallet now requests persistence and reports the state it actually got
+  back rather than the one it hoped for, including the browsers that will
+  not say either way.
 
 - **A minted note is no longer the payment preimage.** Where a mint says it
   will credit a note at a hash the wallet names, `startMint` now names one:
