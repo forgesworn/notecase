@@ -140,11 +140,18 @@ describe('restoring from the words', () => {
     await fresh.wallet.addMint(`mint@${hostOf(theMint)}`)
     expect(fresh.wallet.balanceMsat()).toBe(0)
 
-    const restored = await fresh.wallet.restoreFromMint(hostOf(theMint))
+    // the mock mint answers no lookups by hash, so these walk by secret
+    const restored = await fresh.wallet.restoreFromMint(hostOf(theMint), {
+      allowSecretDisclosure: true
+    })
     expect(restored.found.length).toBeGreaterThan(0)
     expect(fresh.wallet.balanceMsat()).toBe(expected)
-    // and it knows where to carry on from
-    expect(fresh.wallet.counterFor(hostOf(theMint))).toBe(original.wallet.counterFor(hostOf(theMint)))
+    // and it knows where to carry on from - past everything the walk
+    // disclosed, not merely past the last note it found, because those
+    // secrets are in the mint's request log now
+    expect(fresh.wallet.counterFor(hostOf(theMint))).toBeGreaterThanOrEqual(
+      original.wallet.counterFor(hostOf(theMint))
+    )
     for (const note of restored.found) expect(note.origin).toBe('recovered')
 
     // the restored wallet can spend what it found
@@ -167,10 +174,14 @@ describe('restoring from the words', () => {
     }
     theMint.state.creditNote(deriveNoteSecret(root, host, 2), 7_000)
 
-    const restored = await wallet.restoreFromMint(host)
+    const restored = await wallet.restoreFromMint(host, {allowSecretDisclosure: true})
     expect(restored.found.map(note => note.index)).toEqual([2])
     expect(wallet.balanceMsat()).toBe(7_000)
-    expect(restored.next).toBe(3)
+    // 3 would be right for a walk that disclosed nothing. This one asked
+    // by secret, so it burned every index it touched looking for more:
+    // minting into any of them now would mint a note the mint's log
+    // already holds the secret for.
+    expect(restored.next).toBe(23)
   })
 
   it('refuses when there is no seed to walk', async () => {
@@ -212,7 +223,7 @@ describe('notes made before the seed', () => {
     // and now a restore on a fresh device finds it
     const fresh = seeded(WORDS)
     await fresh.wallet.addMint(`mint@${host}`)
-    await fresh.wallet.restoreFromMint(host)
+    await fresh.wallet.restoreFromMint(host, {allowSecretDisclosure: true})
     expect(fresh.wallet.balanceMsat()).toBe(21_000)
     expect(hashK1(fresh.wallet.liveNotes()[0]!.k1)).toBe(upgraded.liveNotes()[0]!.id)
   })

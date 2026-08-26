@@ -18,7 +18,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
 
   notecase init [--insecure-plaintext] [--restore]
   notecase seed
-  notecase restore [--mint <host>]
+  notecase restore [--mint <host>] [--disclose-secrets]
   notecase adopt
   notecase mints add <address|lnurl> [--label <name>]
   notecase mints list
@@ -224,6 +224,7 @@ const main = async (): Promise<void> => {
       label: {type: 'string'},
       memo: {type: 'string'},
       mint: {type: 'string'},
+      'disclose-secrets': {type: 'boolean'},
       manual: {type: 'boolean', default: false},
       wait: {type: 'string'},
       msat: {type: 'boolean', default: false},
@@ -486,8 +487,15 @@ const main = async (): Promise<void> => {
       let total = 0
       for (const host of hosts) {
         try {
-          const result = await wallet.restoreFromMint(host)
+          const result = await wallet.restoreFromMint(host, {
+            ...(values['disclose-secrets'] ? {allowSecretDisclosure: true} : {})
+          })
           total += result.found.length
+          if (result.unresolved) {
+            console.log(
+              `${host}: ${result.unresolved} index/indices answered with something this version does not recognise - a newer note state, most likely. Nothing was lost, but this wallet cannot say what they are.`
+            )
+          }
           console.log(
             result.found.length
               ? `${host}: ${result.found.length} note(s), ${sats(result.found.reduce((sum, note) => sum + note.amountMsat, 0))}`

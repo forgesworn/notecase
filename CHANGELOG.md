@@ -1,5 +1,42 @@
 # Changelog
 
+## [Unreleased]
+
+**Requires `lnurlcash-kit@^0.4.0`, which is unpublished. This will not
+install until it is.**
+
+- **A minted note is no longer the payment preimage.** Where a mint says it
+  will credit a note at a hash the wallet names, `startMint` now names one:
+  the secret is drawn here and never leaves. Left unnamed, a note's `k1` IS
+  the invoice preimage, and a mint offering LUD-21 `verify` publishes that
+  preimage at a URL anyone holding the invoice can build from its payment
+  hash - so the note was only ever as private as the QR it was paid from.
+
+  Seeded wallets take the secret off the mint's own ladder, so the words
+  still find the note; unseeded wallets draw it at random, as a split's
+  outputs already are. `claimMint` needs no preimage for a named mint, and
+  `awaitMint` waits on the note itself rather than polling `verify`, which
+  asks the mint about the wallet's own note instead of about an invoice
+  anyone could be watching.
+
+- **`restoreFromMint` no longer asks a second time with the raw secret.**
+  The kit's walk now returns each note's callback, so the follow-up
+  `fetchNoteInfo` by raw `k1` is gone. It used to put every restored secret
+  on the wire immediately after a walk that went to the trouble of keeping
+  them off it.
+
+- **A restore that cannot be answered privately now says so.** The kit walks
+  by hash; a mint that does not answer those lookups is indistinguishable
+  from one holding none of your notes, so rather than report an empty wallet
+  the restore fails and explains. `notecase restore --disclose-secrets`
+  walks by raw secret instead, which is a decision for whoever owns the
+  money: it puts every derived secret up to the gap on the wire, including
+  indices the wallet has not minted into yet.
+
+- `restoreFromMint` reports `unresolved`, a count of indices the mint
+  answered with something this version has no name for. Previously any such
+  answer ended the whole restore.
+
 ## [0.9.4] - 2026-08-23
 
 - **A deposit can no longer be refused over its own label.** The device

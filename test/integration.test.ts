@@ -1,6 +1,7 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createFakeBackend, createMoneyer, fakeBolt11, type Moneyer, type FakeBackend} from '@forgesworn/moneyer'
 import {bolt11PaymentHash} from 'farrier-kit/bolt11'
+import {fetchInvoiceVerification} from 'lnurlcash-kit'
 import {bytesToHex, randomBytes} from '@noble/hashes/utils.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {hexToBytes} from '@noble/hashes/utils.js'
@@ -133,8 +134,12 @@ describe('notecase against moneyer', () => {
     expect(result).not.toBeNull()
     expect(result!.note.amountMsat).toBe(21_000)
     expect(wallet.wallet.balanceMsat()).toBe(21_000)
-    // the claim rotated: the preimage the payer's wallet saw is dead
-    expect(moneyer.store.noteById(pending.id)?.state).toBe('burned')
+    // The note was named at quote time, so the payment preimage was never
+    // a note here at all - not one that got burned on claim, one the mint
+    // never credited. Which is the point: the mint publishes that preimage
+    // to anyone holding the invoice.
+    expect(pending.namedK1).toBeDefined()
+    expect(moneyer.store.noteById(pending.id)).toBeFalsy()
   })
 
   it('recovers a melt moneyer restores after a failed payment', async () => {
@@ -200,5 +205,54 @@ describe('notecase against moneyer', () => {
     backend.control.settleInvoice(pending.id)
     const claimed = await wallet.wallet.awaitMint(pending, {timeoutMs: 5_000, intervalMs: 20})
     expect(claimed?.note.amountMsat).toBe(149_000)
+  })
+})
+
+// LUD-25 lets a wallet name the note it is buying, and a mint that honours
+// it credits that hash instead of the payment preimage. It matters more
+// than it looks: leave the note unnamed and its k1 IS the preimage, which
+// the mint publishes at a LUD-21 verify URL anyone holding the invoice can
+// build from its payment hash.
+describe('naming the note being minted', () => {
+  it('mints to a secret the mint never sees, and the preimage buys nothing', async () => {
+    const {moneyer, backend} = await startMint()
+    const alice = makeWallet()
+    await alice.wallet.addMint(`mint@${new URL(moneyer.url).host}`)
+
+    // no seed on this wallet: naming does not need one, and most wallets
+    // in the wild do not have one
+    const {pending} = await alice.wallet.startMint(50_000)
+    expect(pending.namedK1).toBeDefined()
+    expect(pending.namedIndex).toBeUndefined()
+
+    backend.control.settleInvoice(bolt11PaymentHash(pending.pr)!)
+
+    // Claimed with no preimage at all.
+    const minted = await alice.wallet.claimMint(pending)
+    expect(minted.note.amountMsat).toBe(50_000)
+    // receive() rotates on arrival, so the note the wallet ends up holding
+    // is a further secret again - the named one was only ever the handover
+    expect(alice.wallet.balanceMsat()).toBe(50_000)
+
+    // And the preimage the mint publishes to anyone holding the invoice is
+    // worth nothing here: it is not this note, and never was.
+    const verification = await fetchInvoiceVerification(pending.verifyUrl!)
+    expect(verification.settled).toBe(true)
+    const bob = makeWallet()
+    await expect(
+      bob.wallet.receive(`${pending.baseUrl}?k1=${verification.preimage}`)
+    ).rejects.toThrow()
+  })
+
+  it('leaves the counter past the named index, so nothing reuses it', async () => {
+    const {moneyer} = await startMint()
+    const alice = makeWallet()
+    const host = new URL(moneyer.url).host
+    await alice.wallet.addMint(`mint@${host}`)
+
+    const first = await alice.wallet.startMint(50_000)
+    const second = await alice.wallet.startMint(50_000)
+    expect(first.pending.namedK1).not.toBe(second.pending.namedK1)
+    expect(host).toBeTruthy()
   })
 })
