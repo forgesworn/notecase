@@ -1354,6 +1354,25 @@ export class Wallet {
     return this.data.notes.filter(note => note.state === 'sent')
   }
 
+  // Folds chosen notes into one, as an end in itself rather than on the way
+  // to a payment - prepareExactFrom is the same merge reached while cutting
+  // an amount to hand over. Worth doing on its own because the mint refunds
+  // (n - 1) base fees on a merge (see mutateOnce's fee algebra), so the note
+  // that comes back is worth slightly MORE than the inputs summed, and a
+  // case holding one note instead of nine costs one rotate rather than nine
+  // to keep fresh.
+  //
+  // chosenNotes does the refusing: unknown ids, notes that are not live,
+  // notes that have not met their mint, and any mix of mints.
+  async combine(noteIds: string[]): Promise<NoteRecord> {
+    const chosen = this.chosenNotes(noteIds, true)
+    if (chosen.length < 2) {
+      throw new WalletUsageError('Combining takes at least two notes.')
+    }
+    const [target] = await this.mutate(chosen, {kind: 'merge'})
+    return target!
+  }
+
   // A panic rotate: same value, fresh secret, everything anyone ever saw of
   // this note - a screenshot, a log line, a shoulder - stops mattering.
   async rotateLive(note: NoteRecord): Promise<NoteRecord> {

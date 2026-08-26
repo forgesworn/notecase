@@ -1305,28 +1305,85 @@ const signedOk = (w: Wallet, note: NoteRecord): boolean => {
   return keys.some(key => Boolean(key) && verifyNoteSignature(note.k1, note.amountMsat, note.signature!, key!))
 }
 
+// ---------- choosing several notes at once ----------
+
+// Which notes are ticked on the home lists, and whether the lists are in
+// picking mode at all. Module-level rather than held in viewHome, because
+// viewHome rebuilds its entire DOM after every batch action and a selection
+// living in that DOM would not survive the first thing done to it. Both are
+// cleared on the way into home unless the caller is one of those actions,
+// which re-enter as viewHome(true).
+let selecting = false
+const selection = new Set<string>()
+
+// What the ticked notes will actually allow. Worked out up front so the bar
+// can offer only what would succeed: a button that explains itself by
+// failing is worse than one plainly not available, and these are mutations
+// of money.
+type Picked = {
+  notes: NoteRecord[]
+  msat: number
+  // live AND already known to their mint. rotate and combine both call the
+  // mint, so a note that came in offline and has not met one yet can do
+  // neither until reconcile has rotated it (see Wallet.chosenNotes).
+  ready: boolean
+  sent: boolean
+  oneMint: boolean
+}
+
+const picked = (w: Wallet): Picked => {
+  const notes = [...selection]
+    .map(id => w.noteById(id))
+    .filter((note): note is NoteRecord => note !== undefined)
+  return {
+    notes,
+    msat: notes.reduce((sum, note) => sum + note.amountMsat, 0),
+    ready: notes.length > 0 && notes.every(note => note.state === 'live' && Boolean(note.callback)),
+    sent: notes.length > 0 && notes.every(note => note.state === 'sent'),
+    oneMint: new Set(notes.map(note => note.mintHost)).size === 1
+  }
+}
+
 const noteRow = (w: Wallet, note: NoteRecord): HTMLElement => {
-  const row = el(`<button class="note-row">
-    <div class="coin">${icons.note}</div>
+  const ticked = selecting && selection.has(note.id)
+  const row = el(`<button class="note-row${ticked ? ' ticked' : ''}"${selecting ? ` aria-pressed="${ticked}"` : ''}>
+    <div class="coin">${ticked ? icons.check : icons.note}</div>
     <div class="who"><b></b><small></small></div>
     <div class="amt"><span></span><span class="unit">sat</span></div>
-    <span class="chev">${icons.chevron}</span>
+    <span class="chev">${selecting ? '' : icons.chevron}</span>
   </button>`)
   row.querySelector('b')!.textContent =
     note.state === 'sent' ? 'handed over' : note.origin === 'change' ? 'change' : note.origin
   row.querySelector('small')!.textContent = `${note.mintHost}${signedOk(w, note) ? ' · signed' : ''}`
   row.querySelector('.amt span')!.textContent = sats(note.amountMsat)
-  row.addEventListener('click', () => viewNote(note))
+  row.addEventListener('click', () => {
+    if (!selecting) {
+      viewNote(note)
+      return
+    }
+    if (selection.has(note.id)) selection.delete(note.id)
+    else selection.add(note.id)
+    viewHome(true)
+  })
   return row
 }
 
-const viewHome = (): void => {
+const viewHome = (keepSelection = false): void => {
   const w = wallet!
+  // Every other way into home is a fresh arrival - a finished mint, a back
+  // button, a melt - and arriving to find notes still ticked from whatever
+  // was being done ten minutes ago is a trap. Only the batch actions and
+  // the ticking itself come back with the selection intact.
+  if (!keepSelection) {
+    selecting = false
+    selection.clear()
+  }
   show(() => {
     const view = el(`<div class="view">
       <div class="top">
         <div class="brand">${icons.logo}<span>NOTECASE</span></div>
         <span class="spacer"></span>
+        <button class="btn-icon" data-pick data-hint="Choose several notes and act on them together" aria-label="Choose notes" aria-pressed="${selecting}" style="color:${selecting ? 'var(--silver)' : 'var(--dim)'}">${icons.check}</button>
         <button class="btn-icon" data-offline data-hint="${offlineMode ? 'Offline mode is on - tap to talk to mints again' : 'Offline mode: hand notes over with nothing on the wire'}" aria-label="Offline mode" aria-pressed="${offlineMode}" style="color:${offlineMode ? 'var(--warn)' : 'var(--dim)'}">${icons.offline}</button>
         <button class="btn-icon" data-history data-hint="Everything that has happened" aria-label="History">${icons.history}</button>
         <button class="btn-icon" data-settings data-hint="Mints, backup, security" aria-label="Settings">${icons.settings}</button>
@@ -1438,6 +1495,128 @@ const viewHome = (): void => {
       const stack = el('<div class="stack-tight"></div>')
       sent.forEach(note => stack.append(noteRow(w, note)))
       lists.append(stack)
+    }
+
+    const all = [...live, ...sent]
+    const pickToggle = view.querySelector('[data-pick]') as HTMLButtonElement
+    // Nothing to choose between with one note, and the icon would only
+    // lead somewhere that does less than tapping the note itself.
+    if (all.length < 2) pickToggle.remove()
+    else
+      pickToggle.addEventListener('click', () => {
+        selecting = !selecting
+        if (!selecting) selection.clear()
+        viewHome(true)
+      })
+
+    if (selecting) {
+      const p = picked(w)
+      const bar = el(`<div class="batch">
+        <div class="batch-head"><b></b><span></span></div>
+        <div class="batch-acts"></div>
+      </div>`)
+      bar.querySelector('b')!.textContent =
+        p.notes.length === 0
+          ? 'tap the notes you want'
+          : `${p.notes.length} chosen`
+      bar.querySelector('.batch-head span')!.textContent = p.notes.length === 0 ? '' : `${sats(p.msat)} sat`
+      const acts = bar.querySelector('.batch-acts') as HTMLElement
+
+      if (p.notes.length < all.length) {
+        const every = el(`<button class="btn btn-ghost">${icons.check}<span>All ${all.length}</span></button>`)
+        every.addEventListener('click', () => {
+          all.forEach(note => selection.add(note.id))
+          viewHome(true)
+        })
+        acts.append(every)
+      }
+
+      if (p.ready) {
+        const rotate = el(`<button class="btn btn-silver">${icons.refresh}<span>Rotate ${p.notes.length}</span></button>`)
+        rotate.addEventListener('click', () =>
+          busy(rotate as HTMLButtonElement, async () => {
+            // One at a time, deliberately. Every mutate draws the next
+            // index off that mint's ladder and writes the counter in the
+            // same breath as the secrets, so two in flight would reach for
+            // the same index and the mint would refuse one of them.
+            const fresh: string[] = []
+            let firstFailure = ''
+            for (const note of p.notes) {
+              try {
+                fresh.push((await w.rotateLive(note)).id)
+              } catch (err) {
+                if (!firstFailure) firstFailure = (err as Error).message
+              }
+            }
+            selection.clear()
+            fresh.forEach(id => selection.add(id))
+            if (firstFailure) toast(`Rotated ${fresh.length} of ${p.notes.length}. ${firstFailure}`, 'err')
+            else toast(`Rotated ${fresh.length} - every old secret is worthless now.`, 'ok')
+            viewHome(true)
+          })
+        )
+        acts.append(rotate)
+      }
+
+      if (p.ready && p.notes.length >= 2 && p.oneMint) {
+        const fold = el(`<button class="btn">${icons.drawer}<span>Combine ${p.notes.length}</span></button>`)
+        fold.addEventListener('click', () =>
+          busy(fold as HTMLButtonElement, async () => {
+            const before = p.msat
+            const one = await w.combine(p.notes.map(note => note.id))
+            selection.clear()
+            selection.add(one.id)
+            // The mint refunds (n - 1) base fees on a merge, so this often
+            // comes back worth MORE than what went in. Say so - money
+            // appearing without explanation reads as a bug.
+            const gained = one.amountMsat - before
+            toast(
+              gained > 0
+                ? `Combined into one note of ${sats(one.amountMsat)} sat - ${sats(gained)} sat back in refunded fees.`
+                : `Combined into one note of ${sats(one.amountMsat)} sat.`,
+              'ok'
+            )
+            viewHome(true)
+          })
+        )
+        acts.append(fold)
+      }
+
+      if (p.ready && p.notes.length >= 2 && !p.oneMint) {
+        acts.append(
+          el('<span class="fineline">Notes from different mints cannot be combined, but they can all be rotated.</span>')
+        )
+      }
+
+      if (p.sent) {
+        const taken = el(`<button class="btn btn-ghost">${icons.check}<span>They took ${p.notes.length}</span></button>`)
+        taken.addEventListener('click', () =>
+          busy(taken as HTMLButtonElement, async () => {
+            for (const note of p.notes) await w.markTaken(note)
+            selection.clear()
+            toast(`Cleared ${p.notes.length} from the handed-over list.`, 'ok')
+            viewHome(true)
+          })
+        )
+        acts.append(taken)
+      }
+
+      if (p.notes.length > 0 && !p.ready && !p.sent) {
+        acts.append(
+          el(
+            '<span class="fineline">A mix of live and handed-over notes, or one that has not met its mint yet. Choose one kind at a time.</span>'
+          )
+        )
+      }
+
+      const done = el(`<button class="btn btn-ghost">${icons.x}<span>Done</span></button>`)
+      done.addEventListener('click', () => {
+        selecting = false
+        selection.clear()
+        viewHome(true)
+      })
+      acts.append(done)
+      view.append(bar)
     }
 
     view.querySelector('[data-settings]')!.addEventListener('click', viewSettings)

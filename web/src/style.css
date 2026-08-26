@@ -288,6 +288,31 @@ button.step .go svg { width: 15px; height: 15px; }
 .note-row .chev { color: var(--dim); display: inline-flex; }
 .note-row .chev svg { width: 16px; height: 16px; }
 
+/* picked out of the list, on the way to a batch action */
+.note-row.ticked { background: var(--paper-3); border-color: var(--silver-deep); }
+.note-row.ticked .coin { color: var(--ok); border-color: var(--ok); }
+.note-row .chev:empty { display: none; }
+
+/* the batch bar: sticky rather than fixed, so it rides above the list
+   without becoming a second thing competing with the scan FAB for the
+   bottom-right corner */
+.batch {
+  position: sticky; bottom: 0; z-index: 3;
+  display: flex; flex-direction: column; gap: 12px;
+  margin-top: 22px; padding: 16px;
+  background: var(--paper-2); border: 1px solid var(--hair-strong);
+  box-shadow: 0 -10px 24px -18px rgba(0, 0, 0, 0.9);
+}
+.batch-head { display: flex; align-items: baseline; gap: 12px; }
+.batch-head b {
+  font-family: var(--mono); font-size: 11.5px; font-weight: 600;
+  letter-spacing: 0.26em; text-transform: uppercase; color: var(--dim);
+}
+.batch-head span { margin-left: auto; font-family: var(--display); font-weight: 700; font-size: 17px; }
+.batch-acts { display: flex; flex-wrap: wrap; gap: 10px; }
+.batch-acts .btn { flex: 1 1 46%; min-width: 150px; }
+.batch-acts .fineline { flex: 1 1 100%; }
+
 .hist-row {
   display: flex; align-items: center; gap: 14px;
   background: var(--paper-2); border: 1px solid var(--hair);

@@ -230,3 +230,71 @@ describe('handing over notes the holder chose, offline', () => {
     expect(made.wallet.balanceMsat()).toBe(60_000)
   })
 })
+
+// Folding several notes into one, as an end in itself.
+//
+// prepareExactFrom already merges, but only on the way to cutting an amount
+// to hand over. A case that has accumulated nine notes off nine bits of
+// change wants the same merge with nothing on the other side of it: fewer,
+// larger notes cost fewer rotates to keep fresh, and the mint refunds the
+// base fee it charged on each split that made them.
+describe('combining notes the holder chose', () => {
+  it('folds several notes into one and refunds a base fee for each merged away', async () => {
+    const mint = await start()
+    const made = makeWallet()
+    await made.wallet.addMint(`mint@${new URL(mint.url).host}`)
+    const a = await fund(made, mint, 20_000)
+    const b = await fund(made, mint, 30_000)
+    const c = await fund(made, mint, 40_000)
+    const spare = await fund(made, mint, 15_000)
+    const before = made.wallet.balanceMsat()
+
+    const one = await made.wallet.combine([a.id, b.id, c.id])
+
+    expect(one.state).toBe('live')
+    expect(one.origin).toBe('merge')
+    // Three in, one out: the two base fees those splits paid come back, so
+    // the note is worth AT LEAST the sum and never less than it.
+    expect(one.amountMsat).toBeGreaterThanOrEqual(90_000)
+    expect(made.wallet.balanceMsat()).toBeGreaterThanOrEqual(before)
+    for (const gone of [a, b, c]) expect(made.wallet.noteById(gone.id)?.state).toBe('spent')
+    // The note nobody chose is exactly where it was.
+    expect(made.wallet.noteById(spare.id)?.state).toBe('live')
+    expect(made.wallet.noteById(spare.id)?.amountMsat).toBe(15_000)
+  })
+
+  it('refuses one note, an empty choice, and a note that is not in the wallet', async () => {
+    const mint = await start()
+    const made = makeWallet()
+    await made.wallet.addMint(`mint@${new URL(mint.url).host}`)
+    const only = await fund(made, mint, 50_000)
+
+    await expect(made.wallet.combine([])).rejects.toThrow(/at least one note/)
+    await expect(made.wallet.combine([only.id])).rejects.toThrow(/at least two notes/)
+    await expect(made.wallet.combine([only.id, '00'.repeat(32)])).rejects.toThrow(WalletUsageError)
+    // Refused means untouched, not half-done.
+    expect(made.wallet.noteById(only.id)?.state).toBe('live')
+    expect(made.wallet.balanceMsat()).toBe(50_000)
+  })
+
+  it('refuses notes from two different mints, and a note already handed over', async () => {
+    const one = await start()
+    const two = await start()
+    const made = makeWallet()
+    await made.wallet.addMint(`mint@${new URL(one.url).host}`)
+    await made.wallet.addMint(`mint@${new URL(two.url).host}`)
+    const here = await fund(made, one, 50_000)
+    const there = await fund(made, two, 50_000)
+
+    await expect(made.wallet.combine([here.id, there.id])).rejects.toThrow(/different mints/)
+    expect(made.wallet.balanceMsat()).toBe(100_000)
+
+    const keep = await fund(made, one, 40_000)
+    const spend = await fund(made, one, 40_000)
+    // drawn from `spend` on purpose, so `keep` is still live and the only
+    // thing wrong with the pair below is the state of the other one
+    const sent = await made.wallet.send(10_000, undefined, [spend.id])
+    await expect(made.wallet.combine([keep.id, sent.id])).rejects.toThrow(/sent/)
+    expect(made.wallet.noteById(keep.id)?.state).toBe('live')
+  })
+})
