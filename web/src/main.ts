@@ -89,7 +89,13 @@ const protocolFetch: typeof fetch = (input, init) =>
 
 const WALLET_OPTS = {timeoutMs: 20_000, fetch: protocolFetch}
 
-const SUGGESTED_MINTS = ['mint@moneyer.dev', 'mint@mint.forgesworn.dev']
+// Chips on the "add a mint" card, so only mints that can still issue one
+// belong here. mint.forgesworn.dev is sunsetting: it refuses /p/cb, so
+// suggesting it hands someone a mint whose very first action fails. Its
+// read side stays up until the box is retired, so a wallet that already
+// holds one of its notes can still check, rotate and melt it - it just
+// should not be offered to anyone new.
+const SUGGESTED_MINTS = ['mint@moneyer.dev', 'mint@mint.lnurlcash.com']
 
 // ---------- the claim route ----------
 // #/claim?u=<note url> (or u=<base>&k1=<secret>&a=<msat>, the hardware-
