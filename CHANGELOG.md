@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.11.1] - 2026-08-27
+
+- **The add-a-mint card no longer suggests a mint that has stopped issuing.**
+  `mint.forgesworn.dev` went into sunset on 2026-08-27, so it rejects `/p/cb`
+  outright, and a chip offering it was handing someone a mint whose very
+  first action fails. `mint.lnurlcash.com` takes its place. Nothing changes
+  for a wallet already holding one of that mint's notes: its read side is
+  untouched by sunsetting, so check, rotate, merge and melt all work as
+  before.
+
 ## [0.11.0] - 2026-08-27
 
 - **The home lists take a selection, and act on all of it at once.** A case
