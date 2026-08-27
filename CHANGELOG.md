@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.11.0] - 2026-08-27
+
+- **The home lists take a selection, and act on all of it at once.** A case
+  that has taken change nine times holds nine notes, and until now every one
+  of them was a separate trip through the note screen to rotate. The tick in
+  the top bar turns the lists into something you choose from: tapping a note
+  picks it rather than opening it, and a bar along the bottom says what is
+  chosen, what it comes to, and what can be done with it.
+
+  Rotating a selection runs one note at a time on purpose. Every mutation
+  draws the next index off that mint's ladder and writes the counter in the
+  same breath as the secrets, so two in flight would reach for the same
+  index and the mint would refuse one of them. A failure part way through
+  reports how far it got rather than claiming the whole thing worked.
+
+  The bar offers only what would actually succeed. A mix of live and
+  handed-over notes, notes from two different mints, or one that came in
+  offline and has not met its mint yet each get a line saying why, instead
+  of a button that explains itself by failing.
+
+- **`Wallet.combine(noteIds)` folds chosen notes into one.**
+  `prepareExactFrom` has always merged, but only on the way to cutting an
+  amount to hand over; this is the same merge with nothing on the other side
+  of it. Worth doing on its own because the mint refunds the base fee it
+  charged on each split that made those notes - `(n - 1)` of them - so the
+  note that comes back is worth more than the inputs summed, and a case
+  holding one note instead of nine costs one rotate to keep fresh rather
+  than nine. It refuses through the same `chosenNotes` path
+  `prepareExactFrom` uses, and adds one rule of its own: fewer than two
+  notes is not a combine.
+
 ## [0.10.0] - 2026-08-26
 
 - **The wallet asks the browser to keep it, and says so when it will not.**
