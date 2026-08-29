@@ -45,6 +45,31 @@ afterEach(async () => {
   mint = null
 })
 
+describe('naming the note it is about to mint', () => {
+  // A mint that advertises comment protection may REQUIRE it: dni/lnurl-mint
+  // rejects an unnamed quote outright, and moneyer does too under
+  // MONEYER_REQUIRE_COMMENT. Both then refuse a bare LUD-06 quote. The
+  // property that keeps this wallet working against either is simply that it
+  // never sends one - it names the output every time the mint says it can.
+  it('always carries a well-formed comment on the mint quote', async () => {
+    const {moneyer} = await startMint()
+    const quotes: URL[] = []
+    const spyFetch: typeof fetch = (input, init) => {
+      const url = new URL(input.toString())
+      if (url.pathname.endsWith('/p/cb')) quotes.push(url)
+      return fetch(input as string, init)
+    }
+    const wallet = makeWallet({fetch: spyFetch})
+    await wallet.wallet.addMint(`mint@${new URL(moneyer.url).host}`)
+
+    await wallet.wallet.startMint(21_000)
+
+    expect(quotes.length).toBe(1)
+    const comment = quotes[0]!.searchParams.get('comment')
+    expect(comment).toMatch(/^[0-9a-f]{64}$/)
+  })
+})
+
 describe('notecase against moneyer', () => {
   it('runs the full circle: NWC-paid mint, send, receive, melt back to NWC', async () => {
     const {moneyer, backend} = await startMint()
