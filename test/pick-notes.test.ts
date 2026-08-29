@@ -239,6 +239,47 @@ describe('handing over notes the holder chose, offline', () => {
 // larger notes cost fewer rotates to keep fresh, and the mint refunds the
 // base fee it charged on each split that made them.
 describe('combining notes the holder chose', () => {
+  // LUD-25 bounds a merge by URL length, and mints cap the k1 count besides
+  // (moneyer at 21 by default). Folding a large hand in one request builds
+  // something the mint refuses, or that a proxy truncates into a malformed
+  // one. It must be folded in batches instead.
+  it('folds a hand too large for one request', async () => {
+    const mint = await start()
+    // A local server happily accepts a 2000+ character URL, so the mock
+    // cannot show this bug. What matters is what goes on the wire: real
+    // proxies truncate, and mints cap the k1 count besides.
+    const sent: string[] = []
+    const spyFetch: typeof fetch = (input, init) => {
+      sent.push(input.toString())
+      return fetch(input as string, init)
+    }
+    const made = makeWallet({fetch: spyFetch})
+    await made.wallet.addMint(`mint@${new URL(mint.url).host}`)
+    const notes = []
+    for (let i = 0; i < 30; i++) notes.push(await fund(made, mint, 2_000))
+    const before = made.wallet.balanceMsat()
+    sent.length = 0
+
+    const one = await made.wallet.combine(notes.map(n => n.id))
+
+    const longest = Math.max(...sent.map(u => u.length))
+    expect(longest).toBeLessThanOrEqual(2000)
+    const widest = Math.max(
+      ...sent.map(u => (u.match(/[?&]k1=/g) ?? []).length)
+    )
+    expect(widest).toBeLessThanOrEqual(20)
+
+    expect(one.state).toBe('live')
+    expect(one.origin).toBe('merge')
+    // Nothing is lost to the batching: every input is spent, one note is
+    // live, and the wallet is worth what it was plus the merge refunds.
+    expect(made.wallet.balanceMsat()).toBeGreaterThanOrEqual(before)
+    for (const n of notes) {
+      expect(made.data.notes.find(r => r.id === n.id)?.state).toBe('spent')
+    }
+    expect(made.data.notes.filter(r => r.state === 'live').length).toBe(1)
+  })
+
   it('folds several notes into one and refunds a base fee for each merged away', async () => {
     const mint = await start()
     const made = makeWallet()

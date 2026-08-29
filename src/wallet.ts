@@ -23,6 +23,7 @@ import {
   hashK1,
   namesMintOutput,
   meltNote,
+  mergeBatches,
   mergeNotesWithHash,
   noteDeclaredAmount,
   noteK1,
@@ -1369,8 +1370,36 @@ export class Wallet {
     if (chosen.length < 2) {
       throw new WalletUsageError('Combining takes at least two notes.')
     }
-    const [target] = await this.mutate(chosen, {kind: 'merge'})
-    return target!
+    // LUD-25 bounds a merge by ordinary URL length, and mints cap the k1
+    // count besides - moneyer at 21 by default, with nothing on the wire to
+    // advertise it. A hand too large for one request is folded in rounds,
+    // each round's output carried into the next, as the draft advises.
+    //
+    // The rounds are whole mutate() calls rather than one batched request,
+    // so every round gets the same staging this wallet already relies on:
+    // its replacement secret is derived, written to disk with its counter,
+    // and only then disclosed. A round that fails leaves the rounds before
+    // it as ordinary live notes the wallet already knows about, rather than
+    // value sitting at a secret nobody recorded.
+    const callback = chosen[0]!.callback
+    const batches = callback
+      ? mergeBatches(callback, chosen.map(note => note.k1))
+      : [chosen.map(note => note.k1)]
+    if (batches.length < 2) {
+      const [target] = await this.mutate(chosen, {kind: 'merge'})
+      return target!
+    }
+    let carried: NoteRecord | null = null
+    for (const batch of batches) {
+      const byK1 = new Map(chosen.map(note => [note.k1, note]))
+      const round = batch.map(k1 => byK1.get(k1)!)
+      const [folded] = await this.mutate(
+        carried === null ? round : [carried, ...round],
+        {kind: 'merge'}
+      )
+      carried = folded!
+    }
+    return carried!
   }
 
   // A panic rotate: same value, fresh secret, everything anyone ever saw of
