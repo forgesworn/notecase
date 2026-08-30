@@ -45,6 +45,39 @@ afterEach(async () => {
   mint = null
 })
 
+describe('against a mint that requires comment protection', () => {
+  // The end-to-end case for dni/lnurl-mint b257d58 and moneyer's
+  // MONEYER_REQUIRE_COMMENT: an unnamed quote is refused outright, with no
+  // preimage-keyed fallback. This wallet names every quote, so it should be
+  // unaffected - but nothing proved that against a mint that actually
+  // enforces it until now.
+  it('mints normally, because it names every quote', async () => {
+    const {moneyer, backend} = await startMint({requireComment: true})
+    // Prove the mint really is enforcing, or the rest of this test passes
+    // against a mint that quietly ignored the flag and proves nothing.
+    const bare = await (
+      await fetch(`${moneyer.url}/p/cb?amount=21000`)
+    ).json()
+    expect(bare.status).toBe('ERROR')
+    expect(bare.pr).toBeUndefined()
+
+    const wallet = makeWallet()
+    await wallet.wallet.addMint(`mint@${new URL(moneyer.url).host}`)
+
+    const {pending} = await wallet.wallet.startMint(21_000)
+    const paymentHash = bolt11PaymentHash(pending.pr!)!
+    backend.control.settleInvoice(paymentHash)
+    const preimage = backend.control.invoiceByHash(paymentHash)!.preimageHex
+    const minted = await wallet.wallet.claimMint(pending, preimage)
+
+    expect(minted.note.state).toBe('live')
+    expect(minted.note.amountMsat).toBe(21_000)
+    // and the payment preimage buys nothing: the note is at the wallet's
+    // own secret, which is the whole point of the mandate
+    expect(minted.note.k1).not.toBe(preimage)
+  })
+})
+
 describe('naming the note it is about to mint', () => {
   // A mint that advertises comment protection may REQUIRE it: dni/lnurl-mint
   // rejects an unnamed quote outright, and moneyer does too under
