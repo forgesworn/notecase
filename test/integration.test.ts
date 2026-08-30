@@ -1,5 +1,12 @@
 import {afterEach, describe, expect, it} from 'vitest'
-import {createFakeBackend, createMoneyer, fakeBolt11, type Moneyer, type FakeBackend} from '@forgesworn/moneyer'
+import {
+  createFakeBackend,
+  createMoneyer,
+  fakeBolt11,
+  type Moneyer,
+  type FakeBackend,
+  type MoneyerConfig
+} from '@forgesworn/moneyer'
 import {bolt11PaymentHash} from 'farrier-kit/bolt11'
 import {fetchInvoiceVerification} from 'lnurlcash-kit'
 import {bytesToHex, randomBytes} from '@noble/hashes/utils.js'
@@ -15,7 +22,7 @@ import {makeWallet} from './helpers.ts'
 // conserved at every step, both sides' books balancing.
 
 let mint: {moneyer: Moneyer; backend: FakeBackend} | null = null
-const startMint = async (overrides: {mintFee?: {baseFeeMsat: number; feePpm: number}} = {}) => {
+const startMint = async (overrides: Partial<MoneyerConfig> = {}) => {
   const backend = createFakeBackend()
   const moneyer = await createMoneyer(
     {
@@ -55,9 +62,9 @@ describe('against a mint that requires comment protection', () => {
     const {moneyer, backend} = await startMint({requireComment: true})
     // Prove the mint really is enforcing, or the rest of this test passes
     // against a mint that quietly ignored the flag and proves nothing.
-    const bare = await (
+    const bare = (await (
       await fetch(`${moneyer.url}/p/cb?amount=21000`)
-    ).json()
+    ).json()) as {status?: string; pr?: string}
     expect(bare.status).toBe('ERROR')
     expect(bare.pr).toBeUndefined()
 
