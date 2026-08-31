@@ -22,9 +22,10 @@ const withClient = async <T>(uri: string, options: NwcOptions, fn: (client: NwcC
 
 export class NwcPaymentUnprovenError extends Error {}
 
-// Pays `pr` and returns its settlement preimage. For an LNURLcash mint
-// invoice that preimage IS the freshly minted note's spend secret, so the
-// caller can claim without even polling LUD-21 verify.
+// Pays `pr` and returns its settlement preimage. For current comment-bound
+// minting that preimage proves payment only; the pending mint record already
+// holds the wallet-chosen note secret. Legacy pending records may still use
+// the preimage to recover notes created before mandatory comment binding.
 export const payWithNwc = async (uri: string, pr: string, options: NwcOptions = {}): Promise<{preimageHex: string; feesPaidMsat: number | null}> => {
   const decoded = tryDecodeBolt11(pr)
   if (!decoded || decoded.amountMsats === null) throw new Error('That invoice is not decodable with an amount.')

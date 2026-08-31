@@ -21,7 +21,6 @@ import {
   paymentRequestAmountMsat,
   type PaymentRequest,
   hashK1,
-  namesMintOutput,
   meltNote,
   mergeBatches,
   mergeNotesWithHash,
@@ -2285,18 +2284,21 @@ export class Wallet {
     const entry = this.mintEntry(mintHost)
     const pay = await fetchPayRequest(entry.payUrl, this.opts)
     if (!pay.withdrawLink) throw new WalletUsageError(`${entry.host} no longer advertises minting.`)
+    if (
+      typeof pay.commentAllowed !== 'number' ||
+      pay.commentAllowed < 64
+    ) {
+      throw new WalletUsageError(
+        `${entry.host} cannot create current LUD-25 notes because it does not advertise commentAllowed: 64.`
+      )
+    }
     const fee = pay.mintFee ?? null
     // keep the cached fee current - mutations price themselves off it
     if (fee) entry.mintFee = fee
     else delete entry.mintFee
-    // Name the note being bought, wherever the mint will honour it.
-    //
-    // Left unnamed, the note's k1 IS the invoice's payment preimage - and a
-    // mint offering LUD-21 verify publishes that preimage at a URL anyone
-    // holding the invoice can construct from its payment hash. The note is
-    // then only as private as the QR it was paid from. Naming it means the
-    // secret is drawn here and never leaves; the preimage becomes an
-    // ordinary payment proof that buys nothing.
+    // Current LUD-25 requires every newly minted note to be named by the
+    // wallet's comment commitment. The secret is drawn here and never
+    // leaves; the payment preimage remains ordinary settlement proof.
     //
     // A seeded wallet takes the secret off the mint's own ladder, so twelve
     // words find this note again; an unseeded one draws it at random, the
@@ -2304,27 +2306,25 @@ export class Wallet {
     // before the request: the invoice this returns has not been shown to
     // anybody yet, so a crash before the pending record lands leaves an
     // unpaid invoice and no note, rather than a note with no secret.
-    let namedK1: string | undefined
+    let namedK1: string
     let namedIndex: number | undefined
-    if (namesMintOutput(pay)) {
-      const root = this.noteRoot()
-      if (root !== null && this.opts.randomSecret === undefined) {
-        namedIndex = this.counterFor(entry.host)
-        namedK1 = deriveNoteSecret(root, entry.host, namedIndex)
-        // The hash is about to be disclosed, so the counter goes to disk
-        // first - the same order the split path uses, and for the same
-        // reason. A crash here wastes an index and costs nothing.
-        this.data.counters ??= {}
-        this.data.counters[entry.host] = namedIndex + 1
-        await this.persist()
-      } else {
-        namedK1 = (this.opts.randomSecret ?? defaultRandomSecret)()
-      }
+    const root = this.noteRoot()
+    if (root !== null && this.opts.randomSecret === undefined) {
+      namedIndex = this.counterFor(entry.host)
+      namedK1 = deriveNoteSecret(root, entry.host, namedIndex)
+      // The hash is about to be disclosed, so the counter goes to disk
+      // first - the same order the split path uses, and for the same
+      // reason. A crash here wastes an index and costs nothing.
+      this.data.counters ??= {}
+      this.data.counters[entry.host] = namedIndex + 1
+      await this.persist()
+    } else {
+      namedK1 = (this.opts.randomSecret ?? defaultRandomSecret)()
     }
     const invoice = await requestInvoice(
       pay.callback,
       grossMsat,
-      namedK1 ? {...this.opts, h: hashK1(namedK1)} : this.opts
+      {...this.opts, h: hashK1(namedK1)}
     )
     const decoded = tryDecodeBolt11(invoice.pr)
     if (!decoded) throw new WalletUsageError('The mint returned an invoice this wallet cannot decode.')
@@ -2333,7 +2333,7 @@ export class Wallet {
       mintHost: entry.host,
       baseUrl: fromLud17(pay.withdrawLink),
       pr: invoice.pr,
-      ...(namedK1 !== undefined ? {namedK1} : {}),
+      namedK1,
       ...(namedIndex !== undefined ? {namedIndex} : {}),
       ...(invoice.verify ? {verifyUrl: invoice.verify} : {}),
       grossMsat,
@@ -2348,10 +2348,9 @@ export class Wallet {
     return {pending, fee}
   }
 
-  // Claims a settled mint invoice: the payment preimage IS the note. The
-  // preimage may come from LUD-21 verify or from the payer's own wallet
-  // (an NWC pay result); either way it is checked against the payment hash
-  // before anything is believed.
+  // Claims a settled mint invoice. Current records always carry namedK1;
+  // the preimage branch remains solely for persisted invoices created by an
+  // older Notecase release, so upgrading cannot strand already-paid value.
   async claimMint(pending: PendingMint, preimageHex?: string): Promise<ReceiveResult> {
     // A named mint's note is the secret this wallet chose and persisted at
     // quote time, so there is no preimage to check and none to store: the
@@ -2514,16 +2513,6 @@ export class Wallet {
     }
 
     const {pending, fee} = await this.startMint(grossMsat, to.host)
-    if (!pending.verifyUrl) {
-      // Without verify there is no way to learn the preimage, and the
-      // preimage IS the note. Refuse before burning anything at the source.
-      this.data.pendingMints = this.data.pendingMints.filter(record => record !== pending)
-      await this.persist()
-      throw new WalletUsageError(
-        `${to.host} offers no LUD-21 verify, so a transfer into it could not claim the note it paid for.`
-      )
-    }
-
     let melt: MeltRecord
     let ambiguous: boolean
     try {

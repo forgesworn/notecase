@@ -6,11 +6,11 @@ import {makeWallet} from './helpers.ts'
 
 // Moving value between two mints, which is the one shape a single-mint
 // setup cannot test at all. The mints share no state: A pays a real
-// invoice B issued, and B's payment preimage is the note that lands.
+// invoice B issued, while B credits the wallet-chosen destination secret.
 //
 // The pair is wired as direct channel peers, which is what moneyer.dev and
 // mint.forgesworn.dev actually are - A's funding source settles B's invoice
-// and hands back B's own preimage, exactly as a one-hop payment would.
+// and hands back B's settlement preimage, exactly as a one-hop payment would.
 
 type Mint = {moneyer: Moneyer; backend: FakeBackend; host: string; address: string}
 
@@ -172,11 +172,11 @@ describe('transfer between two mints', () => {
     )
   })
 
-  it('will not burn a note for a destination that cannot hand back the preimage', async () => {
+  it('transfers to a destination without verify because the wallet already holds the mint secret', async () => {
     let destination: Mint | null = null
     const source = await startMint({}, peeredWith(() => destination))
-    // No LUD-21 verify: nothing could ever learn the preimage, and the
-    // preimage IS the note.
+    // No LUD-21 verify. Current minting is comment-bound, so Notecase polls
+    // the named note rather than waiting for a payment preimage.
     destination = await startMint({verify: false})
 
     const wallet = makeWallet()
@@ -188,10 +188,13 @@ describe('transfer between two mints', () => {
     await wallet.wallet.awaitMint(seed, {timeoutMs: 5_000, intervalMs: 5})
     expect(wallet.wallet.balanceMsat()).toBe(30_000)
 
-    await expect(
-      wallet.wallet.transfer(10_000, source.host, destination.host)
-    ).rejects.toThrow(/no LUD-21 verify/)
-    // Nothing was burned at the source.
+    const moved = await wallet.wallet.transfer(10_000, source.host, destination.host, {
+      timeoutMs: 5_000,
+      intervalMs: 5
+    })
+    expect(moved.ambiguous).toBe(false)
+    expect(moved.result?.note.mintHost).toBe(destination.host)
+    expect(moved.result?.note.amountMsat).toBe(10_000)
     expect(wallet.wallet.balanceMsat()).toBe(30_000)
   })
 })

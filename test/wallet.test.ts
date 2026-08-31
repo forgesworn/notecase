@@ -526,9 +526,9 @@ describe('the mints directory', () => {
 })
 
 describe('mint claims', () => {
-  // The mock mint's invoices are unfundable fakes, so a settled claim is
-  // staged by hand: the preimage IS the note's k1, exactly what an NWC pay
-  // result or LUD-21 verify would hand claimMint.
+  // These fixtures deliberately stage a persisted legacy pending record,
+  // where the payment preimage was also the note k1. Current startMint()
+  // records always carry namedK1 and never enter this recovery branch.
   const stageClaim = (theMint: Mint, data: WalletData, amountMsat: number): {pending: PendingMint; preimage: string} => {
     const preimage = freshK1()
     theMint.state.creditNote(preimage, amountMsat)

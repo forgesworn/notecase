@@ -67,8 +67,9 @@ never prints one unless you ask it to send.
 
 A transfer moves value between two mints you already hold notes at: the
 destination issues an invoice, the source melts a note to pay it, and the
-payment preimage becomes the note that lands. Both mints charge for it, so
-you always receive less than you send.
+destination quote is bound to a wallet-chosen note secret. The payment
+preimage proves settlement only. Both mints charge for the move, so you
+always receive less than you send.
 
 Sending to an npub or a NIP-05 address (name@host) seals the note to that
 key and leaves it on their inbox relays; they need no wallet yet to be paid.

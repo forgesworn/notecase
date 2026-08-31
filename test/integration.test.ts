@@ -53,12 +53,11 @@ afterEach(async () => {
 })
 
 describe('against a mint that requires comment protection', () => {
-  // The end-to-end case for dni/lnurl-mint b257d58 and moneyer's
-  // MONEYER_REQUIRE_COMMENT: an unnamed quote is refused outright, with no
-  // preimage-keyed fallback. This wallet names every quote, so it should be
-  // unaffected - but nothing proved that against a mint that actually
-  // enforces it until now.
+  // An unnamed quote is refused outright, with no preimage-keyed fallback.
+  // This wallet names every quote, so strict current-draft mints work.
   it('mints normally, because it names every quote', async () => {
+    // The published Moneyer fixture still exposes its transition flag. The
+    // next Moneyer release makes this unconditional and removes the option.
     const {moneyer, backend} = await startMint({requireComment: true})
     // Prove the mint really is enforcing, or the rest of this test passes
     // against a mint that quietly ignored the flag and proves nothing.
@@ -83,12 +82,37 @@ describe('against a mint that requires comment protection', () => {
     // own secret, which is the whole point of the mandate
     expect(minted.note.k1).not.toBe(preimage)
   })
+
+  it('refuses a mint missing commentAllowed before requesting an invoice', async () => {
+    const {moneyer} = await startMint()
+    let callbackRequested = false
+    const strictFetch: typeof fetch = async (input, init) => {
+      const response = await fetch(input as string, init)
+      const url = new URL(input.toString())
+      if (url.pathname.endsWith('/p/cb')) callbackRequested = true
+      if (url.pathname.includes('/.well-known/lnurlp/')) {
+        const body = (await response.json()) as Record<string, unknown>
+        delete body.commentAllowed
+        return new Response(JSON.stringify(body), {
+          status: response.status,
+          headers: {'content-type': 'application/json'}
+        })
+      }
+      return response
+    }
+    const wallet = makeWallet({fetch: strictFetch})
+    await wallet.wallet.addMint(`mint@${new URL(moneyer.url).host}`)
+
+    await expect(wallet.wallet.startMint(21_000)).rejects.toThrow(
+      /commentAllowed: 64/
+    )
+    expect(callbackRequested).toBe(false)
+    expect(wallet.data.pendingMints).toEqual([])
+  })
 })
 
 describe('naming the note it is about to mint', () => {
-  // A mint that advertises comment protection may REQUIRE it: dni/lnurl-mint
-  // rejects an unnamed quote outright, and moneyer does too under
-  // MONEYER_REQUIRE_COMMENT. Both then refuse a bare LUD-06 quote. The
+  // Current LUD-25 mints reject a bare LUD-06 quote. The
   // property that keeps this wallet working against either is simply that it
   // never sends one - it names the output every time the mint says it can.
   it('always carries a well-formed comment on the mint quote', async () => {
@@ -273,12 +297,10 @@ describe('notecase against moneyer', () => {
   })
 })
 
-// LUD-25 lets a wallet name the note it is buying, and a mint that honours
-// it credits that hash instead of the payment preimage. It matters more
-// than it looks: leave the note unnamed and its k1 IS the preimage, which
-// the mint publishes at a LUD-21 verify URL anyone holding the invoice can
-// build from its payment hash.
-describe('naming the note being minted', () => {
+// Current LUD-25 requires the wallet to name every note it buys. Moneyer
+// credits that commitment rather than the payment hash, so LUD-21 may expose
+// ordinary settlement proof without exposing the bearer credential.
+describe('naming every note being minted', () => {
   it('mints to a secret the mint never sees, and the preimage buys nothing', async () => {
     const {moneyer, backend} = await startMint()
     const alice = makeWallet()

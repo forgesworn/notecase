@@ -92,11 +92,11 @@ export type PendingMint = {
   // money is a persisted record reconcile() can re-drive, never a memory.
   preimageHex?: string
   // The secret this mint was asked to credit the note at, and the
-  // derivation index it came from. Present only where the mint advertised
-  // that it names notes (see namesMintOutput). When it is set, the payment
-  // preimage buys nothing: the note is this value, and it never left the
-  // wallet. Persisted from the moment its hash is disclosed, so a crash
-  // between quote and claim loses an index rather than the note.
+  // derivation index it came from. Present on every current-draft mint;
+  // older persisted pending records may omit it. The payment preimage buys
+  // nothing: the note is this value, and it never left the wallet. Persisted
+  // from the moment its hash is disclosed, so a crash between quote and
+  // claim loses an index rather than the note.
   namedK1?: string
   namedIndex?: number
   createdAt: number
