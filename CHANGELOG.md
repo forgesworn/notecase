@@ -2,12 +2,16 @@
 
 ## Unreleased
 
+## [0.12.0] - 2026-08-31
+
 - **New mint invoices are always bound to a wallet-chosen note secret.**
   `startMint` now requires `commentAllowed: 64`, sends the secret commitment
   on every quote, and refuses before requesting an invoice when a mint does
   not advertise enough comment capacity. Transfers use the same rule and can
   claim the bound destination note without LUD-21. Persisted legacy pending
   invoices remain recoverable through their payment preimages.
+- A mint that cannot carry the mandatory commitment is now refused during
+  discovery/addition, before it can become a selectable destination.
 
 ## [0.11.1] - 2026-08-27
 

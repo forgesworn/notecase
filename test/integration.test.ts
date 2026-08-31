@@ -56,9 +56,7 @@ describe('against a mint that requires comment protection', () => {
   // An unnamed quote is refused outright, with no preimage-keyed fallback.
   // This wallet names every quote, so strict current-draft mints work.
   it('mints normally, because it names every quote', async () => {
-    // The published Moneyer fixture still exposes its transition flag. The
-    // next Moneyer release makes this unconditional and removes the option.
-    const {moneyer, backend} = await startMint({requireComment: true})
+    const {moneyer, backend} = await startMint()
     // Prove the mint really is enforcing, or the rest of this test passes
     // against a mint that quietly ignored the flag and proves nothing.
     const bare = (await (
@@ -101,10 +99,10 @@ describe('against a mint that requires comment protection', () => {
       return response
     }
     const wallet = makeWallet({fetch: strictFetch})
-    await wallet.wallet.addMint(`mint@${new URL(moneyer.url).host}`)
-
-    await expect(wallet.wallet.startMint(21_000)).rejects.toThrow(
-      /commentAllowed: 64/
+    await expect(
+      wallet.wallet.addMint(`mint@${new URL(moneyer.url).host}`)
+    ).rejects.toThrow(
+      /64-character output commitment/
     )
     expect(callbackRequested).toBe(false)
     expect(wallet.data.pendingMints).toEqual([])
