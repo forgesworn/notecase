@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Notecase now sends its own client pubkey in the first NIP-46 `connect`
+  parameter when linking Heartwood, along with its requested note-locker
+  permission and app name. Relay replies are accepted only when their kind,
+  signer, recipient tag and event signature all authenticate the linked
+  device.
+
 ## [0.12.0] - 2026-08-31
 
 - **New mint invoices are always bound to a wallet-chosen note secret.**

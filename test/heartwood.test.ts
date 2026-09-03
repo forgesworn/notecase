@@ -2,7 +2,7 @@ import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
 import {finalizeEvent, generateSecretKey, getPublicKey, matchFilter, type Event, type Filter} from 'nostr-tools'
 import {nip44} from 'nostr-tools'
-import {bytesToHex} from '@noble/hashes/utils.js'
+import {bytesToHex, hexToBytes} from '@noble/hashes/utils.js'
 import {Wallet} from '../src/wallet.ts'
 import {HeartwoodError, NIP46_KIND, parseBunkerUri} from '../src/heartwood.ts'
 import {GIFT_WRAP_KIND, INBOX_RELAYS_KIND, identityFromSecret, inboxRelays, newIdentitySecretHex, npubOf, unwrapNote, wrapNote, type NostrTransport} from '../src/nostr.ts'
@@ -30,8 +30,10 @@ const fakeDevice = (relay: string) => {
   const pairingSecret = 'pairingsecret'
   const stored: Event[] = []
   const log: string[] = []
+  const requests: {method: string; params: unknown[]}[] = []
   const signer = {key: secret}
   const trusted = new Set<string>()
+  let forgeNextReply = false
 
   const answer = (to: string, id: string, body: {result?: unknown; error?: string}): Event =>
     finalizeEvent(
@@ -121,8 +123,16 @@ const fakeDevice = (relay: string) => {
         const ck = nip44.getConversationKey(secret, event.pubkey)
         const req = JSON.parse(nip44.decrypt(event.content, ck)) as {id: string; method: string; params: unknown[]}
         log.push(req.method)
+        requests.push({method: req.method, params: req.params})
+        if (forgeNextReply) {
+          forgeNextReply = false
+          // A relay gives us a deserialised event, without nostr-tools'
+          // verification cache from finalizeEvent.
+          const forged = JSON.parse(JSON.stringify(answer(event.pubkey, req.id, {error: 'forged response'}))) as Event
+          emit({...forged, sig: `${forged.sig[0] === '0' ? '1' : '0'}${forged.sig.slice(1)}`})
+        }
         if (req.method === 'connect') {
-          if (req.params[1] === pairingSecret) {
+          if (req.params[0] === event.pubkey && req.params[1] === pairingSecret) {
             bound.add(event.pubkey)
             emit(answer(event.pubkey, req.id, {result: 'ack'}))
           } else {
@@ -148,10 +158,14 @@ const fakeDevice = (relay: string) => {
     transport,
     notes,
     log,
+    requests,
     stored,
     pubkey,
     signWith(key: Uint8Array) {
       signer.key = key
+    },
+    forgeNextReply() {
+      forgeNextReply = true
     },
     uri: `bunker://${pubkey}?relay=${encodeURIComponent(relay)}&secret=${pairingSecret}`
   }
@@ -179,6 +193,15 @@ describe('a linked heartwood', () => {
     // The pairing secret is not kept.
     expect(data.settings.heartwood?.uri).not.toContain('secret')
     expect(device.log).toEqual(['connect'])
+    expect(device.requests[0]).toEqual({
+      method: 'connect',
+      params: [
+        getPublicKey(hexToBytes(data.settings.heartwood!.clientSecretHex)),
+        'pairingsecret',
+        'heartwood_note_*',
+        JSON.stringify({name: 'Notecase'})
+      ]
+    })
 
     const k1 = freshK1()
     mint.state.creditNote(k1, 9_000)
@@ -186,6 +209,7 @@ describe('a linked heartwood', () => {
     device.notes.push({id: 'aaaa1111', k1, state: 'confirmed', amount_msat: 9_000, host, from: 'cc'.repeat(32)})
     device.notes.push({id: 'bbbb2222', k1: freshK1(), state: 'confirmed', amount_msat: 1_000, host})
 
+    device.forgeNextReply()
     const listed = await wallet.heartwoodNotes(device.transport)
     expect(listed.map(n => n.id)).toEqual(['aaaa1111', 'bbbb2222'])
     expect(JSON.stringify(listed)).not.toContain(k1)

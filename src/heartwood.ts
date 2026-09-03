@@ -123,6 +123,12 @@ export class HeartwoodClient {
   }
 
   private open(event: Event): {id: string; result?: unknown; error?: unknown} | null {
+    if (
+      event.kind !== NIP46_KIND ||
+      event.pubkey !== this.link.devicePubkey ||
+      !event.tags.some(tag => tag[0] === 'p' && tag[1] === this.clientPubkey) ||
+      !verifyEvent(event)
+    ) return null
     try {
       return JSON.parse(nip44.decrypt(event.content, this.conversationKey))
     } catch {
@@ -140,7 +146,12 @@ export class HeartwoodClient {
   }
 
   async connect(secret: string): Promise<void> {
-    const result = await this.rpc<string>('connect', [this.link.devicePubkey, secret])
+    const result = await this.rpc<string>('connect', [
+      this.clientPubkey,
+      secret,
+      'heartwood_note_*',
+      JSON.stringify({name: 'Notecase'})
+    ])
     if (result !== 'ack' && result !== secret) throw new HeartwoodError(`Unexpected connect reply: ${String(result)}`)
   }
 
