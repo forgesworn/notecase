@@ -9,9 +9,9 @@ import {
   mintFeeBand,
   buildNoteUrl,
   defaultRandomSecret,
-  deriveNoteRoot,
-  deriveNoteSecret,
-  derivedSecretSource,
+  deriveCashRoot,
+  deriveCashSecret,
+  cashSecretSource,
   fetchInvoiceVerification,
   fetchNoteInfo,
   decodePaymentRequest,
@@ -31,7 +31,7 @@ import {
   requestInvoice,
   resolveMintInput,
   resolveNoteInput,
-  restoreNotes,
+  restoreFromSeed,
   rotateNoteWithHash,
   serverOf,
   splitNoteWithHash,
@@ -532,13 +532,17 @@ export class Wallet {
 
   // ---- derived secrets ----
 
-  // The root every note secret at every mint comes off. Absent only for a
-  // wallet made before seeds existed, which keeps making random secrets
-  // until its notes are adopted onto one.
-  private noteRoot(): Uint8Array | null {
+  // The root every note secret at every mint comes off: LUD-25's own
+  // m/139' node. Absent only for a wallet made before seeds existed, which
+  // keeps making random secrets until its notes are adopted onto one.
+  private cashRoot(): ReturnType<typeof deriveCashRoot> | null {
     const seed = this.data.seedHex
-    return seed ? deriveNoteRoot(hexToBytes(seed)) : null
+    return seed ? deriveCashRoot(hexToBytes(seed)) : null
   }
+
+  // The pre-spec ladder has no root helper here any more: restoreFromSeed
+  // takes the seed and derives both ladders itself, and nothing else in
+  // this wallet touches the legacy scheme.
 
   hasSeed(): boolean {
     return Boolean(this.data.seedHex)
@@ -546,7 +550,7 @@ export class Wallet {
 
   // ---- backing the mint list up to Nostr ----
   //
-  // restoreNotes re-derives a wallet's note secrets, which is the hard
+  // restoreFromMint re-derives a wallet's note secrets, which is the hard
   // half of recovery. The easy half beats it on its own: a fresh wallet
   // does not know WHICH mints to ask, so twelve words alone recover
   // nothing and the holder still needs a file - the situation the words
@@ -755,9 +759,15 @@ export class Wallet {
 
     const deviceId = await this.deviceId()
     const counters = {...(this.data.counters ?? {})}
-    const countersFingerprint = JSON.stringify(counters)
-    if (Object.keys(counters).length > 0 && pushed[Wallet.COUNTERS_SLOT] !== countersFingerprint) {
-      const result = await publishEvent(transport, relays, encodeCounters(key, deviceId, counters))
+    const cashCounters = {...(this.data.cashCounters ?? {})}
+    const countersFingerprint = JSON.stringify([counters, cashCounters])
+    const anyCounters = Object.keys(counters).length > 0 || Object.keys(cashCounters).length > 0
+    if (anyCounters && pushed[Wallet.COUNTERS_SLOT] !== countersFingerprint) {
+      const result = await publishEvent(
+        transport,
+        relays,
+        encodeCounters(key, deviceId, counters, cashCounters)
+      )
       if (result.ok.length > 0) {
         pushed[Wallet.COUNTERS_SLOT] = countersFingerprint
         done.push(Wallet.COUNTERS_SLOT)
@@ -831,10 +841,16 @@ export class Wallet {
     // derive a secret another device already used.
     const merged = mergeCounters(counters)
     this.data.counters ??= {}
+    this.data.cashCounters ??= {}
     let countersMoved = 0
-    for (const [host, value] of Object.entries(merged)) {
+    for (const [host, value] of Object.entries(merged.counters)) {
       if ((this.data.counters[host] ?? 0) >= value) continue
       this.data.counters[host] = value
+      countersMoved += 1
+    }
+    for (const [host, value] of Object.entries(merged.cashCounters)) {
+      if ((this.data.cashCounters[host] ?? 0) >= value) continue
+      this.data.cashCounters[host] = value
       countersMoved += 1
     }
 
@@ -866,8 +882,14 @@ export class Wallet {
     return {...pulled, ...pushed, checked}
   }
 
+  // The legacy hmac ladder's position. Kept for restore, never advanced.
   counterFor(host: string): number {
     return this.data.counters?.[host] ?? 0
+  }
+
+  // The m/139' ladder's position, which is the one that moves.
+  cashCounterFor(host: string): number {
+    return this.data.cashCounters?.[host] ?? 0
   }
 
   // Live notes this wallet cannot find again from the words: made before
@@ -987,17 +1009,20 @@ export class Wallet {
     // the mint's own ladder, so twelve words and the mint's name are
     // enough to find these notes again; the source advances as it is
     // drawn from, and a split draws twice.
-    const root = this.noteRoot()
-    const startIndex = this.counterFor(template.mintHost)
+    const root = this.cashRoot()
+    const startIndex = this.cashCounterFor(template.mintHost)
     const source = root
-      ? derivedSecretSource(root, template.mintHost, startIndex)
+      ? cashSecretSource(root, template.mintHost, startIndex)
       : (this.opts.randomSecret ?? defaultRandomSecret)
     const derived = root !== null && this.opts.randomSecret === undefined
-    const nextSecret = derived ? (source as ReturnType<typeof derivedSecretSource>) : (source as () => string)
+    const nextSecret = derived ? (source as ReturnType<typeof cashSecretSource>) : (source as () => string)
 
     const cut = (amountMsat: number, noteOrigin: NoteOrigin, offset: number): NoteRecord => {
       const record = this.record(template, nextSecret(), amountMsat, noteOrigin, inputIds)
-      if (derived) record.index = startIndex + offset
+      if (derived) {
+        record.index = startIndex + offset
+        record.scheme = 'bip32'
+      }
       return record
     }
     const staged: NoteRecord[] =
@@ -1010,8 +1035,8 @@ export class Wallet {
     // wastes an index and costs nothing; the other order would hand a
     // secret to a mint the wallet could not find its way back to.
     if (derived) {
-      this.data.counters ??= {}
-      this.data.counters[template.mintHost] = startIndex + staged.length
+      this.data.cashCounters ??= {}
+      this.data.cashCounters[template.mintHost] = startIndex + staged.length
     }
     this.data.notes.push(...staged)
     await this.persist()
@@ -2347,15 +2372,15 @@ export class Wallet {
     // unpaid invoice and no note, rather than a note with no secret.
     let namedK1: string
     let namedIndex: number | undefined
-    const root = this.noteRoot()
+    const root = this.cashRoot()
     if (root !== null && this.opts.randomSecret === undefined) {
-      namedIndex = this.counterFor(entry.host)
-      namedK1 = deriveNoteSecret(root, entry.host, namedIndex)
+      namedIndex = this.cashCounterFor(entry.host)
+      namedK1 = deriveCashSecret(root, entry.host, namedIndex)
       // The hash is about to be disclosed, so the counter goes to disk
       // first - the same order the split path uses, and for the same
       // reason. A crash here wastes an index and costs nothing.
-      this.data.counters ??= {}
-      this.data.counters[entry.host] = namedIndex + 1
+      this.data.cashCounters ??= {}
+      this.data.cashCounters[entry.host] = namedIndex + 1
       await this.persist()
     } else {
       namedK1 = (this.opts.randomSecret ?? defaultRandomSecret)()
@@ -2426,7 +2451,10 @@ export class Wallet {
     delete pending.preimageHex
     // Bookkeeping the split path already keeps: which rung of the mint's
     // ladder this note came off.
-    if (pending.namedIndex !== undefined) result.note.index = pending.namedIndex
+    if (pending.namedIndex !== undefined) {
+      result.note.index = pending.namedIndex
+      result.note.scheme = 'bip32'
+    }
     pending.updatedAt = now()
     await this.persist()
     if (result.note.amountMsat > pending.expectedNetMsat || result.note.amountMsat < floor) {
@@ -2994,8 +3022,8 @@ export class Wallet {
     host: string,
     options: {gap?: number; allowSecretDisclosure?: boolean} = {}
   ): Promise<{found: NoteRecord[]; next: number; unresolved: number}> {
-    const root = this.noteRoot()
-    if (!root) throw new WalletUsageError('This wallet has no recovery words, so there is nothing to restore from.')
+    const seedHex = this.data.seedHex
+    if (!seedHex) throw new WalletUsageError('This wallet has no recovery words, so there is nothing to restore from.')
     const entry = this.mintEntry(host)
     let baseUrl = entry.baseUrl
     if (!baseUrl) {
@@ -3007,13 +3035,16 @@ export class Wallet {
 
     let result
     try {
-      result = await restoreNotes(
+      // Both ladders, in one walk. Notes minted before LUD-25 specified a
+      // derivation are still money, and walking only the current scheme
+      // would leave them at a mint this wallet can no longer name.
+      result = await restoreFromSeed(
         baseUrl,
-        root,
+        hexToBytes(seedHex),
         entry.host,
         {
           gap: options.gap ?? 20,
-          start: 0,
+          start: {bip32: 0, hmac: 0},
           ...(options.allowSecretDisclosure ? {allowSecretDisclosure: true} : {})
         },
         this.opts
@@ -3047,6 +3078,7 @@ export class Wallet {
         callback,
         mintHost: entry.host,
         index: restored.index,
+        scheme: restored.scheme,
         state: restored.state === 'pending' ? 'ambiguous' : 'live',
         origin: 'recovered',
         ...(callback === '' && restored.state === 'live' ? {unrotated: true} : {}),
@@ -3056,14 +3088,19 @@ export class Wallet {
       this.data.notes.push(record)
       found.push(record)
     }
+    // Never downwards. A walk that found nothing says nothing about what
+    // this wallet has already minted, and a counter that went backwards
+    // would re-derive a secret the mint has already issued a note at.
     this.data.counters ??= {}
-    this.data.counters[entry.host] = Math.max(this.counterFor(entry.host), result.next)
+    this.data.counters[entry.host] = Math.max(this.counterFor(entry.host), result.next.hmac)
+    this.data.cashCounters ??= {}
+    this.data.cashCounters[entry.host] = Math.max(this.cashCounterFor(entry.host), result.next.bip32)
     await this.persist()
     // `unresolved` is indices the mint said something about that this
     // version has no name for - a note state added since it was written.
     // Not notes, and not recoverable here, but the caller should be able to
     // say so rather than report a clean restore over the top of them.
-    return {found, next: result.next, unresolved: result.unresolved.length}
+    return {found, next: this.cashCounterFor(entry.host), unresolved: result.unresolved.length}
   }
 
   async restoreAll(

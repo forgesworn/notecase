@@ -271,18 +271,63 @@ describe('the derivation counters', () => {
 
     const laptop = await synced()
     await laptop.wallet.addMint(`mint@${host}`)
-    laptop.data.counters = {[host]: 7}
+    laptop.data.cashCounters = {[host]: 7}
     await laptop.wallet.pushNotes(transport)
 
     const phone = await synced()
     await phone.wallet.addMint(`mint@${host}`)
-    expect(phone.wallet.counterFor(host)).toBe(0)
+    expect(phone.wallet.cashCounterFor(host)).toBe(0)
 
     const pulled = await phone.wallet.pullNotes(transport)
     expect(pulled.countersMoved).toBe(1)
     // Two wallets deriving from index 0 would make the same secret twice,
     // and the second mint of it would be refused as a collision.
-    expect(phone.wallet.counterFor(host)).toBe(7)
+    expect(phone.wallet.cashCounterFor(host)).toBe(7)
+  })
+
+  // The legacy ladder is still synced, because it is still where a restore
+  // starts looking for notes minted before LUD-25 specified a derivation.
+  it('carry the pre-spec ladder too, alongside the current one', async () => {
+    const mint = await start()
+    const {transport} = fakeRelays()
+    const host = hostOf(mint)
+
+    const laptop = await synced()
+    await laptop.wallet.addMint(`mint@${host}`)
+    laptop.data.counters = {[host]: 3}
+    laptop.data.cashCounters = {[host]: 11}
+    await laptop.wallet.pushNotes(transport)
+
+    const phone = await synced()
+    await phone.wallet.addMint(`mint@${host}`)
+    await phone.wallet.pullNotes(transport)
+
+    expect(phone.wallet.cashCounterFor(host)).toBe(11)
+    expect(phone.wallet.counterFor(host)).toBe(3)
+  })
+
+  // A device that predates the m/139' ladder publishes a v1 payload with no
+  // cash counters at all. It never minted on that ladder either, so reading
+  // its silence as zero is correct rather than a gap.
+  it('accept a payload from a device that predates the current ladder', async () => {
+    const mint = await start()
+    const {transport} = fakeRelays()
+    const host = hostOf(mint)
+
+    const laptop = await synced()
+    await laptop.wallet.addMint(`mint@${host}`)
+    laptop.data.counters = {[host]: 6}
+    delete laptop.data.cashCounters
+    await laptop.wallet.pushNotes(transport)
+
+    const phone = await synced()
+    await phone.wallet.addMint(`mint@${host}`)
+    phone.data.cashCounters = {[host]: 2}
+    await phone.wallet.pullNotes(transport)
+
+    expect(phone.wallet.counterFor(host)).toBe(6)
+    // and its own position on the current ladder is not dragged back
+    expect(phone.wallet.cashCounterFor(host)).toBe(2)
   })
 
   it('are published per device, and the highest wins whoever wrote last', async () => {
@@ -295,26 +340,26 @@ describe('the derivation counters', () => {
     // and hand the next mint a secret that is already in use.
     const laptop = await synced()
     await laptop.wallet.addMint(`mint@${host}`)
-    laptop.data.counters = {[host]: 9}
+    laptop.data.cashCounters = {[host]: 9}
     await laptop.wallet.pushNotes(transport)
 
     const phone = await synced()
     await phone.wallet.addMint(`mint@${host}`)
-    phone.data.counters = {[host]: 4}
+    phone.data.cashCounters = {[host]: 4}
     await phone.wallet.pushNotes(transport)
 
     // A single shared record would have left only the last writer's number.
     const third = await synced()
     await third.wallet.addMint(`mint@${host}`)
     expect((await third.wallet.pullNotes(transport)).countersMoved).toBe(1)
-    expect(third.wallet.counterFor(host)).toBe(9)
+    expect(third.wallet.cashCounterFor(host)).toBe(9)
 
     // And the device that was behind catches up rather than dragging the
     // others back.
     expect((await phone.wallet.pullNotes(transport)).countersMoved).toBe(1)
-    expect(phone.wallet.counterFor(host)).toBe(9)
+    expect(phone.wallet.cashCounterFor(host)).toBe(9)
     expect((await laptop.wallet.pullNotes(transport)).countersMoved).toBe(0)
-    expect(laptop.wallet.counterFor(host)).toBe(9)
+    expect(laptop.wallet.cashCounterFor(host)).toBe(9)
   })
 })
 

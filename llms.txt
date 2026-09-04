@@ -80,12 +80,22 @@ end, so the local resolver never learns which mint the wallet banks with.
 Every note secret is derived, so twelve words plus the mint hosts are
 enough to find the money:
 
-  root  = HMAC-SHA256(key = "lnurlcash-note-v1", msg = 64-byte BIP39 seed)
-  k1[i] = HMAC-SHA256(key = root, msg = "<mint host>:<i>")
+  (d1, d2, d3, d4) = HMAC-SHA256(key = m/139'/0, msg = "<mint host>")[0..16]
+                     read big-endian as 4 uint32
+  k1[i]            = m/139'/d1/d2/d3/d4/i'
 
-host is the exact lowercase host[:port]; i is decimal from 0, one counter
-per mint. Restore walks i upward asking the mint about each secret and
-stops after 20 consecutive unknowns.
+LUD-25's own scheme. d1..d4 are RAW uint32 used exactly as they fall: BIP-32
+reads >= 2^31 as hardened, so which levels are hardened depends on the host
+name. Never mask the top bit, never harden all four - either derives a
+different tree. host is the exact lowercase host[:port]; i is decimal from 0,
+one counter per mint. Restore walks i upward and stops after 20 consecutive
+unknowns, and walks the pre-spec HMAC scheme (key "lnurlcash-note-v1", msg
+"<host>:<i>") alongside it for notes minted before LUD-25 specified one.
+
+The counter is half the backup, not an optimisation: a mint answers a
+private lookup for a burned note exactly as for one never issued, and a
+rotate burns the index below, so a wallet that rotated more than the gap
+scans as empty without it. Not secret; back it up; moves upwards only.
 
 With the note store on (`sync`), the records themselves live on relays as
 kind 30078, d = "lnurlcash-note:<note id>", NIP-44 to sha256(seed ||

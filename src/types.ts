@@ -14,6 +14,7 @@
 //              note can be reclaimed if the recipient never takes it
 //   spent      burned at the mint; kept for history
 
+import type {NoteScheme} from 'lnurlcash-kit'
 import type {NwcConnection} from './nwcservice.ts'
 
 export type NoteState = 'live' | 'staged' | 'ambiguous' | 'melting' | 'sent' | 'spent'
@@ -40,6 +41,11 @@ export type NoteRecord = {
   // host in the seed's ladder. A note without one predates the seed (or
   // came from somewhere else) and restore cannot find it again.
   index?: number
+  // Which ladder that index belongs to. 'bip32' is LUD-25's own m/139'
+  // scheme, which is what this wallet mints under now. Absent means 'hmac',
+  // the kit's pre-spec scheme, because every record written before this
+  // field existed came off that one - so no stored wallet needs rewriting.
+  scheme?: NoteScheme
   // Nostr provenance: the pubkey this note was gift-wrapped to, or came
   // from. A note with either is never wrapped again.
   sentTo?: string
@@ -193,11 +199,19 @@ export type WalletData = {
   // seed cannot be turned back into words. Exactly as secret as the seed,
   // in the same sealed store, and the one thing worth writing down.
   mnemonic?: string
-  // Next unused derivation index per mint host. Bumped and persisted in
-  // the same write that stages a record, always BEFORE its hash goes on
-  // the wire: a crash there wastes an index, and the other order loses a
-  // note.
+  // Next unused derivation index per mint host on the LEGACY hmac ladder.
+  // Nothing mints under it any more, but the number is kept and still
+  // synced: it is where a restore starts looking for notes minted before
+  // LUD-25 specified a derivation, and moving it backwards would lose them.
   counters?: Record<string, number>
+  // The same, for LUD-25's m/139' ladder - the one this wallet mints under.
+  // Deliberately a second map rather than a reinterpretation of the first:
+  // an existing wallet's counters count hmac indices, and reading them as
+  // m/139' indices would claim positions on a ladder nothing has used.
+  // Bumped and persisted in the same write that stages a record, always
+  // BEFORE its hash goes on the wire: a crash there wastes an index, and
+  // the other order loses a note.
+  cashCounters?: Record<string, number>
   settings: {
     defaultMintHost?: string
     // A spending capability - the store holding this must stay encrypted.
