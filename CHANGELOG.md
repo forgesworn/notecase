@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Graded against `lnurlcash-conformance` 0.7.0, whose `cash-derivation.json`
+  is the vector for the `m/139'` scheme this wallet now mints under.
+
 ## 0.14.0 - 2026-09-04
 
 **Note secrets now come off LUD-25's own derivation.** The draft specifies a
