@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **Fixed: a mint that issues unsigned notes could cost you the note.**
+  `lnurlcash-kit` 0.7.0 raises `UnverifiableNoteError` when a mint confirms a
+  rotate, split or merge without signing the output LUD-25 now requires it to
+  sign. That error means the mutation **landed** - the outputs exist at the
+  hashes this wallet disclosed - but `mutateOnce` read it as a definitive
+  refusal, deleted the staged secrets and left the burned inputs on the books
+  as live. The balance then counted money that no longer existed, and the only
+  key to the real note had been thrown away.
+
+  It is now treated as what it is: a success with no signatures. The inputs go
+  spent, the outputs go live unsigned, and the holder keeps the note. A mint
+  with no funding source legitimately issues unsigned notes, which is why this
+  wallet accepts them at all.
+
+  Only reachable against such a mint, and only since the kit began reporting
+  it - before 0.7.0 the same rotate returned success with an absent signature.
+
+- `lnurlcash-kit` moves to 0.7.0 and `lnurlcash-conformance` to 0.6.0, for the
+  LUD-25 changes of 2 September: offline verification is mandatory, and a mint
+  MUST answer a byte-identical retried mutation with the success it already
+  gave. The kit re-sends a mutation whose answer the transport lost, so a
+  dropped connection during a receive now usually completes instead of parking
+  the note as ambiguous and waiting for `reconcile`. The crash-window
+  machinery is unchanged and still covers a mint that has not implemented the
+  replay rule.
+
 - Notecase now sends its own client pubkey in the first NIP-46 `connect`
   parameter when linking Heartwood, along with its requested note-locker
   permission and app name. Relay replies are accepted only when their kind,

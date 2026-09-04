@@ -40,6 +40,7 @@ import {
   mintAddressUrl,
   verifyNoteSignature,
   withNewK1,
+  UnverifiableNoteError,
   type LnurlcashOptions,
   type MintFee
 } from 'lnurlcash-kit'
@@ -1007,22 +1008,49 @@ export class Wallet {
     const k1s = inputs.map(note => note.k1)
     try {
       let signatures: Array<string | undefined>
+      // LUD-25 requires a mint to sign every note a mutation mints, and
+      // lnurlcash-kit raises UnverifiableNoteError when one does not. That
+      // error means the mutation LANDED - `status` was OK - so the outputs
+      // exist at the hashes this wallet just disclosed and the staged
+      // secrets are the only copy of them. It is a success with no
+      // signatures, never a failure: falling through to the unwind below
+      // would delete the only key to real money and leave the burned inputs
+      // on the books as live.
+      //
+      // A mint with no funding source legitimately issues unsigned notes,
+      // which is why this wallet accepts them at all - see receive().
+      const landedUnsigned = (err: unknown): Array<string | undefined> => {
+        if (!(err instanceof UnverifiableNoteError)) throw err
+        return plan.kind === 'split' ? [undefined, undefined] : [undefined]
+      }
       if (plan.kind === 'split') {
-        const result = await splitNoteWithHash(
-          template.callback,
-          k1s,
-          plan.amountMsat,
-          hashK1(staged[0]!.k1),
-          hashK1(staged[1]!.k1),
-          this.opts
-        )
-        signatures = [result.signature, result.changeSignature]
+        try {
+          const result = await splitNoteWithHash(
+            template.callback,
+            k1s,
+            plan.amountMsat,
+            hashK1(staged[0]!.k1),
+            hashK1(staged[1]!.k1),
+            this.opts
+          )
+          signatures = [result.signature, result.changeSignature]
+        } catch (err) {
+          signatures = landedUnsigned(err)
+        }
       } else if (plan.kind === 'merge') {
-        const result = await mergeNotesWithHash(template.callback, k1s, hashK1(staged[0]!.k1), this.opts)
-        signatures = [result.signature]
+        try {
+          const result = await mergeNotesWithHash(template.callback, k1s, hashK1(staged[0]!.k1), this.opts)
+          signatures = [result.signature]
+        } catch (err) {
+          signatures = landedUnsigned(err)
+        }
       } else {
-        const result = await rotateNoteWithHash(template.callback, k1s[0]!, hashK1(staged[0]!.k1), this.opts)
-        signatures = [result.signature]
+        try {
+          const result = await rotateNoteWithHash(template.callback, k1s[0]!, hashK1(staged[0]!.k1), this.opts)
+          signatures = [result.signature]
+        } catch (err) {
+          signatures = landedUnsigned(err)
+        }
       }
       for (const input of inputs) this.touch(input, 'spent')
       staged.forEach((note, index) => {

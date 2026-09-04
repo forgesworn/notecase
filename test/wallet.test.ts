@@ -100,9 +100,27 @@ describe('sending', () => {
 })
 
 describe('the crash window', () => {
-  it('survives a mutation whose outcome is destroyed mid-flight', async () => {
+  // LUD-25 now requires a mint to answer a byte-identical retried mutation
+  // with the success it already gave, and lnurlcash-kit re-sends one whose
+  // answer was lost. So against a conforming mint the dropped connection
+  // below is simply invisible: the receive completes, and the crash-window
+  // machinery never has to run.
+  it('completes a dropped mutation by asking the mint again', async () => {
     const theMint = await start({dropAfterMutation: true})
-    const {wallet, data, saves} = makeWallet()
+    const {wallet} = makeWallet()
+    const note = fund(theMint, 21_000)
+
+    const result = await wallet.receive(note.url)
+    expect(result.note.amountMsat).toBe(21_000)
+    expect(wallet.balanceMsat()).toBe(21_000)
+  })
+
+  // The same drop against a mint that has NOT implemented the replay rule,
+  // and with the client's own retry turned off. This is the path that still
+  // has to work, and it is the reason the staged-secret machinery exists.
+  it('survives a mutation whose outcome is destroyed mid-flight', async () => {
+    const theMint = await start({dropAfterMutation: true, retriedMutation: 'refuse'})
+    const {wallet, data, saves} = makeWallet({mutationRetries: 0})
     const note = fund(theMint, 21_000)
 
     // The receive's rotate lands at the mint but the answer never arrives.
