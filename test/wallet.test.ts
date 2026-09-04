@@ -844,6 +844,29 @@ describe('a note whose signature does not verify', () => {
     expect(wallet.balanceMsat()).toBe(26_000)
   })
 
+  // A mint with no funding source publishes no mintPubkey at all - the
+  // reference mint does exactly that. lnurlcash-kit refuses such a response
+  // by default, which would make those mints unusable here; this wallet does
+  // its own verification instead, so it keeps accepting them.
+  it('receives from a mint that publishes no signing key at all', async () => {
+    const theMint = await start()
+    const bare: typeof fetch = async (input, init) => {
+      const response = await fetch(input as string, init)
+      const url = new URL(input!.toString())
+      if (!url.pathname.endsWith('/w')) return response
+      const body = await response.json()
+      delete (body as Record<string, unknown>).mintPubkey
+      return new Response(JSON.stringify(body), {
+        headers: {'content-type': 'application/json'}
+      })
+    }
+    const {wallet} = makeWallet({fetch: bare})
+    const note = fund(theMint, 21_000)
+    const result = await wallet.receive(note.url)
+    expect(result.note.amountMsat).toBe(21_000)
+    expect(wallet.balanceMsat()).toBe(21_000)
+  })
+
   it('is a warning, not a refusal, when the mint signs nothing at all', async () => {
     const theMint = await start({signatures: false})
     const {wallet} = makeWallet()

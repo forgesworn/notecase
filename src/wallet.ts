@@ -185,7 +185,18 @@ export class Wallet {
   constructor(data: WalletData, persist: () => Promise<void>, opts: LnurlcashOptions) {
     this.data = data
     this.persist = persist
-    this.opts = opts
+    // This wallet does its own offline verification, and a richer job of it
+    // than a blanket refusal: it pins a mint's key on first trust, keeps its
+    // retired keys, stages a rotation for review rather than widening the
+    // trusted set silently, and refuses a note whose signature does not
+    // verify against what it has pinned.
+    //
+    // So the kit's own requireSignatures is off by default here. Left on, it
+    // would refuse any mint publishing no mintPubkey outright - which is
+    // exactly the mint with no funding source that receive() deliberately
+    // accepts, and which the reference mint really does produce. A caller
+    // that wants the stricter posture can still pass it explicitly.
+    this.opts = {requireSignatures: false, ...opts}
   }
 
   // ---- queries ----

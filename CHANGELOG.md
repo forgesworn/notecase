@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.13.0 - 2026-09-04
+
 - **Fixed: a mint that issues unsigned notes could cost you the note.**
   `lnurlcash-kit` 0.7.0 raises `UnverifiableNoteError` when a mint confirms a
   rotate, split or merge without signing the output LUD-25 now requires it to
@@ -18,6 +20,16 @@
 
   Only reachable against such a mint, and only since the kit began reporting
   it - before 0.7.0 the same rotate returned success with an absent signature.
+
+- **The wallet keeps its own verification rather than the kit's.** 0.7.0
+  refuses a `withdrawRequest` publishing no `mintPubkey` at all, which would
+  have made a mint with no funding source unusable here - and the reference
+  mint really does produce one. This wallet already does the richer job: it
+  pins a mint's key on first trust, keeps its retired keys, stages a rotation
+  for review rather than widening the trusted set silently, and refuses a note
+  whose signature does not verify against what it pinned. So `requireSignatures`
+  is off by default in the client it builds, and a caller wanting the stricter
+  posture passes it explicitly.
 
 - `lnurlcash-kit` moves to 0.7.0 and `lnurlcash-conformance` to 0.6.0, for the
   LUD-25 changes of 2 September: offline verification is mandatory, and a mint
