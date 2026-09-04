@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.0 - 2026-09-04
+
 **Note secrets now come off LUD-25's own derivation.** The draft specifies a
 BIP-32 scheme under `m/139'` and the reference wallet implements it; this
 wallet had been using `lnurlcash-kit`'s pre-spec HMAC scheme, which shipped
