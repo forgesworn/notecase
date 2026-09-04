@@ -79,20 +79,36 @@ seed` shows them after the PIN. Every note secret this wallet makes comes
 off them:
 
 ```
-root  = HMAC-SHA256(key = "lnurlcash-note-v1", msg = seed)
-k1[i] = HMAC-SHA256(key = root, msg = "<mint host>:<i>")
+(d1, d2, d3, d4) = HMAC-SHA256(key = m/139'/0, msg = "<mint host>")[0..16]
+k1[i]            = m/139'/d1/d2/d3/d4/i'
 ```
 
-so a wallet that has lost everything but the words and the names of its
-mints can ask each mint which of those secrets are still worth something.
-That is what `notecase restore` does: `notecase init --restore`, add the
-mints you used, then `notecase restore`, and the notes come back.
+which is the scheme LUD-25 specifies, so the same twelve words restore the
+same notes in any wallet that implements it. `d1..d4` are used exactly as
+they fall out of the hash: BIP-32 reads any index at or above 2^31 as
+hardened, so which of those four levels are hardened is decided by the
+mint's own host name.
+
+A wallet that has lost everything but the words and the names of its mints
+can ask each mint which of those secrets are still worth something. That is
+what `notecase restore` does: `notecase init --restore`, add the mints you
+used, then `notecase restore`, and the notes come back. It walks the
+pre-spec scheme this wallet used before LUD-25 had one as well, so notes
+minted then come back too.
 
 The index a note came from is kept on the record, and the next unused
 index per mint is written to disk **in the same save that stages a fresh
 secret, before its hash goes anywhere**. A crash between the two wastes an
 index, which costs nothing. The other order would hand a mint a secret the
 wallet could never find its way back to.
+
+That counter is not an optimisation, it is half the backup. A mint must
+answer a private lookup for a burned note exactly as it answers one for a
+note it never issued, so a walk cannot see a spent index; and since every
+rotate burns the index below it, a wallet that has rotated more than twenty
+times would scan as empty without its counter. It is not secret - an index
+reveals nothing without the seed - so it belongs in an ordinary backup, and
+it only ever moves upwards.
 
 One thing the words cannot do on their own: they will not find a note
 somebody handed you that you have not rotated yet, because that secret

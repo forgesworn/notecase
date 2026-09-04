@@ -209,7 +209,7 @@ describe('the crash window', () => {
     // seed leaves it: the next secrets this wallet derives are ones the
     // mint has already minted notes under.
     const host = received.note.mintHost
-    data.counters![host] = 0
+    data.cashCounters![host] = 0
 
     const target = await wallet.prepareExact(40_000)
 
@@ -219,7 +219,7 @@ describe('the crash window', () => {
     expect(wallet.balanceMsat()).toBe(100_000)
     expect(data.notes.some(note => note.state === 'ambiguous')).toBe(false)
     // and the counter is past the collision, so the next one is clean
-    expect(wallet.counterFor(host)).toBeGreaterThan(0)
+    expect(wallet.cashCounterFor(host)).toBeGreaterThan(0)
   })
 
   it('unwinds on the spot when that refusal really did refuse and the input is still there', async () => {

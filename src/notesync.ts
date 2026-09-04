@@ -43,7 +43,19 @@ export type NotePayload = {v: 1; note: SyncedNote}
 // have each device overwriting the others' numbers on every push - which
 // is the precise failure the counters exist to prevent. A `d` tag per
 // device makes the merge a max() over records nobody else writes.
-export type CounterPayload = {v: 1; device: string; counters: Record<string, number>; updatedAt: number}
+// v2 adds `cashCounters`, the LUD-25 m/139' ladder, alongside the legacy
+// hmac one. Both directions are safe across versions: a device that predates
+// this reads `counters` and ignores the new field, and it never mints on the
+// m/139' ladder either, so it cannot collide with one that does. A v1 payload
+// arriving here simply carries no cash counters, which reads as 0 - correct,
+// since its author never used that ladder.
+export type CounterPayload = {
+  v: 1 | 2
+  device: string
+  counters: Record<string, number>
+  cashCounters?: Record<string, number>
+  updatedAt: number
+}
 
 const selfKey = (key: MintBackupKey): Uint8Array => nip44.getConversationKey(key.secret, key.pubkey)
 
@@ -98,7 +110,8 @@ export const decodeNote = (key: MintBackupKey, event: Event): SyncedNote | null 
 export const encodeCounters = (
   key: MintBackupKey,
   deviceId: string,
-  counters: Record<string, number>
+  counters: Record<string, number>,
+  cashCounters: Record<string, number> = {}
 ): Event =>
   finalizeEvent(
     {
@@ -106,7 +119,13 @@ export const encodeCounters = (
       created_at: Math.floor(Date.now() / 1000),
       tags: [['d', counterDTag(deviceId)]],
       content: nip44.encrypt(
-        JSON.stringify({v: 1, device: deviceId, counters, updatedAt: Date.now()} satisfies CounterPayload),
+        JSON.stringify({
+          v: 2,
+          device: deviceId,
+          counters,
+          cashCounters,
+          updatedAt: Date.now()
+        } satisfies CounterPayload),
         selfKey(key)
       )
     },
@@ -116,12 +135,23 @@ export const encodeCounters = (
 export const decodeCounters = (key: MintBackupKey, event: Event): CounterPayload | null => {
   try {
     const parsed = JSON.parse(nip44.decrypt(event.content, selfKey(key))) as CounterPayload
-    if (parsed?.v !== 1 || typeof parsed.device !== 'string') return null
-    const counters: Record<string, number> = {}
-    for (const [host, value] of Object.entries(parsed.counters ?? {})) {
-      if (typeof value === 'number' && Number.isInteger(value) && value >= 0) counters[host] = value
+    if ((parsed?.v !== 1 && parsed?.v !== 2) || typeof parsed.device !== 'string') return null
+    const sane = (from: unknown): Record<string, number> => {
+      const out: Record<string, number> = {}
+      for (const [host, value] of Object.entries((from ?? {}) as Record<string, unknown>)) {
+        if (typeof value === 'number' && Number.isInteger(value) && value >= 0) out[host] = value
+      }
+      return out
     }
-    return {v: 1, device: parsed.device, counters, updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0}
+    return {
+      v: parsed.v,
+      device: parsed.device,
+      counters: sane(parsed.counters),
+      // A v1 device wrote no cash counters, and never minted on that ladder
+      // either, so an empty map here is the truth rather than a gap.
+      cashCounters: sane(parsed.cashCounters),
+      updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0
+    }
   } catch {
     return null
   }
@@ -176,12 +206,21 @@ export const fetchStore = async (
 
 // The highest index any device has claimed at each mint. Taken before
 // minting, so two wallets on one seed do not derive the same secret twice.
-export const mergeCounters = (payloads: CounterPayload[]): Record<string, number> => {
-  const merged: Record<string, number> = {}
+// Upwards only, both ladders. A counter that went backwards would hand a
+// second device an index the first has already minted at, and the note under
+// it would collide with one that is already money.
+export const mergeCounters = (
+  payloads: CounterPayload[]
+): {counters: Record<string, number>; cashCounters: Record<string, number>} => {
+  const counters: Record<string, number> = {}
+  const cashCounters: Record<string, number> = {}
   for (const payload of payloads) {
     for (const [host, value] of Object.entries(payload.counters)) {
-      merged[host] = Math.max(merged[host] ?? 0, value)
+      counters[host] = Math.max(counters[host] ?? 0, value)
+    }
+    for (const [host, value] of Object.entries(payload.cashCounters ?? {})) {
+      cashCounters[host] = Math.max(cashCounters[host] ?? 0, value)
     }
   }
-  return merged
+  return {counters, cashCounters}
 }

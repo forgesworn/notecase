@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
-import {deriveNoteRoot, deriveNoteSecret, hashK1} from 'lnurlcash-kit'
+import {deriveCashRoot, deriveCashSecret, deriveNoteRoot, deriveNoteSecret, hashK1} from 'lnurlcash-kit'
 import {hexToBytes} from '@noble/hashes/utils.js'
 import {Wallet, WalletUsageError} from '../src/wallet.ts'
 import {newMnemonic, seedFromMnemonic} from '../src/store.ts'
@@ -63,22 +63,22 @@ describe('the seed', () => {
     const theMint = await start()
     const {wallet, data} = seeded(WORDS)
     const host = hostOf(theMint)
-    const root = deriveNoteRoot(hexToBytes(data.seedHex!))
+    const root = deriveCashRoot(hexToBytes(data.seedHex!))
 
     // a receive rotates, which is one derived secret
     const received = await wallet.receive(fund(theMint, 100_000))
     expect(received.note.index).toBe(0)
-    expect(received.note.k1).toBe(deriveNoteSecret(root, host, 0))
-    expect(wallet.counterFor(host)).toBe(1)
+    expect(received.note.k1).toBe(deriveCashSecret(root, host, 0))
+    expect(wallet.cashCounterFor(host)).toBe(1)
 
     // a split takes two: the amount and its change
     const sent = await wallet.send(30_000)
     expect(sent.index).toBe(1)
-    expect(sent.k1).toBe(deriveNoteSecret(root, host, 1))
+    expect(sent.k1).toBe(deriveCashSecret(root, host, 1))
     const change = wallet.liveNotes()[0]!
     expect(change.index).toBe(2)
-    expect(change.k1).toBe(deriveNoteSecret(root, host, 2))
-    expect(wallet.counterFor(host)).toBe(3)
+    expect(change.k1).toBe(deriveCashSecret(root, host, 2))
+    expect(wallet.cashCounterFor(host)).toBe(3)
   })
 
   it('persists the counter before the hash goes on the wire', async () => {
@@ -92,13 +92,13 @@ describe('the seed', () => {
     const {wallet} = seeded(WORDS, {fetch: fetchImpl})
     const host = hostOf(theMint)
     const received = await wallet.receive(fund(theMint, 21_000))
-    const before = wallet.counterFor(host)
+    const before = wallet.cashCounterFor(host)
 
     cutTheWire = true
     await expect(wallet.rotateLive(received.note)).rejects.toThrow()
     // the secret was staged and the counter moved with it: a wasted index
     // costs nothing, and the other order would lose the note
-    expect(wallet.counterFor(host)).toBe(before + 1)
+    expect(wallet.cashCounterFor(host)).toBe(before + 1)
   })
 
   it('never reuses an index after a mutation is unwound', async () => {
@@ -106,7 +106,7 @@ describe('the seed', () => {
     const {wallet} = seeded(WORDS)
     const host = hostOf(theMint)
     await wallet.receive(fund(theMint, 21_000))
-    expect(wallet.counterFor(host)).toBe(1)
+    expect(wallet.cashCounterFor(host)).toBe(1)
 
     // a mint that has stopped splitting: a refusal that cannot possibly
     // be a mutation that landed, so the staged records are dropped
@@ -114,7 +114,7 @@ describe('the seed', () => {
     await expect(wallet.send(9_000)).rejects.toThrow()
     theMint.state.opts.sunset = false
     // the two staged indices are spent even though nothing was minted
-    expect(wallet.counterFor(host)).toBe(3)
+    expect(wallet.cashCounterFor(host)).toBe(3)
 
     const next = await wallet.send(9_000)
     expect(next.index).toBe(3)
@@ -149,8 +149,8 @@ describe('restoring from the words', () => {
     // and it knows where to carry on from - past everything the walk
     // disclosed, not merely past the last note it found, because those
     // secrets are in the mint's request log now
-    expect(fresh.wallet.counterFor(hostOf(theMint))).toBeGreaterThanOrEqual(
-      original.wallet.counterFor(hostOf(theMint))
+    expect(fresh.wallet.cashCounterFor(hostOf(theMint))).toBeGreaterThanOrEqual(
+      original.wallet.cashCounterFor(hostOf(theMint))
     )
     for (const note of restored.found) expect(note.origin).toBe('recovered')
 
@@ -164,15 +164,15 @@ describe('restoring from the words', () => {
     const {wallet, data} = seeded(WORDS)
     const host = hostOf(theMint)
     await wallet.addMint(`mint@${host}`)
-    const root = deriveNoteRoot(hexToBytes(data.seedHex!))
+    const root = deriveCashRoot(hexToBytes(data.seedHex!))
 
     // indices 0 and 1 used and burned, 2 alive, then nothing
     for (const index of [0, 1]) {
-      const k1 = deriveNoteSecret(root, host, index)
+      const k1 = deriveCashSecret(root, host, index)
       theMint.state.creditNote(k1, 1_000)
       theMint.state.settleMelt(k1)
     }
-    theMint.state.creditNote(deriveNoteSecret(root, host, 2), 7_000)
+    theMint.state.creditNote(deriveCashSecret(root, host, 2), 7_000)
 
     const restored = await wallet.restoreFromMint(host, {allowSecretDisclosure: true})
     expect(restored.found.map(note => note.index)).toEqual([2])
@@ -182,6 +182,49 @@ describe('restoring from the words', () => {
     // minting into any of them now would mint a note the mint's log
     // already holds the secret for.
     expect(restored.next).toBe(23)
+  })
+
+  // The reason restoreFromMint walks two ladders. Notes minted before
+  // LUD-25 specified a derivation are still money, and this wallet used to
+  // put them on the kit's own pre-spec scheme.
+  it('finds notes on the pre-spec ladder as well as the current one', async () => {
+    const theMint = await start()
+    const {wallet, data} = seeded(WORDS)
+    const host = hostOf(theMint)
+    await wallet.addMint(`mint@${host}`)
+    const seed = hexToBytes(data.seedHex!)
+
+    // one note from before the migration, one from after
+    theMint.state.creditNote(deriveNoteSecret(deriveNoteRoot(seed), host, 0), 5_000)
+    theMint.state.creditNote(deriveCashSecret(deriveCashRoot(seed), host, 0), 7_000)
+
+    const restored = await wallet.restoreFromMint(host, {allowSecretDisclosure: true})
+
+    expect(restored.found).toHaveLength(2)
+    expect(wallet.balanceMsat()).toBe(12_000)
+    // each note says which ladder found it, so nothing has to guess later
+    expect(restored.found.map(note => note.scheme).sort()).toEqual(['bip32', 'hmac'])
+    // and both counters moved, not just the live one: the legacy number is
+    // where a later restore starts looking for the rest of those notes.
+    expect(wallet.cashCounterFor(host)).toBeGreaterThan(0)
+    expect(wallet.counterFor(host)).toBeGreaterThan(0)
+  })
+
+  it('mints under the current scheme, never the pre-spec one', async () => {
+    const theMint = await start()
+    const {wallet, data} = seeded(WORDS)
+    const host = hostOf(theMint)
+    await wallet.addMint(`mint@${host}`)
+    const seed = hexToBytes(data.seedHex!)
+
+    const received = await wallet.receive(fund(theMint, 21_000))
+
+    expect(received.note.scheme).toBe('bip32')
+    expect(received.note.k1).toBe(deriveCashSecret(deriveCashRoot(seed), host, 0))
+    expect(received.note.k1).not.toBe(deriveNoteSecret(deriveNoteRoot(seed), host, 0))
+    // the legacy ladder never moves
+    expect(wallet.counterFor(host)).toBe(0)
+    expect(data.counters?.[host] ?? 0).toBe(0)
   })
 
   it('refuses when there is no seed to walk', async () => {
@@ -218,7 +261,7 @@ describe('notes made before the seed', () => {
     expect(upgraded.legacyNotes()).toEqual([])
     expect(upgraded.balanceMsat()).toBe(21_000)
     expect(upgraded.liveNotes()[0]!.index).toBe(0)
-    expect(upgraded.liveNotes()[0]!.k1).toBe(deriveNoteSecret(deriveNoteRoot(hexToBytes(legacy.seedHex!)), host, 0))
+    expect(upgraded.liveNotes()[0]!.k1).toBe(deriveCashSecret(deriveCashRoot(hexToBytes(legacy.seedHex!)), host, 0))
 
     // and now a restore on a fresh device finds it
     const fresh = seeded(WORDS)

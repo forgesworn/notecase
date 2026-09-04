@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+**Note secrets now come off LUD-25's own derivation.** The draft specifies a
+BIP-32 scheme under `m/139'` and the reference wallet implements it; this
+wallet had been using `lnurlcash-kit`'s pre-spec HMAC scheme, which shipped
+four days before that section existed. The same twelve words now restore the
+same notes in any wallet that implements LUD-25, which was the entire point of
+deriving them.
+
+```
+(d1, d2, d3, d4) = HMAC-SHA256(key = m/139'/0, msg = "<mint host>")[0..16]
+k1[i]            = m/139'/d1/d2/d3/d4/i'
+```
+
+- **Nothing already minted is lost.** `notecase restore` walks both ladders in
+  one pass and records which one found each note (`scheme` on the record:
+  `bip32`, or absent for everything written before this release, which is
+  exactly what those records are). Notes minted under the old scheme keep
+  working and come back on a restore; they simply move onto the new ladder the
+  first time they are rotated.
+- **The legacy counter is kept, synced, and never advanced.** `counters` still
+  means what it always did - the pre-spec ladder's position - because it is
+  where a restore starts looking for those notes, and reinterpreting it as an
+  `m/139'` position would claim rungs on a ladder nothing has used. The new
+  ladder lives in `cashCounters` beside it. Both sync across devices, both
+  merge upwards only.
+- Counter sync payloads are `v: 2` and carry both maps. A device that predates
+  this reads the one it knows and ignores the other, and it never mints on the
+  new ladder, so the two cannot collide. A `v: 1` payload arriving here reads
+  as no cash counters, which is the truth rather than a gap.
+- Requires `lnurlcash-kit` 0.8.0.
+
+**Said plainly in the README and `llms.txt`: the counter is half the backup.**
+A mint must answer a private lookup for a burned note exactly as it answers
+one for a note it never issued, so a walk cannot see a spent index; and since
+every rotate burns the index below it, a wallet that has rotated more than the
+gap would scan as empty without its counter. It is not secret, so it belongs
+in an ordinary backup.
+
 ## 0.13.0 - 2026-09-04
 
 - **Fixed: a mint that issues unsigned notes could cost you the note.**
