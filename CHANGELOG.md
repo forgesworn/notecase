@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+**The cable, from a terminal.** `notecase device` drives a hardware locker over
+USB: `ports`, `info`, `mints`, `provision`, `forget`.
+
+`device provision --mint <host>` is the one that matters. It derives that
+mint's `m/139'` subtree, sends it down the cable and raises the device's
+counter to match this wallet's, in a single operation. Before, the only route
+was `device-node --force`, which printed 64 bytes of bearer material to a
+terminal for a second tool to carry — through a clipboard and a shell history.
+`device-node` remains for the case where the device is not on this machine.
+
+**One implementation of the wire.** `web/src/vaultserial.ts` was 535 lines of
+which only `serialSupported` and `connectVault` touched `navigator`. The rest —
+framing, parsing, the connection — moved to `src/vaultwire.ts`, and the web
+file is now a shim over it. The browser and the CLI speak the protocol through
+the same code rather than two copies that drift.
+
+`serialport` is deliberately NOT a dependency: it is a native module, and
+almost nobody installing a wallet owns a locker. It is imported only when
+someone asks for the cable, and its absence reads as an instruction rather than
+a stack trace. `device ports` runs before the wallet is opened, because listing
+what is plugged in is a question about the machine, not about anybody's money.
+
 **A hardware locker can now hold notes this wallet's seed phrase can find
 again.** LUD-25 derives note secrets under `m/139'/d1/d2/d3/d4/i'`, but that
 path hangs off the BIP-32 master and a locker keeps no seed - it stores a tree
