@@ -33,7 +33,14 @@ import {
   toBech32Lnurl,
   verifyNoteSignature
 } from 'lnurlcash-kit'
-import {Wallet, BadSignatureError, WalletUsageError, InsufficientFundsError, PinMismatchError} from '../../src/wallet.ts'
+import {
+  Wallet,
+  BadSignatureError,
+  KeyRotationError,
+  WalletUsageError,
+  InsufficientFundsError,
+  PinMismatchError
+} from '../../src/wallet.ts'
 import type {CheckReport, OfflineHandover} from '../../src/wallet.ts'
 import {tryDecodeBolt11} from 'farrier-kit/bolt11'
 import {exportBackup, importBackup} from '../../src/backup.ts'
@@ -2033,11 +2040,13 @@ const viewReceive = (prefill?: string): void => {
     const refusal = el('<div class="stack" data-refusal style="gap:14px"></div>')
     body.insertBefore(refusal, receiveButton)
 
-    const take = async (acceptBadSignature: boolean): Promise<void> => {
+    const take = async (
+      options: {acceptBadSignature?: boolean; approveKeyRotation?: boolean} = {}
+    ): Promise<void> => {
       try {
         const result = offlineMode
           ? await w.receiveOffline(input.value.trim())
-          : await w.receive(input.value.trim(), {acceptBadSignature})
+          : await w.receive(input.value.trim(), options)
         result.warnings.forEach(warning => toast(warning, 'err'))
         // Safely in the store and rotated: only now is it safe to forget
         // the incoming claim.
@@ -2047,6 +2056,15 @@ const viewReceive = (prefill?: string): void => {
         toast(`Received ${sats(result.note.amountMsat)} sat`, 'ok')
         setTimeout(viewHome, 650)
       } catch (err) {
+        // Two different refusals, and the difference is whether there is a
+        // decision to make. A signature that does not verify is a fact about
+        // this note; a mint presenting a new signing key is a question about
+        // the mint, and LUD-25 requires the holder to answer it rather than
+        // the wallet.
+        if (err instanceof KeyRotationError) {
+          showKeyRotation(err.message)
+          return
+        }
         if (!(err instanceof BadSignatureError)) throw err
         showRefusal(err.message)
       }
@@ -2083,13 +2101,45 @@ const viewReceive = (prefill?: string): void => {
           label.textContent = 'Tap again to take a note that failed its check'
           return
         }
-        void busy(accept as HTMLButtonElement, () => take(true))
+        void busy(accept as HTMLButtonElement, () => take({acceptBadSignature: true}))
       })
       card.append(accept)
       refusal.append(card)
     }
 
-    receiveButton.addEventListener('click', () => busy(receiveButton, () => take(false)))
+    // The mint has changed the key its notes are signed by, and publishes the
+    // old one as retired. That is what a mint rotating properly looks like -
+    // and it is also what a mint somebody else now runs would publish, because
+    // whoever controls the host controls what it publishes. The wallet cannot
+    // tell those apart, so it does not try: it says both, and the holder
+    // decides. Two taps, like the signature override, because the honest
+    // reason to accept is that you checked the key somewhere other than here.
+    const showKeyRotation = (reason: string): void => {
+      refusal.replaceChildren()
+      const card = el(`<div class="card" style="border-color:var(--bad)">
+        <h3 style="color:var(--bad)">This mint has a new signing key</h3>
+        <p class="warn" style="text-align:left;padding-top:12px"><span data-reason></span></p>
+        <p class="warn" style="text-align:left">A mint that changes its key and says so looks exactly like a mint somebody else has taken over, because the same server publishes both claims. Nothing here can tell them apart. Check the new key against the operator by some route that is not this mint - their Nostr account, their site, a person - before you accept it.</p>
+        <p class="warn" style="text-align:left">Notes you already hold keep working either way: the old key is kept, so they still verify.</p>
+      </div>`)
+      // the reason names a host and comes off the wire: text, never markup
+      card.querySelector('[data-reason]')!.textContent = `${reason}.`
+      const accept = el(`<button class="btn btn-ghost danger-text"><span>Accept the new key</span></button>`)
+      const label = accept.querySelector('span')!
+      let armed = false
+      accept.addEventListener('click', () => {
+        if (!armed) {
+          armed = true
+          label.textContent = 'Tap again to trust this mint\u2019s new key'
+          return
+        }
+        void busy(accept as HTMLButtonElement, () => take({approveKeyRotation: true}))
+      })
+      card.append(accept)
+      refusal.append(card)
+    }
+
+    receiveButton.addEventListener('click', () => busy(receiveButton, () => take()))
     return view
   })
 }

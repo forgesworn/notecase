@@ -20,6 +20,12 @@ holder is the one who decides.
   offer. The difference between the two errors is whether there is a decision
   to make at all.
 - `KeyRotationError` is exported alongside the other wallet errors.
+- The web wallet answers it with its own refusal card, alongside the one for a
+  bad signature. Without it the browser had a refusal it could not show and no
+  way to accept: the CLI's flag has no equivalent behind glass, so the card
+  carries the decision. Two taps, like the signature override, because the
+  honest reason to accept is that you checked the key somewhere other than the
+  mint that is asking.
 
 - Graded against `lnurlcash-conformance` 0.7.0, whose `cash-derivation.json`
   is the vector for the `m/139'` scheme this wallet now mints under.
