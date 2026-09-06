@@ -10,7 +10,9 @@ import {
   buildNoteUrl,
   defaultRandomSecret,
   deriveCashRoot,
+  deriveCashDomainNode,
   deriveCashSecret,
+  cashNodeToHex,
   cashSecretSource,
   fetchInvoiceVerification,
   fetchNoteInfo,
@@ -564,6 +566,46 @@ export class Wallet {
   private cashRoot(): ReturnType<typeof deriveCashRoot> | null {
     const seed = this.data.seedHex
     return seed ? deriveCashRoot(hexToBytes(seed)) : null
+  }
+
+  /**
+   * One mint's subtree, `m/139'/d1/d2/d3/d4`, as the 64 bytes a hardware
+   * locker is provisioned with.
+   *
+   * This is the only thing in the wallet that hands out key material the
+   * holder did not ask to spend, so it is worth being plain about what it is.
+   * Whoever holds it can derive every note secret this wallet will ever mint
+   * AT THAT MINT - one mint's subtree, never the wallet, and never anything
+   * that reaches the Nostr identity. A device given it can mint recoverable
+   * notes on its own; a device without it draws at random and its notes are
+   * findable only from a file.
+   *
+   * It exists because `m/139'` hangs off the BIP-32 master and a locker keeps
+   * no seed. Every unhardened level of the path sits at or above this node, so
+   * beneath it the device walks only `i'` - which is why this works on
+   * hardware with no elliptic curve at all.
+   */
+  cashDomainNodeFor(host?: string): {host: string; node: string; nextIndex: number} {
+    const root = this.cashRoot()
+    if (!root) {
+      throw new WalletUsageError(
+        'This wallet has no recovery words, so it has no note tree to give a device.'
+      )
+    }
+    // Through mintEntry rather than off a raw string, for two reasons. It is
+    // already spelled the way `serverOf` spells it - lowercase, port included
+    // - and one byte of difference is a different tree whose notes neither
+    // side can see. And a mint this wallet does not track is one whose counter
+    // it cannot keep in step with the device's, which is how an index gets
+    // handed out twice.
+    const entry = this.mintEntry(host)
+    return {
+      host: entry.host,
+      node: cashNodeToHex(deriveCashDomainNode(root, entry.host)),
+      // What to raise the device to, so it does not re-issue an index this
+      // wallet has already minted at.
+      nextIndex: this.cashCounterFor(entry.host)
+    }
   }
 
   // The pre-spec ladder has no root helper here any more: restoreFromSeed

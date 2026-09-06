@@ -16,6 +16,10 @@ import {
   type VaultTransport
 } from '../src/vault.ts'
 import {freshK1, makeWallet} from './helpers.ts'
+import {cashNodeToHex, deriveCashDomainNode, deriveCashRoot} from 'lnurlcash-kit'
+import {seedFromMnemonic} from '../src/store.ts'
+import {Wallet} from '../src/wallet.ts'
+import {emptyWallet} from '../src/types.ts'
 
 // A hardware vault on the end of a cable.
 //
@@ -497,5 +501,67 @@ describe('what the device says about itself', () => {
       /no on-device confirmation wired/
     )
     expect(mint.state.noteState(deviceK1)).toBe('outstanding')
+  })
+})
+
+// ---- LUD-25 seed-recoverable notes on a locker ----
+//
+// The device keeps no seed, so `m/139'` cannot be walked there. This wallet
+// holds the seed and hands over one mint's subtree; beneath it the device
+// walks only `i'`.
+
+describe('provisioning a locker with a mint subtree', () => {
+  const seedPhrase =
+    'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'
+
+  const seededWallet = () => {
+    const data = emptyWallet()
+    data.seedHex = seedFromMnemonic(seedPhrase)
+    data.mnemonic = seedPhrase
+    data.mints = [{host: 'mint.example', payUrl: 'https://mint.example/.well-known/lnurlp/mint', input: 'mint@mint.example', addedAt: 1}]
+    return new Wallet(data, async () => {}, {timeoutMs: 3_000})
+  }
+
+  it('derives the same node the kit does, for the wallet-normalised host', async () => {
+    const wallet = seededWallet()
+    const {host, node} = wallet.cashDomainNodeFor('mint.example')
+
+    expect(host).toBe('mint.example')
+    const expected = cashNodeToHex(
+      deriveCashDomainNode(deriveCashRoot(hexToBytes(seedFromMnemonic(seedPhrase))), 'mint.example')
+    )
+    expect(node).toBe(expected)
+    // 32-byte key then 32-byte chain code
+    expect(node).toMatch(/^[0-9a-f]{128}$/)
+  })
+
+  it('hands back the index the device must not start below', async () => {
+    // A device starting lower re-issues an index this wallet already minted
+    // at, and both notes then answer to one k1.
+    const wallet = seededWallet()
+    expect(wallet.cashDomainNodeFor('mint.example').nextIndex).toBe(
+      wallet.cashCounterFor('mint.example')
+    )
+  })
+
+  it('refuses when the wallet has no recovery words', async () => {
+    // Nothing to derive from, and a random-secret wallet has no tree to give.
+    const data = emptyWallet()
+    data.mints = [{host: 'mint.example', payUrl: 'https://mint.example/.well-known/lnurlp/mint', input: 'mint@mint.example', addedAt: 1}]
+    const wallet = new Wallet(data, async () => {}, {timeoutMs: 3_000})
+    expect(() => wallet.cashDomainNodeFor('mint.example')).toThrow(/recovery words/)
+  })
+
+  it('gives two mints different subtrees', async () => {
+    const data = emptyWallet()
+    data.seedHex = seedFromMnemonic(seedPhrase)
+    data.mints = [
+      {host: 'mint.example', payUrl: 'https://mint.example/.well-known/lnurlp/mint', input: 'mint@mint.example', addedAt: 1},
+      {host: 'other.example', payUrl: 'https://other.example/.well-known/lnurlp/mint', input: 'mint@other.example', addedAt: 1}
+    ]
+    const wallet = new Wallet(data, async () => {}, {timeoutMs: 3_000})
+    expect(wallet.cashDomainNodeFor('mint.example').node).not.toBe(
+      wallet.cashDomainNodeFor('other.example').node
+    )
   })
 })

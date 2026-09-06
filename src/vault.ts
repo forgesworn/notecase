@@ -217,16 +217,78 @@ export class VaultClient {
     }
   }
 
-  async newSecret(parentIds: string[], label?: string): Promise<{id: string; h: string}> {
+  // `host`, when given, asks the device to draw the secret off that mint's
+  // LUD-25 ladder instead of its RNG, so a seed phrase can find the note
+  // again. The device refuses a host it has no subtree for rather than
+  // quietly drawing at random, which is the answer this wallet wants: asking
+  // for a recoverable note and silently getting an unrecoverable one is the
+  // failure nobody notices until a restore comes up empty.
+  async newSecret(
+    parentIds: string[],
+    label?: string,
+    host?: string
+  ): Promise<{id: string; h: string}> {
     return this.send<{id: string; h: string}>({
       cmd: 'new_secret',
       parent_ids: parentIds,
-      ...(label === undefined ? {} : {label})
+      ...(label === undefined ? {} : {label}),
+      ...(host === undefined ? {} : {host})
     })
   }
 
-  async newSecretPair(parentIds: string[]): Promise<{id: string; h: string; id2: string; h2: string}> {
-    return this.send({cmd: 'new_secret_pair', parent_ids: parentIds})
+  async newSecretPair(
+    parentIds: string[],
+    host?: string
+  ): Promise<{id: string; h: string; id2: string; h2: string}> {
+    return this.send({
+      cmd: 'new_secret_pair',
+      parent_ids: parentIds,
+      ...(host === undefined ? {} : {host})
+    })
+  }
+
+  // ---- LUD-25 seed-recoverable note secrets ----
+
+  /**
+   * Hand the device one mint's subtree, `m/139'/d1/d2/d3/d4`, as 64 bytes of
+   * hex: a 32-byte key then a 32-byte chain code.
+   *
+   * Needs the button, and should. Whoever supplies this can derive every note
+   * secret the device will ever hold at that mint - one mint's subtree, not
+   * the wallet, and this wallet holds the seed the subtree came from anyway.
+   * The device's card names the host, because nobody checks 64 bytes of hex
+   * by eye.
+   *
+   * `m/139'` hangs off the BIP-32 master and the device keeps no seed, which
+   * is why it is provisioned rather than derived there. Every unhardened level
+   * of the path sits at or above this node, so beneath it the device walks
+   * only `i'`.
+   */
+  async provisionCashNode(
+    host: string,
+    nodeHex: string
+  ): Promise<{host: string; replaced: boolean; next_index: number}> {
+    return this.send({cmd: 'provision_cash_node', host, node: nodeHex}, {gated: true})
+  }
+
+  async forgetCashNode(host: string): Promise<{changed: boolean}> {
+    return this.send({cmd: 'forget_cash_node', host})
+  }
+
+  /** The mints and each one's next index. Never the nodes. */
+  async listCashMints(): Promise<{mints: Array<{host: string; next_index: number}>}> {
+    return this.send({cmd: 'list_cash_mints'})
+  }
+
+  /**
+   * Raise the device's next index to meet this wallet's own counter.
+   *
+   * Raising only, and the device enforces it: an index handed out twice is
+   * two notes answering to one `k1`. Worth doing after a restore, when this
+   * wallet has walked further up a ladder than the device knows about.
+   */
+  async setCashIndex(host: string, nextIndex: number): Promise<{next_index: number}> {
+    return this.send({cmd: 'set_cash_index', host, next_index: nextIndex})
   }
 
   async confirm(id: string, amountMsat: number, host: string, sig?: string): Promise<void> {
