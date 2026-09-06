@@ -6,7 +6,14 @@ import {utf8ToBytes} from '@noble/hashes/utils.js'
 import {splitSecret, shareToWords, wordsToShare, reconstructSecret} from '@forgesworn/shamir-words'
 import {NoteSpentError, NoteUnknownError, toBech32Lnurl} from 'lnurlcash-kit'
 import {initWallet, openWallet, BadMnemonicError, NoWalletError, WrongPinError, seedFromMnemonic, type WalletStore} from './store.ts'
-import {Wallet, BadSignatureError, InsufficientFundsError, PinMismatchError, WalletUsageError} from './wallet.ts'
+import {
+  Wallet,
+  BadSignatureError,
+  InsufficientFundsError,
+  KeyRotationError,
+  PinMismatchError,
+  WalletUsageError
+} from './wallet.ts'
 import {createWalletFetch} from './fetchguard.ts'
 import {invoiceFromNwc, nwcStatus, payWithNwc} from './nwc.ts'
 import {NwcService, connectionUri} from './nwcservice.ts'
@@ -27,7 +34,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase balance
   notecase list [--all]
   notecase mint <sats> [--mint <host>] [--manual] [--wait <seconds>]
-  notecase receive [note] [--force] [--offline]
+  notecase receive [note] [--force] [--offline] [--accept-key-rotation]
   notecase check [--apply] [--resign] [--mint <host>]
   notecase ladder [set <sats,sats,...>] [--copies <n>] [--mint <host>]
   notecase prepare [--apply] [--mint <host>]
@@ -241,6 +248,7 @@ const main = async (): Promise<void> => {
       resign: {type: 'boolean', default: false},
       restore: {type: 'boolean', default: false},
       offline: {type: 'boolean', default: false},
+      'accept-key-rotation': {type: 'boolean', default: false},
       overpay: {type: 'boolean', default: false},
       copies: {type: 'string'},
       methods: {type: 'string'},
@@ -595,7 +603,10 @@ const main = async (): Promise<void> => {
       if (!input) throw new WalletUsageError('Give the note to receive.')
       const result = values.offline
         ? await wallet.receiveOffline(input)
-        : await wallet.receive(input, {acceptBadSignature: values.force})
+        : await wallet.receive(input, {
+            acceptBadSignature: values.force,
+            approveKeyRotation: values['accept-key-rotation'] === true
+          })
       for (const warning of result.warnings) console.log(`  warning: ${warning}`)
       console.log(`Received ${sats(result.note.amountMsat)} at ${result.note.mintHost} (${shortId(result.note)}).`)
       return
@@ -1324,6 +1335,14 @@ main().catch(err => {
   if (err instanceof BadSignatureError) {
     console.error(`Refused: ${err.message}.`)
     console.error('If you are certain this note is good, `notecase receive --force` takes it anyway.')
+    process.exitCode = 1
+    return
+  }
+  if (err instanceof KeyRotationError) {
+    console.error(`Refused: ${err.message}.`)
+    console.error(
+      'Check the new key against the mint by some route other than the mint itself, then `notecase receive --accept-key-rotation` takes it and keeps the old key so older notes still verify.'
+    )
     process.exitCode = 1
     return
   }

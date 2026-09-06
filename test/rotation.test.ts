@@ -1,12 +1,19 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
-import {PinMismatchError, Wallet} from '../src/wallet.ts'
+import {KeyRotationError, PinMismatchError, Wallet} from '../src/wallet.ts'
 import {freshK1, makeWallet} from './helpers.ts'
 
 // A mint rotating its signing key. Every outstanding signature stops
 // verifying against the pin at once, and a wallet that treats that as an
 // attack tells its holder their mint has been replaced when it has simply
 // changed a key and said so.
+//
+// LUD-25 does not let the wallet decide either way on its own: "a newly
+// advertised mintPubkey MUST NOT silently replace a pinned one, WALLET MUST
+// require explicit holder approval". So an announced rotation is offered as
+// a decision (KeyRotationError) rather than taken, and an unannounced one is
+// still refused outright (PinMismatchError) with no decision on offer - the
+// difference between the two is whether the holder is asked at all.
 
 type Mint = Awaited<ReturnType<typeof createMockMint>>
 const open: Mint[] = []
@@ -62,7 +69,7 @@ describe('a mint that rotates its signing key', () => {
     return wallet
   }
 
-  it('is accepted when the mint publishes the old key as retired', async () => {
+  it('is offered, not taken, when the mint publishes the old key as retired', async () => {
     const mint = await start()
     // any other valid mint key: the mock derives one from a private key
     const other = await start({privateKey: freshK1()})
@@ -74,7 +81,11 @@ describe('a mint that rotates its signing key', () => {
       timeoutMs: 3_000,
       fetch: rotatedTo(mint, other.state.pubkey, {publishOldKey: true})
     })
-    const received = await rotated.receive(fund(mint, 5_000))
+    // Offered, not taken: the pin does not move until the holder says so.
+    await expect(rotated.receive(fund(mint, 5_000))).rejects.toThrow(KeyRotationError)
+    expect(wallet.data.pubkeyPins[hostOf(mint)]).toBe(oldKey)
+
+    const received = await rotated.receive(fund(mint, 5_000), {approveKeyRotation: true})
 
     expect(wallet.data.pubkeyPins[hostOf(mint)]).toBe(other.state.pubkey)
     expect(rotated.pubkeyHistoryFor(hostOf(mint))).toEqual([oldKey])
@@ -86,6 +97,51 @@ describe('a mint that rotates its signing key', () => {
     expect(events.some(event => event.kind === 'mint-key-rotated')).toBe(true)
     const again = await rotated.reconcile()
     expect(again.some(event => event.kind === 'mint-key-rotated')).toBe(false)
+  })
+
+  it('writes nothing at all when the holder has not approved', async () => {
+    // A refusal that half-applied would be the worst of both: the pin
+    // still says the old key, but the history and the "rotated on" date
+    // say a rotation happened, so the next receive looks like a second
+    // one. Nothing moves until the holder says so.
+    const mint = await start()
+    const other = await start({privateKey: freshK1()})
+    const oldKey = mint.state.pubkey
+    const wallet = await pinnedWallet(mint)
+    const host = hostOf(mint)
+
+    const rotated = new Wallet(wallet.data, async () => {}, {
+      timeoutMs: 3_000,
+      fetch: rotatedTo(mint, other.state.pubkey, {publishOldKey: true})
+    })
+
+    await expect(rotated.receive(fund(mint, 5_000))).rejects.toThrow(KeyRotationError)
+
+    expect(wallet.data.pubkeyPins[host]).toBe(oldKey)
+    expect(rotated.pubkeyHistoryFor(host)).toEqual([])
+    expect(wallet.data.mints.find(entry => entry.host === host)?.keyRotatedAt).toBeUndefined()
+    // and the note it refused is not in the wallet
+    expect(rotated.balanceMsat()).toBe(21_000)
+  })
+
+  it('names the two possibilities rather than picking one', async () => {
+    // The holder is being asked to decide, so the question has to carry
+    // what makes it a question: a published retirement is what a mint
+    // rotating properly looks like AND what a mint someone else now
+    // controls would publish. A message that only said "rotated" would be
+    // asking them to rubber-stamp it.
+    const mint = await start()
+    const other = await start({privateKey: freshK1()})
+    const wallet = await pinnedWallet(mint)
+
+    const rotated = new Wallet(wallet.data, async () => {}, {
+      timeoutMs: 3_000,
+      fetch: rotatedTo(mint, other.state.pubkey, {publishOldKey: true})
+    })
+
+    await expect(rotated.receive(fund(mint, 5_000))).rejects.toThrow(
+      /rotating properly looks like, and also what a mint someone else now controls would publish/
+    )
   })
 
   // A wallet that has only ever RECEIVED notes from a mint - the ordinary
@@ -105,7 +161,7 @@ describe('a mint that rotates its signing key', () => {
       return wallet
     }
 
-    it('accepts an announced rotation, the same as a mint in the directory', async () => {
+    it('offers an announced rotation, the same as a mint in the directory', async () => {
       const mint = await start()
       const other = await start({privateKey: freshK1()})
       const oldKey = mint.state.pubkey
@@ -115,7 +171,8 @@ describe('a mint that rotates its signing key', () => {
         timeoutMs: 3_000,
         fetch: rotatedTo(mint, other.state.pubkey, {publishOldKey: true})
       })
-      const received = await rotated.receive(fund(mint, 5_000))
+      await expect(rotated.receive(fund(mint, 5_000))).rejects.toThrow(KeyRotationError)
+      const received = await rotated.receive(fund(mint, 5_000), {approveKeyRotation: true})
 
       expect(wallet.data.pubkeyPins[hostOf(mint)]).toBe(other.state.pubkey)
       expect(rotated.pubkeyHistoryFor(hostOf(mint))).toEqual([oldKey])
@@ -214,7 +271,7 @@ describe('a mint that rotates its signing key', () => {
       timeoutMs: 3_000,
       fetch: rotatedTo(mint, other.state.pubkey, {publishOldKey: true})
     })
-    await rotated.receive(fund(mint, 5_000))
+    await rotated.receive(fund(mint, 5_000), {approveKeyRotation: true})
 
     // the note it already holds was signed by the key now retired
     const verdict = rotated.verifyNoteOffline(rotated.noteUrlFor(held))

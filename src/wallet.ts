@@ -100,6 +100,18 @@ export class WalletUsageError extends Error {}
 // all. Overridable, deliberately and per receive.
 export class BadSignatureError extends Error {}
 
+// The mint presents a signing key this wallet has not pinned, AND publishes
+// the pinned one as retired, so it looks like a mint rotating properly
+// rather than a substitution. LUD-25 still refuses to let that move the pin
+// on its own: "a newly advertised mintPubkey MUST NOT silently replace a
+// pinned one, WALLET MUST require explicit holder approval". A published
+// retirement is evidence, not consent - whoever controls the host controls
+// what it publishes, so a mint that has been taken over can list the key it
+// displaced and look exactly like this. The holder is the one who decides,
+// and this error is how they are asked. Distinct from PinMismatchError,
+// which is the case with no evidence at all and no approval on offer.
+export class KeyRotationError extends Error {}
+
 export type ReceiveResult = {note: NoteRecord; warnings: string[]}
 
 export type ReconcileEvent = {kind: string; detail: string}
@@ -464,25 +476,34 @@ export class Wallet {
     }
   }
 
-  // Trust on first use, with one door in it.
+  // Trust on first use, with one door in it, and the holder holding the key
+  // to the door.
   //
   // A changed key is either the mint rotating its own signing key or
   // something standing between the wallet and the mint - and from the note
-  // alone those look identical. The door is that the MINT must already
-  // have published the old key as retired on its own discovery endpoint.
-  // That is not much of a proof, and it is not meant to be: whoever
-  // controls the host controls the pin either way, which is TOFU's own
-  // argument. What the history buys is that a mint doing the right thing -
-  // rotating a key and saying so - stops looking exactly like an attack,
-  // which is the thing that makes holders click through warnings.
+  // alone those look identical. The mint publishing the old key as retired
+  // on its own discovery endpoint tells the two apart well enough to be
+  // worth showing a holder, and no better than that: whoever controls the
+  // host controls what it publishes, so a substitution can list the key it
+  // displaced and look exactly like a rotation done properly.
+  //
+  // So the retirement list is evidence, never consent. LUD-25: "a newly
+  // advertised mintPubkey MUST NOT silently replace a pinned one, WALLET
+  // MUST require explicit holder approval". Without `approveRotation` this
+  // refuses either way; what the evidence changes is which refusal, and
+  // therefore whether the holder is offered a decision at all.
   private async pinPubkey(
     host: string,
     observed: string | undefined,
-    payLink?: string | undefined
+    payLink?: string | undefined,
+    options: {approveRotation?: boolean} = {}
   ): Promise<{rotated: boolean}> {
     if (!observed) return {rotated: false}
     const pinned = this.data.pubkeyPins[host]
     if (!pinned) {
+      // First use. There is nothing to replace, so nothing to approve: the
+      // spec's rule is about a key displacing a pinned one, and this IS
+      // the pinning.
       this.data.pubkeyPins[host] = observed
       return {rotated: false}
     }
@@ -491,6 +512,11 @@ export class Wallet {
     if (!retired.includes(pinned.toLowerCase())) {
       throw new PinMismatchError(
         `${host} now presents mint pubkey ${observed.slice(0, 16)}… but was pinned to ${pinned.slice(0, 16)}…`
+      )
+    }
+    if (!options.approveRotation) {
+      throw new KeyRotationError(
+        `${host} has rotated its signing key to ${observed.slice(0, 16)}… from the pinned ${pinned.slice(0, 16)}…, and publishes the old one as retired. That is what a mint rotating properly looks like, and also what a mint someone else now controls would publish. Accepting is your call`
       )
     }
     this.data.pubkeyHistory ??= {}
@@ -1173,7 +1199,10 @@ export class Wallet {
 
   // ---- receiving ----
 
-  async receive(input: string, options: {acceptBadSignature?: boolean} = {}): Promise<ReceiveResult> {
+  async receive(
+    input: string,
+    options: {acceptBadSignature?: boolean; approveKeyRotation?: boolean} = {}
+  ): Promise<ReceiveResult> {
     const url = resolveNoteInput(input)
     if (!url) throw new WalletUsageError('That does not look like an LNURLcash note.')
     const k1 = noteK1(url)
@@ -1189,10 +1218,12 @@ export class Wallet {
     // The note's own way home, so a mint this wallet has only ever received
     // notes from can still have its announced rotation checked. Without it
     // the escape hatch is unreachable from the only thing the wallet has.
-    const pin = await this.pinPubkey(mintHost, info.mintPubkey, info.payLink)
+    const pin = await this.pinPubkey(mintHost, info.mintPubkey, info.payLink, {
+      ...(options.approveKeyRotation ? {approveRotation: true} : {})
+    })
     if (pin.rotated) {
       warnings.push(
-        `${mintHost} has rotated its signing key and says so - the old key is kept, so notes it signed still verify`
+        `${mintHost} has rotated its signing key, and you accepted it - the old key is kept, so notes it signed still verify`
       )
     }
 
