@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+**A hardware locker can now hold notes this wallet's seed phrase can find
+again.** LUD-25 derives note secrets under `m/139'/d1/d2/d3/d4/i'`, but that
+path hangs off the BIP-32 master and a locker keeps no seed - it stores a tree
+root from a different branch, and the recovery phrase only ever exists on the
+owner's screen. So the wallet derives one mint's **domain node** and hands it
+over; beneath that node the device walks only `i'`, which is why this works on
+hardware with no elliptic curve at all.
+
+- `Wallet.cashDomainNodeFor(host)` returns that node and the index the device
+  must not start below. It goes through `mintEntry`, so the host is spelled the
+  way `serverOf` spells it - one byte of difference is a different tree neither
+  side can see - and a mint this wallet does not track is refused, because its
+  counter could not be kept in step.
+- `VaultClient` gains `provisionCashNode`, `forgetCashNode`, `listCashMints`
+  and `setCashIndex`; `newSecret` and `newSecretPair` take an optional host and
+  derive when one is given.
+- `notecase device-node --force` prints a mint's subtree for provisioning. It
+  needs the flag because whoever reads it can derive every note this wallet
+  ever mints at that mint, with no amount bounding it and no way to revoke.
+
 ## 0.15.0 - 2026-09-06
 
 **A mint's new signing key is now a question, not a fact.** LUD-25 gained the

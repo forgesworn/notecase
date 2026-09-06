@@ -35,6 +35,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase list [--all]
   notecase mint <sats> [--mint <host>] [--manual] [--wait <seconds>]
   notecase receive [note] [--force] [--offline] [--accept-key-rotation]
+  notecase device-node --force [--mint <host>]   print a mint's note tree for a locker
   notecase check [--apply] [--resign] [--mint <host>]
   notecase ladder [set <sats,sats,...>] [--copies <n>] [--mint <host>]
   notecase prepare [--apply] [--mint <host>]
@@ -659,6 +660,34 @@ const main = async (): Promise<void> => {
       else if (!values.apply && findings > 0) console.log('Run `notecase check --apply` to write this down.')
       // Asking costs nothing away: the mint issued these notes to this
       // wallet and sees each one spent, so a sweep tells it nothing new.
+      return
+    }
+
+    case 'device-node': {
+      // Prints one mint's subtree so a locker can be provisioned with it.
+      //
+      // This is the only command that prints key material the holder did not
+      // ask to spend, so it says what it is and takes a --force, the way
+      // `receive` takes one to accept a note that failed its check. Whoever
+      // ends up holding this can derive every note secret this wallet will
+      // ever mint at that mint - and unlike a note, that is not bounded by an
+      // amount. It goes to stdout and therefore into a shell history if you
+      // let it.
+      const {host, node, nextIndex} = wallet.cashDomainNodeFor(values.mint)
+      if (!values.force) {
+        console.error(`This prints the note tree for ${host}.`)
+        console.error(
+          'Anyone who reads it can derive every note this wallet ever mints there, with no limit and no way to revoke it.'
+        )
+        console.error('Re-run with --force if you meant to, ideally not into a shell that keeps history.')
+        process.exitCode = 1
+        return
+      }
+      console.log(node)
+      console.error(`  host       ${host}`)
+      // The device must not start below this or it re-issues an index this
+      // wallet has already minted at. notelocker set-cash-index raises it.
+      console.error(`  next index ${nextIndex}`)
       return
     }
 
