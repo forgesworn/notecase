@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.15.0 - 2026-09-06
 
 **A mint's new signing key is now a question, not a fact.** LUD-25 gained the
 rule on 2026-09-04: "a newly advertised `mintPubkey` MUST NOT silently replace
