@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+**A mint's new signing key is now a question, not a fact.** LUD-25 gained the
+rule on 2026-09-04: "a newly advertised `mintPubkey` MUST NOT silently replace
+a pinned one, `WALLET` MUST require explicit holder approval". This wallet
+moved the pin on its own whenever the mint published the old key as retired,
+and only said so afterwards in a warning.
+
+A published retirement is evidence, never consent. Whoever controls the host
+controls what it publishes, so a mint someone else now runs can list the key it
+displaced and look exactly like a mint rotating properly - which is why the
+holder is the one who decides.
+
+- An announced rotation now throws the new `KeyRotationError` and writes
+  nothing: not the pin, not the key history, not the note being received.
+  `receive --accept-key-rotation` (or `approveKeyRotation: true`) takes it.
+- An unannounced one is unchanged: `PinMismatchError`, with no approval on
+  offer. The difference between the two errors is whether there is a decision
+  to make at all.
+- `KeyRotationError` is exported alongside the other wallet errors.
+
 - Graded against `lnurlcash-conformance` 0.7.0, whose `cash-derivation.json`
   is the vector for the `m/139'` scheme this wallet now mints under.
 

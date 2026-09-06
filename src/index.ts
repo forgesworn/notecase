@@ -10,7 +10,14 @@
 // outcome is parked rather than guessed at, and reconcile() resolves the
 // parked ones by probing the mint - never by assumption.
 
-export {Wallet, BadSignatureError, InsufficientFundsError, PinMismatchError, WalletUsageError} from './wallet.ts'
+export {
+  Wallet,
+  BadSignatureError,
+  InsufficientFundsError,
+  KeyRotationError,
+  PinMismatchError,
+  WalletUsageError
+} from './wallet.ts'
 export {DEFAULT_LADDER, DEFAULT_LADDER_COPIES} from './wallet.ts'
 export type {
   CheckReport,

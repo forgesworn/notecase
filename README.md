@@ -48,17 +48,20 @@ A bearer note is lost the moment its secret exists nowhere durable. So:
   sender - or anyone who saw the mint invoice - still knows the old secret.
 - **Never print a k1** unless you asked to send. Balances, lists and logs
   show note ids (hashes) only.
-- **A pin can move, but only where the mint says so.** A mint's signing
-  key is pinned on first contact and a change is refused - unless the mint
-  itself already publishes the old key as retired on its discovery
-  endpoint, in which case the old key moves to a kept history, the new one
-  is pinned, and the change is reported rather than thrown. That is not
-  much of a proof, and it is not meant to be: whoever controls the host
-  controls the pin either way, which is trust-on-first-use's own argument.
-  What the history buys is that a mint doing the right thing stops looking
-  exactly like an attack, which is what teaches people to click through
-  warnings. Notes signed by a retired key keep verifying, and
-  `notecase check --resign` rotates them under the current key for nothing.
+- **A pin only moves when you move it.** A mint's signing key is pinned on
+  first contact and a change is refused. Where the mint itself publishes
+  the old key as retired on its discovery endpoint, the refusal becomes a
+  question instead: `receive --accept-key-rotation` takes it, moves the old
+  key to a kept history and pins the new one. Nothing is written until you
+  say so - LUD-25 requires that a newly advertised key never silently
+  replaces a pinned one. A published retirement is not much of a proof and
+  is not meant to be: whoever controls the host controls what it publishes,
+  so a mint someone else now runs can list the key it displaced and look
+  exactly like a mint rotating properly. What it buys is that the honest
+  case stops looking identical to an attack, which is what teaches people
+  to click through warnings. Notes signed by a retired key keep verifying,
+  and `notecase check --resign` rotates them under the current key for
+  nothing.
 - **A signature that fails is a refusal.** A note carrying a `sig` that
   does not verify against the key pinned for its mint is rejected before
   any record is written: the amount may have been altered, or the note may
