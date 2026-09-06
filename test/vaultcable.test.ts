@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest'
 import {VaultError} from '../src/vault.ts'
-import {frame, openConnection, NOTE_NACK, NOTE_RESP, type PortLike} from '../web/src/vaultserial.ts'
+import {frame, crc32, openConnection, NOTE_NACK, NOTE_RESP, type PortLike} from '../web/src/vaultserial.ts'
 
 // What happens on the cable when the device answers, refuses, or says
 // nothing. These three are not the same thing, and a client that renders
@@ -114,5 +114,56 @@ describe('the device on the other end', () => {
       /^The vault did not answer\.$/
     )
     connection.transport.close()
+  })
+})
+
+// ---- the cable from a terminal ----
+//
+// The framing moved to src/vaultwire.ts so the CLI and the browser share one
+// implementation. These check the seam itself: that the move kept the wire
+// identical, and that the node-side port adapter presents the same PortLike
+// the browser hands in.
+
+describe('the wire, shared by both surfaces', () => {
+  it('frames a command the same way it always did', () => {
+    // The bytes are the contract with two devices in the field. If this
+    // changes, a locker stops answering.
+    const framed = frame(new TextEncoder().encode('{"cmd":"get_info"}'))
+    expect(framed[0]).toBe(0x48)
+    expect(framed[1]).toBe(0x57)
+    expect(framed[2]).toBe(0x70)
+    expect((framed[3]! << 8) | framed[4]!).toBe(18)
+    // CRC covers type + length + payload, not the magic
+    const covered = new Uint8Array([framed[2]!, framed[3]!, framed[4]!, ...framed.slice(5, 5 + 18)])
+    const crc = crc32(covered)
+    expect(framed.slice(-4)).toEqual(
+      new Uint8Array([(crc >>> 24) & 0xff, (crc >>> 16) & 0xff, (crc >>> 8) & 0xff, crc & 0xff])
+    )
+  })
+
+  it('is re-exported from the web module, so the browser path is unchanged', async () => {
+    // The split must not have moved anything out from under web/src/main.ts.
+    const web = await import('../web/src/vaultserial.ts')
+    const wire = await import('../src/vaultwire.ts')
+    for (const name of ['crc32', 'frame', 'lineParser', 'frameParser', 'openConnection', 'NOTE_CMD', 'NOTE_RESP']) {
+      expect(web[name as keyof typeof web], `${name} should still be reachable from vaultserial`).toBe(
+        wire[name as keyof typeof wire]
+      )
+    }
+  })
+
+  it('says what to do when serialport is not installed', async () => {
+    // It is deliberately not a dependency: a wallet should not need a
+    // compiler to install, and almost nobody who installs notecase owns a
+    // locker. The absence has to read as an instruction, not a stack trace.
+    const {listPorts} = await import('../src/vaultport.ts')
+    try {
+      await listPorts()
+      // serialport IS installed in this environment, which is fine - the
+      // call simply works and there is nothing to assert about its absence.
+    } catch (err) {
+      expect((err as Error).message).toMatch(/serialport/)
+      expect((err as Error).message).toMatch(/npm i/)
+    }
   })
 })

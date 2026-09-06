@@ -35,7 +35,9 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase list [--all]
   notecase mint <sats> [--mint <host>] [--manual] [--wait <seconds>]
   notecase receive [note] [--force] [--offline] [--accept-key-rotation]
-  notecase device-node --force [--mint <host>]   print a mint's note tree for a locker
+  notecase device provision [--mint <host>] [--port <path>]   set a mint up on a locker
+  notecase device <ports|info|mints|forget> [--port <path>] [--mint <host>]
+  notecase device-node --force [--mint <host>]   print a mint's note tree (prefer device provision)
   notecase check [--apply] [--resign] [--mint <host>]
   notecase ladder [set <sats,sats,...>] [--copies <n>] [--mint <host>]
   notecase prepare [--apply] [--mint <host>]
@@ -233,6 +235,7 @@ const main = async (): Promise<void> => {
       label: {type: 'string'},
       memo: {type: 'string'},
       mint: {type: 'string'},
+      port: {type: 'string'},
       'disclose-secrets': {type: 'boolean'},
       manual: {type: 'boolean', default: false},
       wait: {type: 'string'},
@@ -280,6 +283,24 @@ const main = async (): Promise<void> => {
   const [command, ...rest] = positionals
   if (values.help || !command) {
     console.log(HELP)
+    return
+  }
+
+  if (command === 'device' && rest[0] === 'ports') {
+    // Before the wallet, deliberately. Listing what is plugged in is a
+    // question about the machine, not about anybody's money, and it is the
+    // first thing you reach for when a cable command is misbehaving - which
+    // is exactly when demanding a PIN first is least welcome.
+    const {listPorts} = await import('./vaultport.ts')
+    const ports = await listPorts()
+    if (ports.length === 0) {
+      console.error('No candidate devices attached.')
+      process.exitCode = 1
+      return
+    }
+    for (const p of ports) {
+      console.log(`${p.path}  ${p.manufacturer ?? ''}${p.serialNumber ? `  ${p.serialNumber}` : ''}`.trimEnd())
+    }
     return
   }
 
@@ -661,6 +682,68 @@ const main = async (): Promise<void> => {
       // Asking costs nothing away: the mint issued these notes to this
       // wallet and sees each one spent, so a sweep tells it nothing new.
       return
+    }
+
+    case 'device': {
+      // The cable, from a terminal. Everything here goes through the same
+      // vaultwire.ts the browser uses, so there is one implementation of the
+      // protocol rather than one per surface.
+      const {connectCable, soleDevice} = await import('./vaultport.ts')
+      const sub = rest[0] ?? ''
+
+      const path = values.port ?? (await soleDevice())
+      const cable = await connectCable(path)
+      try {
+        const {VaultClient} = await import('./vault.ts')
+        const client = new VaultClient(cable.transport)
+
+        if (sub === 'info') {
+          const info = await client.info()
+          for (const [k, v] of Object.entries(info)) console.log(`${k.padEnd(16)}${v}`)
+          return
+        }
+
+        if (sub === 'mints') {
+          const {mints} = await client.listCashMints()
+          if (mints.length === 0) {
+            console.log('No mint subtrees on this device.')
+            return
+          }
+          for (const m of mints) console.log(`${m.host.padEnd(28)}next index ${m.next_index}`)
+          return
+        }
+
+        if (sub === 'provision') {
+          // The whole point of folding the cable into this CLI: the wallet
+          // holds the seed, derives the subtree and hands it over in one
+          // operation. It never reaches a screen, a clipboard or a shell
+          // history - which is what `device-node --force` could not avoid,
+          // because something else had to carry the bytes to the device.
+          const {host, node, nextIndex} = wallet.cashDomainNodeFor(values.mint)
+          console.error(`Approve on the device: setting up ${host}.`)
+          const res = await client.provisionCashNode(host, node)
+          // Raise it to this wallet's own counter, so the device cannot
+          // re-issue an index already minted at.
+          const raised = nextIndex > 0 ? await client.setCashIndex(host, nextIndex) : {next_index: 0}
+          console.log(
+            `${res.replaced ? 'Replaced' : 'Set up'} ${host} on the device, next index ${raised.next_index}.`
+          )
+          return
+        }
+
+        if (sub === 'forget') {
+          const {host} = wallet.cashDomainNodeFor(values.mint)
+          const {changed} = await client.forgetCashNode(host)
+          console.log(changed ? `Forgot ${host}.` : `${host} was not set up on this device.`)
+          return
+        }
+
+        throw new WalletUsageError(
+          'usage: notecase device <ports|info|mints|provision|forget> [--port <path>] [--mint <host>]'
+        )
+      } finally {
+        await cable.close()
+      }
     }
 
     case 'device-node': {
