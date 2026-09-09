@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.16.0 - 2026-09-09
 
 **A mint that says it is closing now gets said back.** `sunsetDate` is advance
 warning: a mint publishes the day it plans to shut, while there is still time
