@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
-import {mintFeeBand} from 'lnurlcash-kit'
+import {mintFeeBand, type LnurlcashOptions} from 'lnurlcash-kit'
 import {makeWallet} from './helpers.ts'
 
 // What a mint says about itself.
@@ -221,5 +221,72 @@ describe('predicting what a mint will credit', () => {
     const band = mintFeeBand(150_000, {baseFeeMsat: 0, feePpm: 0})
     expect(band.minNetMsat).toBe(150_000)
     expect(band.maxNetMsat).toBe(150_000)
+  })
+})
+
+// The mock mint does not publish these three, and it should not have to:
+// they are optional fields a real mint adds, so the wallet's side of them
+// is tested by putting them on the wire under it.
+const withExtraAddressFields = (extra: Record<string, unknown>): LnurlcashOptions => ({
+  fetch: async (input, init) => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
+    const response = await fetch(input, init)
+    if (!url.pathname.startsWith('/.well-known/lnurlw/')) return response
+    const body = (await response.json()) as Record<string, unknown>
+    return new Response(JSON.stringify({...body, ...extra}), {
+      status: response.status,
+      headers: {'content-type': 'application/json'}
+    })
+  }
+})
+
+describe('a mint that says when it is closing', () => {
+  it('reads the date, what it owes, and every door into its node', async () => {
+    const mint = await start(INFO)
+    const {wallet, data} = makeWallet(
+      withExtraAddressFields({
+        sunsetDate: '2026-12-31',
+        outstandingNotesMsat: 4_009_000,
+        nodeUris: ['02aa@1.2.3.4:9735', '02aa@abc.onion:9735']
+      })
+    )
+    const host = hostOf(mint)
+    await wallet.addMint(`mint@${host}`)
+
+    const info = data.mints[0]!.info!
+    expect(info.sunsetDate).toBe('2026-12-31')
+    expect(info.outstandingNotesMsat).toBe(4_009_000)
+    expect(info.nodeUris).toEqual(['02aa@1.2.3.4:9735', '02aa@abc.onion:9735'])
+    // The one the paths that warn actually read.
+    expect(wallet.sunsetDateOf(host)).toBe('2026-12-31')
+  })
+
+  it('says nothing about a mint that never mentioned closing', async () => {
+    const mint = await start(INFO)
+    const {wallet, data} = makeWallet()
+    const host = hostOf(mint)
+    await wallet.addMint(`mint@${host}`)
+
+    expect('sunsetDate' in data.mints[0]!.info!).toBe(false)
+    expect(wallet.sunsetDateOf(host)).toBeUndefined()
+    // A mint this wallet has never heard of is silence too, not a throw:
+    // the warning paths call this before anything has been fetched.
+    expect(wallet.sunsetDateOf('unknown.example')).toBeUndefined()
+  })
+
+  it('drops a closing date that is not a real day, rather than showing it', async () => {
+    // The kit is the one that decides this, and it deciding it is the
+    // reason this wallet can put the value straight in front of a holder.
+    const mint = await start(INFO)
+    const {wallet, data} = makeWallet(withExtraAddressFields({sunsetDate: '31/12/2026'}))
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    expect(data.mints[0]!.info!.sunsetDate).toBeUndefined()
+  })
+
+  it('leaves an empty node list absent rather than empty', async () => {
+    const mint = await start(INFO)
+    const {wallet, data} = makeWallet(withExtraAddressFields({nodeUris: []}))
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    expect('nodeUris' in data.mints[0]!.info!).toBe(false)
   })
 })

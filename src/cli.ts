@@ -41,7 +41,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase check [--apply] [--resign] [--mint <host>]
   notecase ladder [set <sats,sats,...>] [--copies <n>] [--mint <host>]
   notecase prepare [--apply] [--mint <host>]
-  notecase send <sats> [--mint <host>] [--offline] [--overpay] [--notes <id,id>]
+  notecase send <sats> [--mint <host>] [--offline] [--overpay] [--notes <id,id>] [--strip-sig]
   notecase send <sats> --to <npub|nip05> [--notes <id,id>]
   notecase address | address claim <name> [--mint <host>]
   notecase inbox
@@ -91,7 +91,13 @@ of leaving the choice to the wallet. A selection that cannot work is
 refused with the reason rather than quietly swapped for one that can. With
 --offline it means more than a preference: those notes are the hand-over,
 because nothing can be cut to size without the mint, so a selection worth
-more than the asking price needs --overpay.`
+more than the asking price needs --overpay.
+
+--strip-sig hands a note over without the mint's signature on it. The note
+still spends, but nobody can check it without asking the mint - including the
+recipient, so an offline hand-over stops being one. The reason to want it is
+that the signature is a statement by the mint's own key, and it travels with
+the note to everyone who sees it after this.`
 
 // Short ids as `list` prints them, turned into the full ones the wallet
 // keys on. An ambiguous or unknown one is refused by name: quietly
@@ -252,6 +258,7 @@ const main = async (): Promise<void> => {
       resign: {type: 'boolean', default: false},
       restore: {type: 'boolean', default: false},
       offline: {type: 'boolean', default: false},
+      'strip-sig': {type: 'boolean', default: false},
       'accept-key-rotation': {type: 'boolean', default: false},
       overpay: {type: 'boolean', default: false},
       copies: {type: 'string'},
@@ -355,6 +362,11 @@ const main = async (): Promise<void> => {
             const unread = mint.info.motd !== mint.motdSeen ? ' (new)' : ''
             console.log(`    notice${unread}: ${mint.info.motd}`)
           }
+          // Worth a line of its own in the list, because the list is what
+          // someone reads when deciding where to put money next.
+          if (mint.info?.sunsetDate) {
+            console.log(`    closing on ${mint.info.sunsetDate} - move notes held here before then`)
+          }
           if (mint.keyRotatedAt) {
             const retired = wallet.pubkeyHistoryFor(mint.host).length
             console.log(
@@ -389,6 +401,17 @@ const main = async (): Promise<void> => {
           if (info.tosUrl) console.log(`  terms:       ${info.tosUrl}`)
           if (info.version) console.log(`  version:     ${info.version}`)
           if (info.motd) console.log(`  notice:      ${info.motd}`)
+          if (info.sunsetDate) console.log(`  closing:     ${info.sunsetDate}`)
+          // What the mint says it owes, next to nothing that checks it.
+          if (info.outstandingNotesMsat !== undefined) {
+            console.log(`  outstanding: ${sats(info.outstandingNotesMsat)} in notes it has issued and not burned`)
+          }
+          // Every door into the funding node, not just the first: the one
+          // this holder can actually reach may be the second.
+          if (info.nodeUris?.length) {
+            console.log(`  node:        ${info.nodeUris[0]}`)
+            for (const uri of info.nodeUris.slice(1)) console.log(`               ${uri}`)
+          }
         }
         const fee = entry.mintFee
         console.log(
@@ -588,6 +611,15 @@ const main = async (): Promise<void> => {
 
     case 'mint': {
       const grossMsat = parseAmountMsat(rest[0], values.msat)
+      // Said before the invoice, not after: a holder who learns a mint is
+      // closing once they are already looking at something to pay has been
+      // told too late to act on it.
+      const closing = wallet.sunsetDateOf(wallet.mintEntry(values.mint).host)
+      if (closing) {
+        console.log(
+          `warning: this mint says it plans to close on ${closing}. Minting here now means having to move the note again before then - consider another mint.`
+        )
+      }
       const {pending, fee} = await wallet.startMint(grossMsat, values.mint)
       if (fee) console.log(`This mint withholds a fee - expect ${netAfterFee(pending)} net for ${sats(grossMsat)} paid.`)
       if (nwcUri && !values.manual) {
@@ -805,7 +837,8 @@ const main = async (): Promise<void> => {
         // at all, which is why it has to be asked for.
         const handed = await wallet.sendOffline(amountMsat, values.mint, {
           acceptOverpay: values.overpay,
-          ...(noteIds ? {noteIds} : {})
+          ...(noteIds ? {noteIds} : {}),
+          ...(values['strip-sig'] ? {stripSignature: true} : {})
         })
         console.log(
           handed.notes.length === 1
@@ -813,6 +846,11 @@ const main = async (): Promise<void> => {
             : `${handed.notes.length} bearer notes worth ${sats(handed.totalMsat)} together - hand over every one:\n`
         )
         for (const noteUrl of handed.urls) console.log(noteUrl)
+        if (values['strip-sig']) {
+          console.log(
+            '\nThe mint signature is stripped, so nobody can check these offline. The recipient has to be online to take them.'
+          )
+        }
         if (handed.overpayMsat > 0) {
           console.log(`\nThat overpays by ${sats(handed.overpayMsat)}: offline, nothing can be split to the exact amount.`)
         }
@@ -824,10 +862,15 @@ const main = async (): Promise<void> => {
         return
       }
       const note = await wallet.send(amountMsat, values.mint, noteIds)
-      const url = wallet.noteUrlFor(note)
+      const url = wallet.noteUrlFor(note, {stripSignature: values['strip-sig']})
       console.log(`A bearer note for ${sats(note.amountMsat)} - whoever sees this owns it:\n`)
       console.log(url)
       console.log(`\n${toBech32Lnurl(url)}`)
+      if (values['strip-sig'] && note.signature) {
+        console.log(
+          '\nThe mint signature is stripped: this note carries nothing tying it to the mint that issued it, and the recipient can only check it by asking the mint.'
+        )
+      }
       console.log('\nIf it is never claimed, `notecase receive` with the URL above takes it back.')
       return
     }

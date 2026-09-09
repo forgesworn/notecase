@@ -324,7 +324,16 @@ export class Wallet {
         ...(contact && Object.keys(contact).length > 0 ? {contact} : {}),
         ...(body.tosUrl ? {tosUrl: body.tosUrl} : {}),
         ...(body.motd ? {motd: body.motd} : {}),
-        ...(body.version ? {version: body.version} : {})
+        ...(body.version ? {version: body.version} : {}),
+        // The kit has already thrown out a sunsetDate that is not a real
+        // calendar day, which matters more here than elsewhere: the one
+        // thing this wallet does with it is put it in front of a holder,
+        // and a wrong date there is worse than no date at all.
+        ...(body.sunsetDate ? {sunsetDate: body.sunsetDate} : {}),
+        ...(typeof body.outstandingNotesMsat === 'number'
+          ? {outstandingNotesMsat: body.outstandingNotesMsat}
+          : {}),
+        ...(body.nodeUris?.length ? {nodeUris: body.nodeUris} : {})
       }
       return {
         ...(Object.keys(info).length > 0 ? {info} : {}),
@@ -363,6 +372,14 @@ export class Wallet {
     if (!motd || entry.motdSeen === motd) return
     entry.motdSeen = motd
     await this.persist()
+  }
+
+  // The day a mint says it plans to close, when it says one. Read from the
+  // cached info rather than the wire: this is asked on paths that already
+  // decided not to make a round trip, and a warning that only appears when
+  // an optional endpoint answers in time is a warning nobody can rely on.
+  sunsetDateOf(host: string): string | undefined {
+    return this.data.mints.find(mint => mint.host === host)?.info?.sunsetDate
   }
 
   // Every mint with something to say the holder has not read yet.
@@ -1595,9 +1612,19 @@ export class Wallet {
   // about this note, and carrying it is what lets a recipient check the
   // note without asking anyone, which is the entire point of taking one
   // offline. The kit strips it back off before any informational GET.
-  noteUrlFor(note: NoteRecord): string {
+  //
+  // `stripSignature` hands over the note without it. What is left is an
+  // ordinary bearer note - a missing signature is unverifiable, never
+  // invalid - so the recipient can still claim it, they just have to ask
+  // the mint rather than check for themselves. The reason to want that is
+  // that the signature is a statement BY the mint's pinned key: it ties
+  // the note to that mint for anyone who later sees it, including whoever
+  // the recipient shows it to next. Costly enough that it is never the
+  // default, and the recipient is the one who pays the cost.
+  noteUrlFor(note: NoteRecord, opts?: {stripSignature?: boolean}): string {
     const url = buildNoteUrl(note.baseUrl, note.k1, note.amountMsat)
-    return note.signature ? withNewK1(url, note.k1, note.amountMsat, note.signature) : url
+    if (opts?.stripSignature || !note.signature) return url
+    return withNewK1(url, note.k1, note.amountMsat, note.signature)
   }
 
   // ---- the offline cash drawer ----
@@ -1811,7 +1838,7 @@ export class Wallet {
   async sendOffline(
     amountMsat: number,
     mintHost?: string,
-    options: {acceptOverpay?: boolean; noteIds?: string[]} = {}
+    options: {acceptOverpay?: boolean; noteIds?: string[]; stripSignature?: boolean} = {}
   ): Promise<OfflineHandover> {
     const selection = this.planOfflineSend(amountMsat, mintHost, options.noteIds)
     if (selection.overpayMsat > 0 && !options.acceptOverpay) {
@@ -1826,7 +1853,16 @@ export class Wallet {
       this.touch(note, 'sent')
     }
     await this.persist()
-    return {...selection, urls: selection.notes.map(note => this.noteUrlFor(note))}
+    // Stripping the signature here costs the recipient the one thing an
+    // offline hand-over has: `receiveOffline` refuses a note it cannot
+    // check, so a stripped note has to wait for a connection. The caller
+    // is told that before it prints anything.
+    return {
+      ...selection,
+      urls: selection.notes.map(note =>
+        this.noteUrlFor(note, {stripSignature: !!options.stripSignature})
+      )
+    }
   }
 
   // Takes a note on its signature alone. This needs a pin: a wallet that

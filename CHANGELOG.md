@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+**A mint that says it is closing now gets said back.** `sunsetDate` is advance
+warning: a mint publishes the day it plans to shut, while there is still time
+to spend. This wallet dropped it on the floor, so the first a holder heard was
+a mint that had stopped minting - by which point the warning had no use left.
+
+- `notecase mint` says it before building the invoice, not after. A holder who
+  learns a mint is closing while already looking at something to pay has been
+  told too late to pick a different mint.
+- `mints list` carries a line per closing mint, because the list is what
+  somebody reads when deciding where to put money next; `mints info` shows the
+  date, what the mint says it owes, and every address its node announces
+  rather than just the first.
+- In the web wallet: a warning on the mint screen that follows the mint
+  picker, and a badge on any note held at a closing mint. Not on a spent one -
+  there is nothing left there to move.
+
+Nothing here is checked, and none of it is a promise. A mint can close without
+ever setting a date, and setting one binds nobody. It is a prompt to move
+notes, and it is shown as the mint's own claim.
+
+**`send --strip-sig` hands a note over without the mint's signature.** The
+signature is a statement by the mint's own key, and it travels with the note
+to everyone who sees it after this - including whoever the recipient shows it
+to next. A holder who would rather not carry that can drop it.
+
+What it costs is the recipient's: a note with no signature is unverifiable
+rather than invalid, so it still spends, but nobody can check it without
+asking the mint, and `receive --offline` refuses it outright. Off by default,
+said plainly at the point of use, and in the web wallet it redraws the
+hand-over cover and all - what the QR says has changed, and a scratched cover
+would be saying so about the wrong note.
+
 **The cable, from a terminal.** `notecase device` drives a hardware locker over
 USB: `ports`, `info`, `mints`, `provision`, `forget`.
 

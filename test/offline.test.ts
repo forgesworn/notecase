@@ -99,6 +99,23 @@ describe('handing notes over offline', () => {
     for (const note of handed.notes) expect(theMint.state.noteState(note.k1)).toBe('outstanding')
   })
 
+  it('hands over without the mint signature when the holder asks, and the note still spends', async () => {
+    // What is left is an ordinary bearer note: nobody can check it without
+    // asking the mint, which is exactly what the holder chose.
+    const {theMint, wallet} = await stocked()
+    const handed = await wallet.sendOffline(30_000, undefined, {stripSignature: true})
+    expect(handed.urls.every(url => !url.includes('sig='))).toBe(true)
+    expect(handed.urls.every(url => url.includes('k1=') && url.includes('amount='))).toBe(true)
+
+    const {wallet: recipient} = makeWallet()
+    // One online receive pins the mint's key, so this recipient COULD have
+    // checked a signed note offline. The stripped one still cannot be:
+    // that is what the holder spent, and they spent it on the recipient.
+    await recipient.receive(fund(theMint, 1_000))
+    await expect(recipient.receiveOffline(handed.urls[0]!)).rejects.toThrow(/signature, and this one does not/)
+    await expect(recipient.receive(handed.urls[0]!)).resolves.toBeDefined()
+  })
+
   it('refuses an amount no notes make exactly, and names the overpay', async () => {
     const {wallet} = await stocked()
     await expect(wallet.sendOffline(15_000)).rejects.toThrow(WalletUsageError)

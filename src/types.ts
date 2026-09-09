@@ -185,6 +185,20 @@ export type MintInfo = {
   tosUrl?: string
   motd?: string
   version?: string
+  // The day the mint says it plans to close, ISO-8601. Advance warning, and
+  // deliberately not the same thing as a mint that has already stopped
+  // minting: by the time minting is off, a holder who was going to be told
+  // has already not been told. Nothing enforces it and nothing checks it, so
+  // it is a prompt to move notes rather than a deadline to compute against.
+  sunsetDate?: string
+  // What the mint says it owes: every note it has issued and not burned, in
+  // msat. Its own claim about its own database, with nothing on this side to
+  // check it against.
+  outstandingNotesMsat?: number
+  // Every address the mint's funding node announces. A node reachable over
+  // Tor as well as clearnet announces both, and a holder who can only reach
+  // the other one needs the list rather than the first of it.
+  nodeUris?: string[]
 }
 
 export type WalletData = {
