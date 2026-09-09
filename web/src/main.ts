@@ -1823,6 +1823,15 @@ const viewNote = (note: NoteRecord): void => {
         el(`<span class="badge wait">${icons.hourglass}<span>handed over - whoever holds it can spend it</span></span>`)
       )
     }
+    // A note whose mint is closing needs moving, and this is the screen
+    // someone is on when they are thinking about that note. Not on a spent
+    // one: there is nothing left there to move.
+    const closing = note.state === 'spent' ? undefined : w.sunsetDateOf(note.mintHost)
+    if (closing) {
+      const badge = el(`<span class="badge wait">${icons.hourglass}<span></span></span>`)
+      badge.querySelector('span')!.textContent = `mint closing on ${closing} - move this before then`
+      badges.append(badge)
+    }
     body.append(badges)
 
     // mintHost, origin and id are persisted strings - a crafted backup must
@@ -2314,8 +2323,18 @@ const viewSend = (): void => {
           return
         }
         const note = await w.send(amount.msat(), undefined, noteIds)
-        const url = w.noteUrlFor(note)
+        // The mint's signature travels with the note to everyone who sees
+        // it after this, so whether to carry it is the holder's call - but
+        // it is what lets the recipient check the note without asking
+        // anyone, so it is on unless they say otherwise. Toggling redraws
+        // the whole hand-over, cover included: what the QR says has
+        // changed, and a scratched cover would be saying so about the
+        // wrong note.
+        let stripped = false
+        let struck = false
+        const handover = (): void =>
         show(() => {
+          const url = w.noteUrlFor(note, {stripSignature: stripped})
           const done = el('<div class="view"></div>')
           done.append(topBar('Your note', viewHome))
           const inner = el('<div class="stack center"></div>')
@@ -2340,10 +2359,40 @@ const viewSend = (): void => {
           if (share) inner.append(share)
           const tag = writeTagButton(url)
           if (tag) inner.append(tag)
+          // Only offered when there is one to strip: a mint that signed
+          // nothing leaves nothing to decide.
+          if (note.signature) {
+            const toggle = el(`<button class="btn btn-ghost">${icons.shield}<span></span></button>`)
+            toggle.querySelector('span')!.textContent = stripped
+              ? 'Put the mint signature back'
+              : 'Hand over without the mint signature'
+            toggle.addEventListener('click', () => {
+              stripped = !stripped
+              handover()
+              toast(
+                stripped
+                  ? 'Signature stripped - they will have to ask the mint to check this note.'
+                  : 'Signature restored - they can check this note offline.',
+                'ok'
+              )
+            })
+            inner.append(toggle)
+            if (stripped) {
+              inner.append(
+                el(
+                  `<p class="warn"><strong>No mint signature on this one.</strong> It still spends, but nobody can check it without asking the mint - so it cannot be taken offline.</p>`
+                )
+              )
+            }
+          }
           done.append(inner)
-          strikeIn(print, note.amountMsat, inner)
+          if (!struck) {
+            struck = true
+            strikeIn(print, note.amountMsat, inner)
+          }
           return done
         })
+        handover()
       })
     )
     return view
@@ -2575,6 +2624,7 @@ const viewMint = (): void => {
     form.append(el('<div class="rubric">To be struck</div>'))
     form.append(mintPicker(w), amount.node)
     form.append(
+      el(`<p class="warn" data-sunset hidden></p>`),
       el(`<p class="warn" data-feenote>&nbsp;</p>`),
       el(`<button class="btn btn-silver" data-mintgo>${icons.mint}<span>${w.data.settings.nwcUri ? 'Mint - pay with connected wallet' : 'Create the invoice'}</span></button>`)
     )
@@ -2583,7 +2633,19 @@ const viewMint = (): void => {
     const feeNote = form.querySelector('[data-feenote]') as HTMLElement
     const input = amount.node.querySelector('[data-amount]') as HTMLInputElement
     const select = form.querySelector('[data-mint]') as HTMLSelectElement
+    // A mint that has said it is closing is worth saying so here, where the
+    // choice of mint is still open, rather than after the note exists and
+    // moving it costs another mutation.
+    const sunsetNote = form.querySelector('[data-sunset]') as HTMLElement
+    const paintSunset = () => {
+      const closing = w.sunsetDateOf(select.value)
+      sunsetNote.hidden = !closing
+      if (closing) {
+        sunsetNote.textContent = `This mint plans to close on ${closing}. A note minted here has to be moved again before then - another mint avoids that.`
+      }
+    }
     const paintFee = () => {
+      paintSunset()
       const entry = w.data.mints.find(mint => mint.host === select.value)
       const fee = entry?.mintFee
       const net = Number(input.value) * 1000
@@ -3071,6 +3133,29 @@ const viewMints = (prefillAdd?: string): void => {
           const row = el('<div class="kv"><span>version</span><b></b></div>')
           row.querySelector('b')!.textContent = info.version
           about.append(row)
+        }
+        // A closing date is the one thing here that asks the holder to do
+        // something, so it gets a warning of its own rather than a row in
+        // a list of facts about the operator.
+        if (info.sunsetDate) {
+          const warn = el('<p class="warn" style="margin:0"><strong></strong> <span></span></p>')
+          warn.querySelector('strong')!.textContent = `This mint plans to close on ${info.sunsetDate}.`
+          warn.querySelector('span')!.textContent =
+            'Move any notes you hold here before then, and mint new ones somewhere else.'
+          about.append(warn)
+        }
+        if (info.outstandingNotesMsat !== undefined) {
+          const row = el('<div class="kv"><span>outstanding</span><b></b></div>')
+          row.querySelector('b')!.textContent = `${sats(info.outstandingNotesMsat)} sat in issued notes`
+          about.append(row)
+        }
+        if (info.nodeUris?.length) {
+          for (const uri of info.nodeUris) {
+            const chip = el(`<button class="chip"><span></span><b>copy</b></button>`)
+            chip.querySelector('span')!.textContent = `node: ${uri.slice(0, 24)}…`
+            chip.addEventListener('click', () => void copyText(uri, 'node uri'))
+            about.append(chip)
+          }
         }
         about.append(
           el('<span class="fineline">what this mint says about itself, not something notecase has checked</span>')
