@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.19.1 - 2026-09-11
 
 - lnurlcash-kit 0.13.0, where a plain note is unsigned: LUD-25 Part 2
   certifies `cp1` notes only, and a rotate, split or merge to a hash can
