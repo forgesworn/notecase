@@ -2772,10 +2772,13 @@ export class Wallet {
 
     // Same again for the spend marks: one hold for the batch.
     if (claimed.length) {
+      // Firmware that takes #129 writes these off on the hold that released
+      // the secrets, so there is usually no second card. Older firmware still
+      // raises one, and nothing here can tell which it is talking to.
       onProgress(
         claimed.length === 1
-          ? `hold again to mark ${claimed[0]!.id} spent on the device`
-          : `hold once more to mark all ${claimed.length} spent on the device`
+          ? `writing ${claimed[0]!.id} off on the device - hold again if it asks`
+          : `writing all ${claimed.length} off on the device - hold again if it asks`
       )
       const marks = await Promise.all(
         claimed.map(note =>
