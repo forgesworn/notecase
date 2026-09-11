@@ -1,6 +1,6 @@
 import {createServer} from 'node:net'
 import {afterEach, describe, expect, it} from 'vitest'
-import {finalizeEvent, generateSecretKey, getPublicKey, matchFilter, type Event, type Filter} from 'nostr-tools'
+import {finalizeEvent, generateSecretKey, getPublicKey, matchFilter, nip19, type Event, type Filter} from 'nostr-tools'
 import {nip44} from 'nostr-tools'
 import {createFakeBackend, createMoneyer, type FakeBackend, type Moneyer} from '@forgesworn/moneyer'
 import {bolt11PaymentHash} from 'farrier-kit/bolt11'
@@ -154,6 +154,9 @@ const fakeHeartwood = (relay: string) => {
     notes,
     log,
     pubkey,
+    // What the owner wrote down for this master: it is a bunker master, so
+    // its nsec.
+    nsec: nip19.nsecEncode(secret),
     branchFor,
     answerAs(other: string) {
       answerAs = other
@@ -309,6 +312,27 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     expect(result.collected.map(r => r.note.amountMsat)).toEqual([second!.amount_msat])
     expect(device.notes.map(n => n.state)).toEqual(['confirmed', 'spent'])
     expect(first!.state).toBe('confirmed')
+  })
+
+  it("recovers a lost heartwood's notes from its nsec, into a wallet that never saw it", async () => {
+    const {theMint, device, wallet} = await setUp()
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    await pay(theMint, 'donkey', 21_000)
+    await pay(theMint, 'donkey', 5_000)
+
+    // the device is gone; a fresh wallet with only the master's nsec
+    const {wallet: rescuer} = makeWallet()
+    await rescuer.addMint(`mint@${theMint.host}`)
+    const opts = {expectedPubkey: device.pubkey, mintHost: theMint.host, gap: 3}
+    await expect(rescuer.recoverHeartwoodNotes(nip19.nsecEncode(generateSecretKey()), opts)).rejects.toThrow('does not open')
+
+    const result = await rescuer.recoverHeartwoodNotes(device.nsec, opts)
+    expect(result.mode).toBe('bunker')
+    expect(result.received.map(r => r.note.amountMsat).sort((a, b) => a - b)).toEqual([5_000, 21_000])
+    expect(result.scanned).toBe(2 + 3)
+    expect(rescuer.balanceMsat()).toBe(26_000)
+    // taken, so a second recovery finds the keys spent and takes nothing
+    expect((await rescuer.recoverHeartwoodNotes(device.nsec, opts)).received).toEqual([])
   })
 
   it('refuses a branch the device says belongs to another identity, before anything is signed', async () => {

@@ -18,7 +18,7 @@ import {createWalletFetch} from './fetchguard.ts'
 import {invoiceFromNwc, nwcStatus, payWithNwc} from './nwc.ts'
 import {NwcService, connectionUri} from './nwcservice.ts'
 import {walletBridge} from './nwcbridge.ts'
-import {npubOf, poolTransport} from './nostr.ts'
+import {npubOf, poolTransport, recipientPubkey} from './nostr.ts'
 import type {NoteRecord} from './types.ts'
 
 const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
@@ -60,6 +60,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase heartwood link <bunker://...> | heartwood notes | heartwood collect [<id>...]
   notecase heartwood send <id> --to <npub> | heartwood unlink
   notecase heartwood address keys <name> | address custodial <name> | address scan [--mint <host>]
+  notecase heartwood recover [--npub <master npub>] [--mint <host>]   a lost heartwood's notes, from its nsec or phrase
   notecase backup export | backup shares [--threshold N --count M] | backup recover-key
   notecase backup nostr on|off|push|pull
   notecase sync on|off|status | sync
@@ -266,7 +267,8 @@ const main = async (): Promise<void> => {
       methods: {type: 'string'},
       budget: {type: 'string'},
       max: {type: 'string'},
-      file: {type: 'string'}
+      file: {type: 'string'},
+      npub: {type: 'string'}
     }
   })
   // Publishes the mint list when it has actually changed and the holder
@@ -1254,6 +1256,26 @@ const main = async (): Promise<void> => {
             console.log(`The device kept ${sats(c.amountMsat)} paid to its key #${c.index} (${c.id}).`)
           }
           console.log(`Checked ${result.scanned} keys; the device kept ${result.claimed.length} note${result.claimed.length === 1 ? '' : 's'}.`)
+        } else if (sub === 'recover') {
+          // A heartwood that is gone. Its branch comes back from the master's
+          // nsec or phrase, prompted for and never taken on the command line.
+          const expected = values.npub ? recipientPubkey(values.npub) : wallet.heartwoodLink()?.devicePubkey
+          if (!expected) throw new WalletUsageError('heartwood recover --npub <npub of the master> [--mint <host>]')
+          console.log(`Recovering what ${npubOf(expected)}'s lightning address was paid, into this wallet.`)
+          console.log('Only for a heartwood you no longer have: a note it still holds is taken from it.')
+          const secret = (await promptHidden("the master's nsec or BIP-39 phrase: ")).trim()
+          const passphrase = /\s/.test(secret) ? await promptHidden('BIP-39 passphrase (blank for none): ') : ''
+          const result = await wallet.recoverHeartwoodNotes(secret, {
+            expectedPubkey: expected,
+            passphrase,
+            ...(values.mint ? {mintHost: values.mint} : {})
+          })
+          for (const r of result.received) {
+            console.log(`Recovered ${sats(r.note.amountMsat)} at ${r.note.mintHost} (${shortId(r.note)}).`)
+          }
+          console.log(
+            `Checked ${result.scanned} keys on the ${result.mode} master's branch; recovered ${result.received.length} note${result.received.length === 1 ? '' : 's'}.`
+          )
         } else if (sub === 'send') {
           if (!arg || !values.to) throw new WalletUsageError('heartwood send <id> --to <npub>')
           console.log('  hold the device button to send')
@@ -1263,7 +1285,7 @@ const main = async (): Promise<void> => {
           if (sent.relays.length) console.log(`  on: ${sent.relays.join(', ')}`)
           if (sent.failed.length) console.log(`  failed: ${sent.failed.join(', ')}`)
         } else {
-          console.log('heartwood link <bunker://...> | inbox | notes | collect [id...] | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | pair [label] | address keys|custodial <name> | address scan | unlink')
+          console.log('heartwood link <bunker://...> | inbox | notes | collect [id...] | recover [--npub <npub>] | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | pair [label] | address keys|custodial <name> | address scan | unlink')
         }
       } finally {
         transport.close()

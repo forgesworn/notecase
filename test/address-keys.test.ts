@@ -4,7 +4,7 @@ import {matchFilter, type Event, type Filter} from 'nostr-tools'
 import {createFakeBackend, createMoneyer, type FakeBackend, type Moneyer} from '@forgesworn/moneyer'
 import {bolt11PaymentHash} from 'farrier-kit/bolt11'
 import {bytesToHex, randomBytes} from '@noble/hashes/utils.js'
-import {hashK1, isCk1} from 'lnurlcash-kit'
+import {cashNodeToCx1, deriveNostrAddressNode, encodeCx1, hashK1, isCk1} from 'lnurlcash-kit'
 import type {NostrTransport} from '../src/nostr.ts'
 import {newMnemonic, seedFromMnemonic} from '../src/store.ts'
 import {WalletUsageError} from '../src/wallet.ts'
@@ -135,7 +135,8 @@ describe('a name paid to this wallet\'s keys', () => {
 
     const scan = await wallet.scanAddress(theMint.host, {gap: 5})
     expect(scan.received.map(r => r.note.amountMsat).sort((a, b) => a - b)).toEqual([5_000, 21_000])
-    expect(scan.scanned).toBe(2 + 5)
+    // the words branch, then the Nostr key's, where nothing was paid
+    expect(scan.scanned).toBe(2 + 5 + 5)
     expect(wallet.balanceMsat()).toBe(26_000)
 
     // the wraps that arrive late find their notes already taken
@@ -157,18 +158,32 @@ describe('a name paid to this wallet\'s keys', () => {
     expect(got.skipped[0]!.reason).toMatch(/does not hold/)
   })
 
-  it('moves a custodial name onto its keys, and back', async () => {
+  it('pays a wallet with no words to its Nostr key, and moves the name as the wallet changes', async () => {
     const theMint = await startMint()
     const made = makeWallet()
     await made.wallet.addMint(`mint@${theMint.host}`)
     const claimed = await made.wallet.registerName({name: 'alice'})
-    expect(claimed.toKeys).toBe(false)
+    expect(claimed.toKeys).toBe(true)
+    const nostrBranch = cashNodeToCx1(deriveNostrAddressNode(made.wallet.nostrIdentity()!.secret, theMint.host))
+    const nostrCx1 = encodeCx1(nostrBranch.pubkeyXOnly, nostrBranch.chainCode)
+    expect(theMint.moneyer.store.zapName('alice')?.cx1).toBe(nostrCx1)
+    await pay(theMint, 'alice', 21_000)
+    expect((await made.wallet.receiveFromNostr(theMint.relay.transport)).received.map(r => r.note.amountMsat)).toEqual([21_000])
 
+    // Words later. A payment made before the name moves still lands on the
+    // Nostr branch, and the wallet still holds that key.
     made.data.seedHex = seedFromMnemonic(newMnemonic())
+    await pay(theMint, 'alice', 5_000)
+    const late = await made.wallet.receiveFromNostr(theMint.relay.transport)
+    expect(late.skipped).toEqual([])
+    expect(late.received.map(r => r.note.amountMsat)).toEqual([5_000])
+
     expect((await made.wallet.payNameToKeys()).toKeys).toBe(true)
     expect(theMint.moneyer.store.zapName('alice')?.cx1).toBe(made.wallet.addressCx1(theMint.host))
+    expect(made.wallet.addressCx1(theMint.host)).not.toBe(nostrCx1)
     expect((await made.wallet.payNameToKeys(false)).toKeys).toBe(false)
     expect(theMint.moneyer.store.zapName('alice')?.cx1).toBeNull()
+    expect(made.wallet.balanceMsat()).toBe(26_000)
   })
 
   it('leaves the key spent once taken, so a later scan counts it as used and takes nothing twice', async () => {
@@ -181,7 +196,7 @@ describe('a name paid to this wallet\'s keys', () => {
 
     const scan = await wallet.scanAddress(theMint.host, {gap: 3})
     expect(scan.received).toEqual([])
-    expect(scan.scanned).toBe(1 + 3)
+    expect(scan.scanned).toBe(1 + 3 + 3)
     const stats = (await (await fetch(`${theMint.moneyer.url}/stats`)).json()) as {outstandingNotes: number}
     // the rotated note, and nothing left on the key
     expect(stats.outstandingNotes).toBe(1)
