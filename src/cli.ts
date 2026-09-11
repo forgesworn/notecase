@@ -167,6 +167,18 @@ const sats = (msat: number): string =>
 
 const shortId = (note: NoteRecord): string => note.id.slice(0, 8)
 
+// How long ago something was seen, for readings this wallet is repeating
+// rather than taking now.
+const seenAgo = (at: number): string => {
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000) - at)
+  if (seconds < 90) return 'just now'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 90) return `${minutes} minutes ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 36) return `${hours} hours ago`
+  return `${Math.round(hours / 24)} days ago`
+}
+
 // What a mint will actually credit, said without over-promising.
 //
 // LUD-25 does not say whether a mint rounds its fee, so a wallet can only
@@ -589,6 +601,21 @@ const main = async (): Promise<void> => {
       } else {
         for (const [host, msat] of byMint) console.log(`${sats(msat)}  at ${host}`)
         if (byMint.size > 1) console.log(`${sats(wallet.balanceMsat())}  total`)
+      }
+      // The signer's own notes are not this wallet's money until they are
+      // collected, so they are never folded into the total above. Shown from
+      // the last reading: a balance must never wait on a relay round trip,
+      // and `heartwood notes` or `collect` refreshes it.
+      if (wallet.heartwoodLink()) {
+        const onDevice = wallet.heartwoodHeld()
+        if (!onDevice) {
+          console.log('A heartwood is linked - `notecase heartwood notes` shows what it holds.')
+        } else if (onDevice.notes > 0) {
+          const plural = onDevice.notes === 1 ? 'note' : 'notes'
+          console.log(
+            `${sats(onDevice.msat)}  on the signer, uncollected (${onDevice.notes} ${plural}, seen ${seenAgo(onDevice.at)})`
+          )
+        }
       }
       const legacy = wallet.legacyNotes()
       if (legacy.length) {
@@ -1200,6 +1227,10 @@ const main = async (): Promise<void> => {
             const who = n.from ? ` from ${npubOf(n.from).slice(0, 16)}…` : n.sent_to ? ` sent to ${npubOf(n.sent_to).slice(0, 16)}…` : ''
             const key = n.p ? ` (its own key #${n.index})` : ''
             console.log(`${n.id}  ${n.state.padEnd(9)} ${sats(n.amount_msat).padStart(12)}  ${n.host}${key}${who}`)
+          }
+          const live = notes.filter(n => n.state === 'confirmed')
+          if (live.length) {
+            console.log(`${sats(live.reduce((total, n) => total + n.amount_msat, 0))} on the device in ${live.length} live note(s).`)
           }
         } else if (sub === 'trust' || sub === 'untrust') {
           if (!arg) throw new WalletUsageError(`heartwood ${sub} <npub|hex|nip05>`)

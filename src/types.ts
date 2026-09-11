@@ -269,7 +269,17 @@ export type WalletData = {
     vaultPubkey?: string
     // A paired heartwood signer holding notes of its own (heartwood.ts).
     // The client key is what the device bound; the store guards it.
-    heartwood?: {uri: string; devicePubkey: string; relays: string[]; clientSecretHex: string}
+    heartwood?: {
+      uri: string
+      devicePubkey: string
+      relays: string[]
+      clientSecretHex: string
+      // What the device held when it was last reached, so `balance` can say
+      // so without waking it: seeing money must never depend on the device
+      // being awake and on a relay, and a hold is for MOVING money, never
+      // for looking at it. Refreshed by every call that lists the locker.
+      held?: {msat: number; notes: number; at: number}
+    }
   }
   mints: MintEntry[]
   // Requests this wallet has published and is waiting to be paid.
