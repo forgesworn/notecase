@@ -2,7 +2,7 @@ import {SimplePool, finalizeEvent, generateSecretKey, getEventHash, getPublicKey
 import {nip19, nip44, nip59} from 'nostr-tools'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {sha256} from '@noble/hashes/sha2.js'
-import {resolveNoteInput, noteK1, noteDeclaredAmount} from 'lnurlcash-kit'
+import {isCp1, resolveNoteInput, noteK1, noteDeclaredAmount} from 'lnurlcash-kit'
 
 // Bearer notes over Nostr. A note is one string - the LUD-25 URL - so it
 // travels as the content of a NIP-59 rumor, sealed to the recipient's
@@ -170,7 +170,27 @@ const zapFromDescription = (tags: string[][]): ZapDetail | null => {
   }
 }
 
-export type NoteRumor = {noteUrl: string; amountMsat: number; host: string}
+// `key` is set for a note paid to one of this wallet's own keys, as a
+// moneyer name with a cx1 is paid: `noteUrl` is then a lookup carrying no
+// secret, and the wallet derives the key at `index` to open it.
+export type NoteRumor = {noteUrl: string; amountMsat: number; host: string; key?: KeyNote}
+export type KeyNote = {cp1: string; index: number}
+
+// `/w?p=<cp1>&amount=&sig=<cs1>&i=<index>`, with no k1. Anything else is not
+// a key note.
+const keyNoteOf = (content: string): {url: string; key: KeyNote} | null => {
+  let url: URL
+  try {
+    url = new URL(content.trim())
+  } catch {
+    return null
+  }
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.searchParams.has('k1')) return null
+  const cp1 = url.searchParams.get('p')?.toLowerCase() ?? ''
+  const index = url.searchParams.get('i') ?? ''
+  if (!isCp1(cp1) || !/^\d{1,10}$/.test(index) || Number(index) > 0xffffffff) return null
+  return {url: url.toString(), key: {cp1, index: Number(index)}}
+}
 
 const hostOf = (noteUrl: string): string => {
   const parsed = new URL(noteUrl)
@@ -237,8 +257,10 @@ export const unwrapNote = (
   if (rumor.pubkey !== seal.pubkey) throw new NotANoteWrapError('rumor author is not the seal signer')
   if (rumor.id !== getEventHash(rumor)) throw new NotANoteWrapError('rumor id does not match its content')
   if (rumor.kind !== NOTE_KIND) throw new NotANoteWrapError(`kind ${rumor.kind} is not a bearer note`)
-  const noteUrl = resolveNoteInput(rumor.content)
-  if (!noteUrl || !noteK1(noteUrl)) throw new NotANoteWrapError('rumor content is not a note URL')
+  const bearer = resolveNoteInput(rumor.content)
+  const keyed = bearer && noteK1(bearer) ? null : keyNoteOf(rumor.content)
+  if (!(bearer && noteK1(bearer)) && !keyed) throw new NotANoteWrapError('rumor content is not a note URL')
+  const noteUrl = keyed ? keyed.url : bearer!
   const fromUrl = noteDeclaredAmount(noteUrl)
   const fromTag = Number(rumor.tags.find(t => t[0] === 'amount')?.[1])
   const amountMsat = fromUrl ?? (Number.isSafeInteger(fromTag) && fromTag > 0 ? fromTag : 0)
@@ -248,7 +270,7 @@ export const unwrapNote = (
   const memo = rumor.tags.find(t => t[0] === 'memo')?.[1]
   const requestId = rumor.tags.find(t => t[0] === 'req')?.[1]
   return {
-    note: {noteUrl, amountMsat, host: hostOf(noteUrl)},
+    note: {noteUrl, amountMsat, host: hostOf(noteUrl), ...(keyed ? {key: keyed.key} : {})},
     sender: seal.pubkey,
     rumorCreatedAt: rumor.created_at,
     zap: zapFromDescription(rumor.tags),

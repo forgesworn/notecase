@@ -43,7 +43,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase prepare [--apply] [--mint <host>]
   notecase send <sats> [--mint <host>] [--offline] [--overpay] [--notes <id,id>] [--strip-sig]
   notecase send <sats> --to <npub|nip05> [--notes <id,id>]
-  notecase address | address claim <name> [--mint <host>]
+  notecase address | address claim <name> [--mint <host>] | address keys | address custodial | address scan [--mint <host>]
   notecase inbox
   notecase request <sats> [--memo <text>] [--wait <seconds>] [--mint <host>]
   notecase requests [--all]
@@ -1054,7 +1054,31 @@ const main = async (): Promise<void> => {
             : `Claiming ${wanted} is free at that mint.`
         )
         const claimed = await wallet.registerName({name: wanted, ...(values.mint ? {mintHost: values.mint} : {})})
-        console.log(`${claimed.address} is yours. Payments to it arrive as notes sealed to your npub - \`notecase inbox\` opens them.`)
+        console.log(
+          claimed.toKeys
+            ? `${claimed.address} is yours. Payments to it go to your own keys, which the mint never holds - \`notecase inbox\` collects them.`
+            : `${claimed.address} is yours. Payments to it arrive as notes sealed to your npub - \`notecase inbox\` opens them.`
+        )
+        return
+      }
+      if (sub === 'keys' || sub === 'custodial') {
+        const moved = await wallet.payNameToKeys(sub === 'keys')
+        console.log(
+          moved.toKeys
+            ? `${moved.address} now pays to your own keys. Payments already made are unchanged.`
+            : `${moved.address} now pays as notes sealed to your npub.`
+        )
+        return
+      }
+      if (sub === 'scan') {
+        // The fallback for a wrap that never arrived: the note is at the
+        // mint either way, on the key it was paid to.
+        const result = await wallet.scanAddress(values.mint)
+        for (const r of result.received) {
+          for (const warning of r.warnings) console.log(`  warning: ${warning}`)
+          console.log(`Received ${sats(r.note.amountMsat)} at ${r.note.mintHost} (${shortId(r.note)}).`)
+        }
+        console.log(`Checked ${result.scanned} keys; found ${result.received.length} note${result.received.length === 1 ? '' : 's'}.`)
         return
       }
       const address = wallet.lightningAddress()
