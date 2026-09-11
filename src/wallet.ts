@@ -12,6 +12,7 @@ import {
   deriveCashRoot,
   deriveCashDomainNode,
   deriveCashAddressNode,
+  deriveNostrAddressNode,
   deriveNoteSecretKey,
   cashNodeToCx1,
   decodeCx1,
@@ -97,6 +98,7 @@ import {
   type NostrTransport
 } from './nostr.ts'
 import {HeartwoodClient, HeartwoodError, newHeartwoodLink, type DeviceNote, type HeartwoodLink} from './heartwood.ts'
+import {identitySecretFor, type IdentityMode} from './identitysecret.ts'
 
 // The ordering rule this whole module is built around: a fresh secret is
 // PERSISTED before its hash goes on the wire, and nothing is deleted until
@@ -607,16 +609,32 @@ export class Wallet {
     return seed ? deriveCashRoot(hexToBytes(seed)) : null
   }
 
-  // LUD-25 Part 2: the branch a mint pays this wallet's name to, at
-  // lnurl-wallet's path m/139'/1'/d1..d4. Kept for receiving only: what
-  // arrives on it is rotated onto the secrets above, which the mint holding
-  // the branch's cx1 cannot enumerate.
+  // LUD-25 Part 2: the branch a mint pays this wallet's name to. With
+  // recovery words it is lnurl-wallet's path m/139'/1'/d1..d4 from them.
+  // Without, it is the same path from this wallet's Nostr key
+  // (deriveNostrAddressNode, exactly as a heartwood derives it), so a wallet
+  // that never made words is paid to keys of its own too, and its Nostr key
+  // is what finds them again. Kept for receiving only: what arrives on it is
+  // rotated onto the secrets above, which the mint holding the branch's cx1
+  // cannot enumerate.
   private addressNode(host: string): ReturnType<typeof deriveCashAddressNode> | null {
-    const root = this.cashRoot()
-    return root ? deriveCashAddressNode(root, host) : null
+    return this.addressNodes(host)[0] ?? null
   }
 
-  // The watch-only export of that branch, or null for a wallet with no seed.
+  // Every branch this wallet could have been paid on at a mint, the one it
+  // hands out first. A wallet that took a name before it had words was paid
+  // on its Nostr key's branch, and it still holds that key.
+  private addressNodes(host: string): ReturnType<typeof deriveCashAddressNode>[] {
+    const nodes: ReturnType<typeof deriveCashAddressNode>[] = []
+    const root = this.cashRoot()
+    if (root) nodes.push(deriveCashAddressNode(root, host))
+    const identity = this.nostrIdentity()
+    if (identity) nodes.push(deriveNostrAddressNode(identity.secret, host))
+    return nodes
+  }
+
+  // The watch-only export of that branch, or null for a wallet with neither
+  // words nor a Nostr key.
   addressCx1(host: string): string | null {
     const node = this.addressNode(host)
     if (!node) return null
@@ -624,24 +642,25 @@ export class Wallet {
     return encodeCx1(pubkeyXOnly, chainCode)
   }
 
-  // The ck1 note for index `index` on a mint's branch, and the cp1 it sits
-  // at. Deterministic, so deriving it again gives the same note URL.
-  private keyNoteAt(host: string, index: number): {ck1: string; cp1: string} {
-    const node = this.addressNode(host)
-    if (!node) {
-      throw new WalletUsageError('This wallet has no recovery words, so it holds no keys for a note paid to them.')
-    }
+  // The ck1 note for index `index` on a branch, and the cp1 it sits at.
+  // Deterministic, so deriving it again gives the same note URL.
+  private keyNoteOn(node: ReturnType<typeof deriveCashAddressNode>, index: number): {ck1: string; cp1: string} {
     const ck1 = encodeCk1(signNoteOwnership(deriveNoteSecretKey(node.privateKey, node.chainCode, index)))
     return {ck1, cp1: encodeCp1(hexToBytes(noteId(ck1)))}
   }
 
   // A note paid to one of this wallet's keys arrives as a lookup with no
-  // secret. Derive the key at the index the mint named, check it is the key
-  // the note sits at, and sign for it.
+  // secret. Derive the key at the index the mint named, on each branch the
+  // wallet could have been paid on, check it is the key the note sits at,
+  // and sign for it.
   private noteUrlForKey(lookupUrl: string, key: {cp1: string; index: number}): string {
     const host = serverOf(lookupUrl)
-    const {ck1, cp1} = this.keyNoteAt(host, key.index)
-    if (cp1 !== key.cp1) throw new WalletUsageError(`A note at ${host} was paid to a key this wallet does not hold.`)
+    const nodes = this.addressNodes(host)
+    if (!nodes.length) {
+      throw new WalletUsageError('This wallet has no recovery words and no Nostr key, so it holds no keys for a note paid to them.')
+    }
+    const ck1 = nodes.map(node => this.keyNoteOn(node, key.index)).find(note => note.cp1 === key.cp1)?.ck1
+    if (!ck1) throw new WalletUsageError(`A note at ${host} was paid to a key this wallet does not hold.`)
     const url = new URL(lookupUrl)
     url.searchParams.delete('p')
     url.searchParams.delete('i')
@@ -2255,9 +2274,10 @@ export class Wallet {
     }
 
     const url = new URL('/names', discovery.url).toString()
-    // With recovery words, payouts go to this wallet's own keys (LUD-25
-    // Part 2): the mint gets the watch-only branch, never a secret. A mint
-    // that does not know the field ignores it and pays custodially.
+    // Payouts go to this wallet's own keys (LUD-25 Part 2), on the branch
+    // from its recovery words or, without any, from its Nostr key: the mint
+    // gets the watch-only branch, never a secret. A mint that does not know
+    // the field ignores it and pays custodially.
     const cx1 = this.addressCx1(entry.host)
     const body = JSON.stringify({name, ...(note ? {note: this.noteUrlFor(note)} : {}), ...(cx1 ? {cx1} : {})})
     let answer: {status?: string; reason?: string; cx1?: string | null; paidMsat?: unknown} = {}
@@ -2338,11 +2358,13 @@ export class Wallet {
       entry = this.mintEntry(options.mintHost ?? recorded.slice(at + 1))
     }
     const address = `${name}@${entry.host}`
+    // First: without words, the Nostr key is the branch's root as well as
+    // the key that signs for the name.
+    const identity = await this.ensureNostrIdentity()
     const cx1 = toKeys ? this.addressCx1(entry.host) : null
-    if (toKeys && !cx1) throw new WalletUsageError('This wallet has no recovery words, so it has no keys to be paid to.')
+    if (toKeys && !cx1) throw new WalletUsageError('This wallet has no keys to be paid to.')
     const discovery = await this.discoveryDocument(entry.host)
     if (!discovery) throw new WalletUsageError(`${entry.host} does not publish where to manage names.`)
-    const identity = await this.ensureNostrIdentity()
     const url = new URL('/names', discovery.url).toString()
     const body = JSON.stringify({name, cx1})
     const fetchImpl = this.opts.fetch ?? fetch
@@ -2369,22 +2391,45 @@ export class Wallet {
   // keys. The fallback for a gift wrap that never arrived: the mint credits
   // every payment whether or not its wrap reaches a relay. A spent key
   // counts as used, so the gap is of keys never paid, and a refusal that is
-  // not "unknown" stops the walk rather than reading as its end.
+  // not "unknown" stops the walk rather than reading as its end. Each branch
+  // the wallet could have been paid on is walked in turn.
   async scanAddress(host?: string, options: {gap?: number} = {}): Promise<{received: ReceiveResult[]; scanned: number}> {
     const entry = this.mintEntry(host)
-    let baseUrl = entry.baseUrl
-    if (!baseUrl) {
-      const pay = await fetchPayRequest(entry.payUrl, this.opts)
-      if (!pay.withdrawLink) throw new WalletUsageError(`${entry.host} no longer advertises notes.`)
-      baseUrl = fromLud17(pay.withdrawLink)
-      entry.baseUrl = baseUrl
+    const nodes = this.addressNodes(entry.host)
+    if (!nodes.length) {
+      throw new WalletUsageError('This wallet has no recovery words and no Nostr key, so it holds no keys for a note paid to them.')
     }
-    const gap = options.gap ?? 20
+    const baseUrl = await this.withdrawBase(entry)
+    const received: ReceiveResult[] = []
+    let scanned = 0
+    for (const node of nodes) {
+      const walked = await this.takeFromBranch(baseUrl, node, options.gap ?? 20)
+      received.push(...walked.received)
+      scanned += walked.scanned
+    }
+    return {received, scanned}
+  }
+
+  private async withdrawBase(entry: MintEntry): Promise<string> {
+    if (entry.baseUrl) return entry.baseUrl
+    const pay = await fetchPayRequest(entry.payUrl, this.opts)
+    if (!pay.withdrawLink) throw new WalletUsageError(`${entry.host} no longer advertises notes.`)
+    entry.baseUrl = fromLud17(pay.withdrawLink)
+    return entry.baseUrl
+  }
+
+  // One branch of the walk: every live note on it comes into this wallet,
+  // rotated onto a secret of its own as any received note is.
+  private async takeFromBranch(
+    baseUrl: string,
+    node: ReturnType<typeof deriveCashAddressNode>,
+    gap: number
+  ): Promise<{received: ReceiveResult[]; scanned: number}> {
     const received: ReceiveResult[] = []
     let quiet = 0
     let index = 0
     while (quiet < gap) {
-      const {ck1, cp1} = this.keyNoteAt(entry.host, index)
+      const {ck1, cp1} = this.keyNoteOn(node, index)
       index += 1
       let info: Awaited<ReturnType<typeof fetchNoteInfoByHash>>
       try {
@@ -2409,6 +2454,36 @@ export class Wallet {
       received.push(await this.receive(url.toString()))
     }
     return {received, scanned: index}
+  }
+
+  // A heartwood's notes, with no heartwood: rebuild the branch it was paid on
+  // from its master secret, and take every live note on it into this wallet.
+  // For a device that is lost or dead. A note the device still holds is taken
+  // from it all the same: the device's copy is then spent at the mint.
+  //
+  // `input` is what the owner wrote down for that master - its nsec, or the
+  // BIP-39 phrase it was made from - and it has to open `expectedPubkey`
+  // (the npub the lightning address belongs to), or nothing is derived. The
+  // derived key is zeroed before this returns.
+  async recoverHeartwoodNotes(
+    input: string,
+    options: {expectedPubkey: string; mintHost?: string; passphrase?: string; gap?: number}
+  ): Promise<{received: ReceiveResult[]; scanned: number; mode: IdentityMode}> {
+    const entry = this.mintEntry(options.mintHost)
+    const identity = identitySecretFor(input, options.expectedPubkey, options.passphrase)
+    if (!identity) {
+      throw new WalletUsageError(`That does not open ${npubOf(options.expectedPubkey)}: check it is that master's nsec or phrase.`)
+    }
+    try {
+      const baseUrl = await this.withdrawBase(entry)
+      const node = deriveNostrAddressNode(identity.secret, entry.host)
+      const walked = await this.takeFromBranch(baseUrl, node, options.gap ?? 20)
+      node.privateKey.fill(0)
+      await this.persist()
+      return {...walked, mode: identity.mode}
+    } finally {
+      identity.secret.fill(0)
+    }
   }
 
   // ---- a heartwood signer as a note locker ----

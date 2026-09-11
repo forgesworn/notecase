@@ -85,8 +85,12 @@ describe('claiming a lightning address', () => {
     expect(request.auth.pubkey).toBe(wallet.nostrIdentity()!.pubkey)
     expect(request.auth.tags.find(tag => tag[0] === 'u')?.[1]).toBe(request.url)
     expect(request.auth.tags.find(tag => tag[0] === 'method')?.[1]).toBe('POST')
+    // with no recovery words, the branch it asks to be paid on comes from
+    // its Nostr key
+    const cx1 = wallet.addressCx1(hostOf(mint))
+    expect(cx1).toMatch(/^cx1/)
     expect(request.auth.tags.find(tag => tag[0] === 'payload')?.[1]).toBe(
-      bytesToHex(sha256(utf8ToBytes(JSON.stringify({name: 'donkey', note: request.note}))))
+      bytesToHex(sha256(utf8ToBytes(JSON.stringify({name: 'donkey', note: request.note, cx1}))))
     )
     expect(Math.abs(request.auth.created_at - Math.floor(Date.now() / 1000))).toBeLessThan(60)
     // the note really was one of this mint's, and it really was burned

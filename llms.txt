@@ -70,6 +70,7 @@ notecase backup export | shares [--threshold N --count M] | recover-key
 notecase sync [on|off|status]   # notes themselves on relays, several devices, one seed
 notecase heartwood link <bunker://...> | notes | collect [<id>...] | send <id> --to <npub> | trust <npub> | inbox | pair
 notecase heartwood address keys|custodial <name> | address scan   # a name the DEVICE's key owns, paid to the device's keys
+notecase heartwood recover [--npub <npub>] [--mint <host>]   # a lost heartwood's notes, from its nsec or BIP-39 phrase
 
 Amounts are sats (--msat for msat). PIN via prompt or $NOTECASE_PIN.
 NOTECASE_HOME relocates the store; NOTECASE_ALLOW_PRIVATE=1 admits LAN mints;
@@ -127,11 +128,15 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     moneyer >=0.13 then pays the name to the wallet's keys, and the inbox opens the
     index-only wrap (/w?p=<cp1>&amount=&sig=<cs1>&i=) by deriving the key and rotating
   heartwoodNameToKeys(t, name, {toKeys?, mintHost?}), heartwoodScanAddress(t, host?, {gap?}),
-  collectFromHeartwood(t, onProgress?, {ids?})
+  collectFromHeartwood(t, onProgress?, {ids?}), recoverHeartwoodNotes(input, {expectedPubkey, mintHost?, passphrase?, gap?})
   - a heartwood derives its branch from the identity key that owns the name
     (HMAC-SHA256(key, "LNURLcash/nostr-seed") -> m/139'/1'/d1..d4), hands over the
     cx1 (heartwood_note_address) and signs the NIP-98 itself; only the device can
     spend what arrives. A scan has the device claim a key (heartwood_note_claim)
+  - with no recovery words the wallet's own branch comes from its Nostr key the same way
+  identityCandidates(input, passphrase?) / identitySecretFor(input, npubHex) (src/identitysecret.ts):
+    a heartwood master's secret from an nsec (bunker or tree-nsec) or BIP-39 phrase
+    (tree-mnemonic, m/44'/1237'/727'/0'/0'); typed recovery words are not read yet
   hasSeed(), counterFor(host), restoreFromMint(host), restoreAll(),
   legacyNotes(), adoptLegacyNotes(),
   awaitMeltProof(melt, {timeoutMs?, intervalMs?}) -> MeltRecord | null (LUD-21 proof),

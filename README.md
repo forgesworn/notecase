@@ -237,6 +237,7 @@ notecase heartwood pair [label]        # mints a bunker URI for another wallet, 
 notecase heartwood collect [<id>...]   # brings in what arrived at the device (or just the notes named)
 notecase heartwood address keys <name> # a name the DEVICE's key owns, paid to the device's own keys; one hold
 notecase heartwood address scan        # payments to those keys whose wrap never reached the device
+notecase heartwood recover             # a lost heartwood's notes, from its master's nsec or BIP-39 phrase
 notecase backup shares --threshold 2 --count 3
 notecase sync on                       # keep the notes themselves on your relays
 notecase sync                          # pull, let the mints settle, publish what changed
@@ -503,6 +504,13 @@ where to look. Only the device can spend those notes - this wallet's words
 cannot - and the device's recovery phrase brings them back. `heartwood
 address scan` walks the branch for payments whose wrap never arrived and has
 the device keep them; `heartwood collect` takes them, as it takes wraps.
+
+If the heartwood itself is lost, `heartwood recover` rebuilds that branch
+from the master's nsec, or the BIP-39 phrase it was made from, prompted for
+and checked against the master's npub before anything is derived, then takes
+every live note on it into this wallet. A wallet with no recovery words gets
+a branch from its own Nostr key the same way, so its name is paid to its own
+keys too.
 
 Amounts are sats (`--msat` for precision). The PIN comes from the prompt
 or `$NOTECASE_PIN`. `NOTECASE_HOME` moves the store; `NOTECASE_ALLOW_PRIVATE=1`

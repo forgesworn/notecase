@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+**A lost heartwood's notes come back without it.**
+
+- `heartwood recover` rebuilds the branch a heartwood's lightning address was
+  paid on from its master's nsec or BIP-39 phrase, prompted for and never
+  taken on the command line, and takes every live note on it into this
+  wallet. The secret has to open the master's npub (`--npub`, or the linked
+  heartwood's) or nothing is derived. An nsec is tried as both a bunker and
+  a tree-nsec master; heartwood's typed recovery words are not read yet.
+- A wallet with no recovery words is paid to its own keys: its branch comes
+  from its Nostr key (lnurlcash-kit 0.12.0's `deriveNostrAddressNode`), so
+  `address claim` and `address keys` no longer need words. A note paid on
+  that branch still lands after the wallet gains words, and `address scan`
+  walks both branches.
+
 ## 0.18.1 - 2026-09-11
 
 - Relays that take more than 3 s to open are reached. nostr-tools gives up
