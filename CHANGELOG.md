@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.19.1 - 2026-09-11
 
 - lnurlcash-kit 0.13.0, where a plain note is unsigned: LUD-25 Part 2
   certifies `cp1` notes only, and a rotate, split or merge to a hash can
@@ -8,6 +8,9 @@
   still checks any signature a note does carry against the mint's pinned
   key. The kit's new `requireMintPubkey` is off here, so a mint that
   publishes no signing key is still received from, as before.
+- lnurlcash-kit 0.12.1: a note-info answer that names the queried note by
+  another of its `ck1` strings is accepted. One note has many valid `ck1`s,
+  so the echo is compared by the note it names, not as a string.
 
 ## 0.19.0 - 2026-09-11
 
