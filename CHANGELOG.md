@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.19.0 - 2026-09-11
 
 **A lost heartwood's notes come back without it.**
 
