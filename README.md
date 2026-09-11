@@ -301,16 +301,24 @@ web wallet it is a switch in the header, and on the CLI it is `--offline`.
 `notecase address claim <name>` takes `name@mint.example` at a mint that
 hands them out. The mint charges for it in its own notes, so the wallet
 cuts one out of your balance and the mint burns it; where the price is
-zero, nothing is cut at all. The only identity involved is this wallet's
-Nostr key: the request is signed with it (NIP-98), the name belongs to the
-key, and there is no account anywhere.
+zero, nothing is cut at all. Moneyer binds the name to this wallet's Nostr
+key with a signed NIP-98 request, without an account.
 
-What arrives at the address is a bearer note sealed to that same key, so
-it is yours seconds after it is paid and the mint holds it for no longer
-than that. `notecase inbox` opens what has come in. A note that arrived as
-a zap carries the payer's own signed request with it, so the wallet can
-show who sent it and what they wrote - and it checks that signature, so a
-mint cannot invent a sender.
+The reference `lnurl-mint` has a different, service-specific route: names
+are free and first-come, and the claim sends the wallet's `cx1` branch but
+does not prove ownership of a Nostr key. Notecase detects that route without
+registering anything, then uses it when you confirm the name.
+
+On Moneyer, what arrives at the address is a bearer note sealed to that same
+key, so it is yours seconds after it is paid and the mint holds it for no
+longer than that. `notecase inbox` opens what has come in. A note that
+arrived as a zap carries the payer's own signed request with it, so the
+wallet can show who sent it and what they wrote - and it checks that
+signature, so a mint cannot invent a sender.
+
+The reference mint does not send that Nostr wrap. Use `notecase address
+scan`, or **Check address for payments** in the web wallet, to find notes on
+the branch after payment.
 
 If the mint refuses the name, the note that was going to pay for it comes
 straight home under a fresh secret.
@@ -497,8 +505,9 @@ publish.
 
 A name whose owner is the device's npub can be paid to the device's own keys
 instead (LUD-25 Part 2). `heartwood address keys <name>` asks the device for
-the watch-only branch it derives from that identity key and has the device
-sign the request to the mint, on one hold. From then on the mint mints each
+the watch-only branch it derives from that identity key. Moneyer has the device
+sign the ownership request, on one hold; the reference mint instead registers
+a free, first-come name without Nostr ownership proof. From then on the mint mints each
 payment to the device's next key and the wrap carries no secret at all, only
 where to look. Only the device can spend those notes - this wallet's words
 cannot - and the device's recovery phrase brings them back. `heartwood

@@ -1086,7 +1086,7 @@ const main = async (): Promise<void> => {
         const claimed = await wallet.registerName({name: wanted, ...(values.mint ? {mintHost: values.mint} : {})})
         console.log(
           claimed.toKeys
-            ? `${claimed.address} is yours. Payments to it go to your own keys, which the mint never holds - \`notecase inbox\` collects them.`
+            ? `${claimed.address} is yours. Payments to it go to your own keys, which the mint never holds - \`notecase address scan\` finds any whose notification did not arrive.`
             : `${claimed.address} is yours. Payments to it arrive as notes sealed to your npub - \`notecase inbox\` opens them.`
         )
         return
@@ -1269,7 +1269,7 @@ const main = async (): Promise<void> => {
           // only the device can spend what arrives, and its recovery phrase
           // brings it back.
           if (!third) throw new WalletUsageError(`heartwood address ${arg} <name> [--mint <host>]`)
-          console.log('  hold the device button within a minute to sign the request to the mint')
+          console.log('  the device will supply its watch-only branch; a mint that binds the name to its npub will also ask it to sign')
           const moved = await wallet.heartwoodNameToKeys(transport, third, {
             toKeys: arg === 'keys',
             ...(values.mint ? {mintHost: values.mint} : {})

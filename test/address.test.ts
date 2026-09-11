@@ -53,6 +53,24 @@ const sellingNames = (theMint: Mint, options: {priceMsat: number | null; refuse?
   return {fetchImpl, seen}
 }
 
+// The reference lnurl-mint's service-specific registration: a free,
+// first-come GET carrying only the username and watch-only branch.
+const referenceNames = () => {
+  const seen: {username: string; cx1: string}[] = []
+  const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
+    if (url.pathname === '/register' && url.searchParams.get('username') === '_') {
+      return Response.json({status: 'ERROR', reason: 'Invalid or reserved username.'})
+    }
+    if (url.pathname === '/register') {
+      seen.push({username: url.searchParams.get('username') ?? '', cx1: url.searchParams.get('cx1') ?? ''})
+      return Response.json({status: 'OK'})
+    }
+    return fetch(input, init)
+  }
+  return {fetchImpl, seen}
+}
+
 const fund = (theMint: Mint, amountMsat: number): string => {
   const k1 = freshK1()
   theMint.state.creditNote(k1, amountMsat)
@@ -146,6 +164,20 @@ describe('claiming a lightning address', () => {
     expect(claimed.paidMsat).toBe(0)
     expect(stub.seen[0]!.note).toBeUndefined()
     expect(wallet.balanceMsat()).toBe(100_000)
+  })
+
+  it("claims a reference lnurl-mint name on its wallet's watch-only branch", async () => {
+    mint = await createMockMint()
+    const reference = referenceNames()
+    const {wallet} = makeWallet({fetch: reference.fetchImpl})
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+
+    expect(await wallet.namePriceMsat()).toBe(0)
+    const claimed = await wallet.registerName({name: 'Donkey'})
+
+    expect(claimed).toEqual({address: `donkey@${hostOf(mint)}`, paidMsat: 0, toKeys: true})
+    expect(reference.seen).toEqual([{username: 'donkey', cx1: wallet.addressCx1(hostOf(mint))}])
+    expect(wallet.lightningAddress()).toBe(`donkey@${hostOf(mint)}`)
   })
 })
 

@@ -507,6 +507,48 @@ export class Wallet {
     return {url, body: body ?? {}}
   }
 
+  // The reference lnurl-mint deliberately leaves username ownership and
+  // registration service-specific. Its implementation offers a free,
+  // first-come GET /register?username=&cx1= route instead of moneyer's
+  // authenticated POST /names. Probe with the reference mint's reserved
+  // `_` identity and an invalid branch: an enabled route gives its specific
+  // "Invalid or reserved username" LNURL error before it can write, while a
+  // disabled or absent route says "Not found". This is a simple cross-origin
+  // GET, so the browser does not need a preflight.
+  private async referenceRegistrationUrl(discoveryUrl: string): Promise<string | null> {
+    const url = new URL('/register', discoveryUrl).toString()
+    try {
+      const fetchImpl = this.opts.fetch ?? fetch
+      const probe = new URL(url)
+      probe.searchParams.set('username', '_')
+      probe.searchParams.set('cx1', '_')
+      const response = await fetchImpl(probe, {
+        headers: {accept: 'application/json'},
+        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
+      })
+      const answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; detail?: string}
+      const reason = answer.reason ?? answer.detail ?? ''
+      return answer.status === 'ERROR' && reason.includes('Invalid or reserved username') ? url : null
+    } catch {
+      return null
+    }
+  }
+
+  private async registerReferenceName(url: string, name: string, cx1: string): Promise<void> {
+    const registration = new URL(url)
+    registration.searchParams.set('username', name)
+    registration.searchParams.set('cx1', cx1)
+    const fetchImpl = this.opts.fetch ?? fetch
+    const response = await fetchImpl(registration, {
+      headers: {accept: 'application/json'},
+      signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
+    })
+    const answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; detail?: string}
+    if (!response.ok || answer.status !== 'OK') {
+      throw new WalletUsageError(answer.reason ?? answer.detail ?? `${registration.host} refused (${response.status}).`)
+    }
+  }
+
   private async retiredKeysAt(host: string, payLink?: string | undefined): Promise<string[]> {
     try {
       const discovery = await this.discoveryDocument(host, payLink)
@@ -2243,7 +2285,9 @@ export class Wallet {
     const entry = this.mintEntry(mintHost)
     const discovery = await this.discoveryDocument(entry.host)
     const price = discovery?.body.namePriceMsat
-    return typeof price === 'number' && Number.isSafeInteger(price) && price >= 0 ? price : null
+    if (typeof price === 'number' && Number.isSafeInteger(price) && price >= 0) return price
+    if (!discovery) return null
+    return (await this.referenceRegistrationUrl(discovery.url)) ? 0 : null
   }
 
   // Claims `name@host` at a mint. The mint takes a note of its own as
@@ -2265,10 +2309,21 @@ export class Wallet {
     const discovery = await this.discoveryDocument(entry.host)
     if (!discovery) throw new WalletUsageError(`${entry.host} does not publish what it charges for a name.`)
     const price = discovery.body.namePriceMsat
-    if (typeof price !== 'number' || !Number.isSafeInteger(price) || price < 0) {
-      throw new WalletUsageError(`${entry.host} is not handing out lightning addresses.`)
-    }
     const identity = await this.ensureNostrIdentity()
+
+    // lnurl-mint's reference route is free and takes only the watch-only
+    // branch. It owns no spend key and receives no note as a registration
+    // fee. Keep this path separate from moneyer's authenticated, optionally
+    // paid name claim below so neither service's ownership model is blurred.
+    if (typeof price !== 'number' || !Number.isSafeInteger(price) || price < 0) {
+      const url = await this.referenceRegistrationUrl(discovery.url)
+      const cx1 = this.addressCx1(entry.host)
+      if (!url || !cx1) throw new WalletUsageError(`${entry.host} is not handing out lightning addresses.`)
+      await this.registerReferenceName(url, name, cx1)
+      this.data.settings.lightningAddress = `${name}@${entry.host}`
+      await this.persist()
+      return {address: this.data.settings.lightningAddress, paidMsat: 0, toKeys: true}
+    }
 
     const note = price > 0 ? await this.prepareExact(price, entry.host) : null
     if (note) {
@@ -2369,6 +2424,22 @@ export class Wallet {
     if (toKeys && !cx1) throw new WalletUsageError('This wallet has no keys to be paid to.')
     const discovery = await this.discoveryDocument(entry.host)
     if (!discovery) throw new WalletUsageError(`${entry.host} does not publish where to manage names.`)
+
+    // A fresh reference-mint name can be pointed straight at this wallet's
+    // branch. That service does not bind names to Nostr keys and cannot move
+    // or clear an existing registration, so only its to-keys direction is
+    // available here. Moneyer's signed ownership path remains below.
+    if (toKeys) {
+      const referenceUrl = await this.referenceRegistrationUrl(discovery.url)
+      if (referenceUrl && cx1) {
+        await this.registerReferenceName(referenceUrl, name, cx1)
+        if (!this.data.settings.lightningAddress) {
+          this.data.settings.lightningAddress = address
+          await this.persist()
+        }
+        return {address, toKeys: true}
+      }
+    }
     const url = new URL('/names', discovery.url).toString()
     const body = JSON.stringify({name, cx1})
     const fetchImpl = this.opts.fetch ?? fetch
@@ -2568,9 +2639,11 @@ export class Wallet {
 
   // Points a lightning address the device's key owns at the device's own
   // keys (LUD-25 Part 2), or back to notes sealed to its npub. The device
-  // hands over the watch-only branch and signs the NIP-98 request itself,
-  // on one hold. Only the device can spend what the name is paid after
-  // this: the branch comes from its identity key, not from these words.
+  // hands over the watch-only branch. For a mint which binds the name to
+  // its npub, it signs the NIP-98 request itself, on one hold. The reference
+  // mint's free first-come route needs no signature. Only the device can
+  // spend what the name is paid after this: the branch comes from its
+  // identity key, not from these words.
   // Payments already made are not touched.
   async heartwoodNameToKeys(
     transport: NostrTransport,
@@ -2597,6 +2670,18 @@ export class Wallet {
     }
     const discovery = await this.discoveryDocument(entry.host)
     if (!discovery) throw new WalletUsageError(`${entry.host} does not publish where to manage names.`)
+
+    // A fresh reference-mint name can be pointed straight at the device's
+    // branch. That service does not bind names to Nostr keys and cannot move
+    // or clear an existing registration, so only its to-keys direction is
+    // available here. Moneyer's signed ownership path remains below.
+    if (toKeys) {
+      const referenceUrl = await this.referenceRegistrationUrl(discovery.url)
+      if (referenceUrl && cx1) {
+        await this.registerReferenceName(referenceUrl, wanted, cx1)
+        return {address: `${wanted}@${entry.host}`, toKeys: true}
+      }
+    }
     const url = new URL('/names', discovery.url).toString()
     const body = JSON.stringify({name: wanted, cx1})
     // Signed with the time it is asked for, and the mint allows sixty

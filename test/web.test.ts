@@ -452,6 +452,24 @@ describe('the web wallet', () => {
     await until(onHome, 'home')
   })
 
+  it('checks a claimed lightning address for payments from settings', async () => {
+    const claimed = vi.spyOn(Wallet.prototype, 'lightningAddress').mockReturnValue('donkey@mint.example')
+    const scan = vi.spyOn(Wallet.prototype, 'scanAddress').mockResolvedValue({received: [], scanned: 20})
+    try {
+      document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
+      await until(() => button('Check address for payments') !== undefined, 'the address check')
+      button('Check address for payments')!.click()
+      await until(() => scan.mock.calls.length === 1, 'the address scan')
+      expect(scan).toHaveBeenCalledWith('mint.example')
+      await until(() => button('Check address for payments')?.disabled === false, 'the completed address scan')
+      document.querySelector<HTMLButtonElement>('[data-back]')!.click()
+      await until(onHome, 'home')
+    } finally {
+      scan.mockRestore()
+      claimed.mockRestore()
+    }
+  })
+
   it('shows the recovery words again behind the PIN, and offers to ask the mints', async () => {
     document.querySelector<HTMLButtonElement>('[data-settings]')!.click()
     await until(() => button('Show my words') !== undefined, 'the settings screen')

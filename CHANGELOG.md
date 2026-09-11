@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Lightning-address claims now work with the reference `lnurl-mint` as well
+  as Moneyer. Notecase detects its free, first-come `/register` route without
+  changing state and registers the wallet's or linked heartwood's `cx1`
+  branch. The reference route does not prove Nostr ownership or send a relay
+  wrap, so the web wallet now has **Check address for payments** alongside
+  the existing CLI address scans.
 - `balance` says what a linked heartwood holds, uncollected, from the last
   time this wallet reached it, with when that was. Seeing money never waits
   on a relay round trip and never needs a button press; `heartwood notes`
