@@ -14,6 +14,8 @@ import {
   deriveCashAddressNode,
   deriveNoteSecretKey,
   cashNodeToCx1,
+  decodeCx1,
+  deriveNotePubkey,
   encodeCk1,
   encodeCp1,
   encodeCx1,
@@ -83,7 +85,9 @@ import {
   identityFromSecret,
   inboxRelayListEvent,
   inboxRelays,
+  nip98Authorization,
   nip98Header,
+  nip98Template,
   newIdentitySecretHex,
   npubOf,
   resolveRecipient,
@@ -2458,6 +2462,118 @@ export class Wallet {
     return this.heartwoodClient(transport).trusted()
   }
 
+  // Points a lightning address the device's key owns at the device's own
+  // keys (LUD-25 Part 2), or back to notes sealed to its npub. The device
+  // hands over the watch-only branch and signs the NIP-98 request itself,
+  // on one hold. Only the device can spend what the name is paid after
+  // this: the branch comes from its identity key, not from these words.
+  // Payments already made are not touched.
+  async heartwoodNameToKeys(
+    transport: NostrTransport,
+    name: string,
+    options: {toKeys?: boolean; mintHost?: string} = {}
+  ): Promise<{address: string; toKeys: boolean}> {
+    const toKeys = options.toKeys ?? true
+    const wanted = name.trim().toLowerCase()
+    if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(wanted)) throw new WalletUsageError(`${name} is not a name a mint hands out.`)
+    const entry = this.mintEntry(options.mintHost)
+    const client = this.heartwoodClient(transport)
+    let cx1: string | null = null
+    if (toKeys) {
+      const branch = await client.cashAddress(entry.host)
+      // The branch belongs to whichever identity the link serves as, and
+      // that has to be the npub the name belongs to: the mint signs off on
+      // the NIP-98 key, and the wraps name that key.
+      if (branch.pubkey !== client.link.devicePubkey) {
+        throw new HeartwoodError(
+          `The device answered for ${npubOf(branch.pubkey)}, not the linked ${npubOf(client.link.devicePubkey)}.`
+        )
+      }
+      cx1 = branch.cx1
+    }
+    const discovery = await this.discoveryDocument(entry.host)
+    if (!discovery) throw new WalletUsageError(`${entry.host} does not publish where to manage names.`)
+    const url = new URL('/names', discovery.url).toString()
+    const body = JSON.stringify({name: wanted, cx1})
+    // Signed with the time it is asked for, and the mint allows sixty
+    // seconds, so a hold that takes longer is refused and simply re-asked.
+    const signed = await client.signEvent(nip98Template(url, 'POST', body))
+    const fetchImpl = this.opts.fetch ?? fetch
+    const response = await fetchImpl(url, {
+      method: 'POST',
+      headers: {'content-type': 'application/json', authorization: nip98Authorization(signed)},
+      body,
+      signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
+    })
+    const answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; cx1?: string | null}
+    if (!response.ok || answer.status === 'ERROR') {
+      throw new WalletUsageError(answer.reason ?? `${entry.host} refused (${response.status}).`)
+    }
+    if (toKeys && answer.cx1 !== cx1) throw new WalletUsageError(`${entry.host} does not pay names to keys yet.`)
+    return {address: `${wanted}@${entry.host}`, toKeys: typeof answer.cx1 === 'string'}
+  }
+
+  // Walks the device's branch at a mint for payments whose gift wrap never
+  // reached it, and has the device keep each one. The mint credits a
+  // payment whether or not its wrap lands, so the note is there either way,
+  // on the key it was paid to. This machine only works out where to look,
+  // from the watch-only cx1; the device derives each key and checks it.
+  async heartwoodScanAddress(
+    transport: NostrTransport,
+    host?: string,
+    options: {gap?: number} = {}
+  ): Promise<{claimed: {id: string; index: number; amountMsat: number}[]; scanned: number}> {
+    const entry = this.mintEntry(host)
+    let baseUrl = entry.baseUrl
+    if (!baseUrl) {
+      const pay = await fetchPayRequest(entry.payUrl, this.opts)
+      if (!pay.withdrawLink) throw new WalletUsageError(`${entry.host} no longer advertises notes.`)
+      baseUrl = fromLud17(pay.withdrawLink)
+      entry.baseUrl = baseUrl
+    }
+    const client = this.heartwoodClient(transport)
+    const branch = decodeCx1((await client.cashAddress(entry.host)).cx1)
+    if (!branch) throw new HeartwoodError('The device answered with something that is not a cx1.')
+    const held = new Set((await client.listNotes()).flatMap(note => (note.p ? [note.p] : [])))
+    // The device keeps a note's withdraw endpoint without its scheme.
+    const noteHost = baseUrl.replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '')
+    const gap = options.gap ?? 20
+    const claimed: {id: string; index: number; amountMsat: number}[] = []
+    let quiet = 0
+    let index = 0
+    while (quiet < gap) {
+      const at = index
+      index += 1
+      const cp1 = encodeCp1(deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, at))
+      let info: Awaited<ReturnType<typeof fetchNoteInfoByHash>>
+      try {
+        info = await fetchNoteInfoByHash(baseUrl, cp1, this.opts)
+      } catch (err) {
+        if (err instanceof NoteUnknownError) {
+          quiet += 1
+          continue
+        }
+        if (err instanceof NoteSpentError || err instanceof PendingNoteError) {
+          quiet = 0
+          continue
+        }
+        throw err
+      }
+      quiet = 0
+      if (held.has(cp1)) continue
+      const sig = (info as {sig?: unknown}).sig
+      const kept = await client.claimKeyNote({
+        host: noteHost,
+        index: at,
+        amountMsat: info.maxWithdrawable,
+        p: cp1,
+        ...(typeof sig === 'string' ? {sig} : {})
+      })
+      claimed.push({id: kept.id, index: at, amountMsat: info.maxWithdrawable})
+    }
+    return {claimed, scanned: index}
+  }
+
   // Tell senders where the device's wraps go: its kind 10050, signed by
   // the device (one hold), on its relays, ours, and the indexers.
   async publishHeartwoodInbox(transport: NostrTransport): Promise<{relays: string[]; ok: string[]; failed: string[]}> {
@@ -2472,12 +2588,26 @@ export class Wallet {
   // (which rotates it), then marked spent there (a second hold). A note the
   // mint reports spent is marked spent on the device too - that is the
   // truth, however it got that way.
+  //
+  // `ids` narrows it to those notes, so one can come home and the rest stay
+  // on the device. Naming a note that is not there to collect is refused
+  // before any hold.
   async collectFromHeartwood(
     transport: NostrTransport,
-    onProgress: (step: string) => void = () => {}
+    onProgress: (step: string) => void = () => {},
+    options: {ids?: string[]} = {}
   ): Promise<{collected: ReceiveResult[]; failed: {id: string; reason: string}[]}> {
     const client = this.heartwoodClient(transport)
-    const held = (await client.listNotes()).filter(n => n.state === 'confirmed' && n.from)
+    // What arrived: by wrap from a sender, or paid to one of the device's
+    // own keys (a key note carries its cp1 whichever way it came).
+    let held = (await client.listNotes()).filter(n => n.state === 'confirmed' && (n.from || n.p))
+    if (options.ids?.length) {
+      const missing = options.ids.filter(id => !held.some(n => n.id === id))
+      if (missing.length) {
+        throw new WalletUsageError(`Nothing to collect under ${missing.join(', ')} - \`heartwood notes\` lists what the device holds.`)
+      }
+      held = held.filter(n => options.ids!.includes(n.id))
+    }
     const collected: ReceiveResult[] = []
     const failed: {id: string; reason: string}[] = []
     if (!held.length) {
@@ -2513,10 +2643,13 @@ export class Wallet {
     }
 
     for (const {note, k1} of released) {
-      const url = buildNoteUrl(`lnurlw://${note.host}`, k1, note.amount_msat)
+      const url = new URL(buildNoteUrl(`lnurlw://${note.host}`, k1, note.amount_msat))
+      // A key note's certificate is over its public key, which the ck1
+      // released above recovers to, so it travels with it and is checked.
+      if (note.p && note.sig) url.searchParams.set('sig', note.sig)
       let result: ReceiveResult | null = null
       try {
-        result = await this.receive(url)
+        result = await this.receive(url.toString())
         if (note.from) result.note.receivedFrom = note.from
         collected.push(result)
       } catch (err) {

@@ -57,8 +57,9 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase verify <note>
   notecase nwc set [uri] | nwc status | nwc clear
   notecase nostr init | nostr show | nostr relays [set <url>...]
-  notecase heartwood link <bunker://...> | heartwood notes | heartwood collect
+  notecase heartwood link <bunker://...> | heartwood notes | heartwood collect [<id>...]
   notecase heartwood send <id> --to <npub> | heartwood unlink
+  notecase heartwood address keys <name> | address custodial <name> | address scan [--mint <host>]
   notecase backup export | backup shares [--threshold N --count M] | backup recover-key
   notecase backup nostr on|off|push|pull
   notecase sync on|off|status | sync
@@ -1180,7 +1181,7 @@ const main = async (): Promise<void> => {
     }
 
     case 'heartwood': {
-      const [sub, arg] = rest
+      const [sub, arg, third] = rest
       const transport = poolTransport()
       try {
         if (sub === 'link') {
@@ -1195,7 +1196,8 @@ const main = async (): Promise<void> => {
           if (!notes.length) console.log('The device holds no notes.')
           for (const n of notes) {
             const who = n.from ? ` from ${npubOf(n.from).slice(0, 16)}…` : n.sent_to ? ` sent to ${npubOf(n.sent_to).slice(0, 16)}…` : ''
-            console.log(`${n.id}  ${n.state.padEnd(9)} ${sats(n.amount_msat).padStart(12)}  ${n.host}${who}`)
+            const key = n.p ? ` (its own key #${n.index})` : ''
+            console.log(`${n.id}  ${n.state.padEnd(9)} ${sats(n.amount_msat).padStart(12)}  ${n.host}${key}${who}`)
           }
         } else if (sub === 'trust' || sub === 'untrust') {
           if (!arg) throw new WalletUsageError(`heartwood ${sub} <npub|hex|nip05>`)
@@ -1222,12 +1224,36 @@ const main = async (): Promise<void> => {
           if (result.ok.length) console.log(`  published on: ${result.ok.join(', ')}`)
           if (result.failed.length) console.log(`  failed: ${result.failed.join(', ')}`)
         } else if (sub === 'collect') {
-          const result = await wallet.collectFromHeartwood(transport, step => console.log(`  ${step}`))
+          const ids = rest.slice(1)
+          const result = await wallet.collectFromHeartwood(transport, step => console.log(`  ${step}`), ids.length ? {ids} : {})
           for (const r of result.collected) {
             console.log(`Collected ${sats(r.note.amountMsat)} at ${r.note.mintHost} (${shortId(r.note)}).`)
           }
           for (const f of result.failed) console.log(`  ${f.id}: ${f.reason}`)
           if (!result.collected.length && !result.failed.length) console.log('Nothing waiting on the device.')
+        } else if (sub === 'address' && (arg === 'keys' || arg === 'custodial')) {
+          // A name the DEVICE's key owns, paid to the device's own keys:
+          // only the device can spend what arrives, and its recovery phrase
+          // brings it back.
+          if (!third) throw new WalletUsageError(`heartwood address ${arg} <name> [--mint <host>]`)
+          console.log('  hold the device button within a minute to sign the request to the mint')
+          const moved = await wallet.heartwoodNameToKeys(transport, third, {
+            toKeys: arg === 'keys',
+            ...(values.mint ? {mintHost: values.mint} : {})
+          })
+          console.log(
+            moved.toKeys
+              ? `${moved.address} now pays to the device's own keys. Payments already made are unchanged.`
+              : `${moved.address} now pays as notes sealed to the device's npub.`
+          )
+        } else if (sub === 'address' && arg === 'scan') {
+          // The fallback for a wrap the device never saw: the note waits at
+          // the mint on the key it was paid to.
+          const result = await wallet.heartwoodScanAddress(transport, values.mint)
+          for (const c of result.claimed) {
+            console.log(`The device kept ${sats(c.amountMsat)} paid to its key #${c.index} (${c.id}).`)
+          }
+          console.log(`Checked ${result.scanned} keys; the device kept ${result.claimed.length} note${result.claimed.length === 1 ? '' : 's'}.`)
         } else if (sub === 'send') {
           if (!arg || !values.to) throw new WalletUsageError('heartwood send <id> --to <npub>')
           console.log('  hold the device button to send')
@@ -1237,7 +1263,7 @@ const main = async (): Promise<void> => {
           if (sent.relays.length) console.log(`  on: ${sent.relays.join(', ')}`)
           if (sent.failed.length) console.log(`  failed: ${sent.failed.join(', ')}`)
         } else {
-          console.log('heartwood link <bunker://...> | inbox | notes | collect | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | pair [label] | unlink')
+          console.log('heartwood link <bunker://...> | inbox | notes | collect [id...] | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | pair [label] | address keys|custodial <name> | address scan | unlink')
         }
       } finally {
         transport.close()

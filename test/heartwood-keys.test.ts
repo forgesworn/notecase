@@ -1,0 +1,328 @@
+import {createServer} from 'node:net'
+import {afterEach, describe, expect, it} from 'vitest'
+import {finalizeEvent, generateSecretKey, getPublicKey, matchFilter, type Event, type Filter} from 'nostr-tools'
+import {nip44} from 'nostr-tools'
+import {createFakeBackend, createMoneyer, type FakeBackend, type Moneyer} from '@forgesworn/moneyer'
+import {bolt11PaymentHash} from 'farrier-kit/bolt11'
+import {hmac} from '@noble/hashes/hmac.js'
+import {sha256} from '@noble/hashes/sha2.js'
+import {bytesToHex, hexToBytes, randomBytes, utf8ToBytes} from '@noble/hashes/utils.js'
+import {
+  cashNodeToCx1,
+  deriveCashAddressNode,
+  deriveCashRoot,
+  deriveNoteSecretKey,
+  encodeCk1,
+  encodeCp1,
+  encodeCx1,
+  signNoteOwnership
+} from 'lnurlcash-kit'
+import {NIP46_KIND, type DeviceNote} from '../src/heartwood.ts'
+import type {NostrTransport} from '../src/nostr.ts'
+import {makeWallet} from './helpers.ts'
+
+// A lightning address owned by a heartwood's own npub, paid to the device's
+// own keys (LUD-25 Part 2). The device derives its address branch from that
+// identity key - seed = HMAC-SHA256(key, "LNURLcash/nostr-seed"), then
+// lnurl-wallet's m/139'/1'/d1..d4 - which is what the fake below does, with
+// the kit, exactly as heartwood-esp32's cash_key.rs does in Rust against
+// vectors the kit produced. The mint is a real moneyer.
+
+const NOSTR_SEED_LABEL = 'LNURLcash/nostr-seed'
+
+type Held = DeviceNote & {k1: string}
+
+const fakeHeartwood = (relay: string) => {
+  const secret = generateSecretKey()
+  const pubkey = getPublicKey(secret)
+  const branchFor = (host: string) =>
+    deriveCashAddressNode(deriveCashRoot(hmac(sha256, secret, utf8ToBytes(NOSTR_SEED_LABEL))), host)
+  const notes: Held[] = []
+  const bound = new Set<string>()
+  const log: string[] = []
+  const subs: {filter: Filter; onEvent: (e: Event) => void}[] = []
+  let nextId = 1
+  // Who the address answer says the branch belongs to: a link served as a
+  // persona would name the persona, not the npub it was paired as.
+  let answerAs = pubkey
+
+  const answer = (to: string, id: string, body: {result?: unknown; error?: string}): Event =>
+    finalizeEvent(
+      {
+        kind: NIP46_KIND,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [['p', to]],
+        content: nip44.encrypt(JSON.stringify({id, ...body}), nip44.getConversationKey(secret, to))
+      },
+      secret
+    )
+  const ok = (fields: Record<string, unknown>) => ({result: JSON.stringify({ok: true, ...fields})})
+
+  const noteCmd = (method: string, fields: Record<string, unknown>): {result?: unknown; error?: string} => {
+    switch (method) {
+      case 'heartwood_note_address': {
+        const {pubkeyXOnly, chainCode} = cashNodeToCx1(branchFor(String(fields.host)))
+        return ok({host: fields.host, cx1: encodeCx1(pubkeyXOnly, chainCode), pubkey: answerAs})
+      }
+      case 'heartwood_note_claim': {
+        // The firmware's claim_key_note: derive the key at `index` for the
+        // endpoint's mint, refuse one that is not at `p`, keep it once.
+        const host = String(fields.host)
+        const node = branchFor(host.split('/')[0]!)
+        const index = Number(fields.index)
+        const key = deriveNoteSecretKey(node.privateKey, node.chainCode, index)
+        const p = encodeCp1(hexToBytes(getPublicKey(key)))
+        if (fields.p !== undefined && fields.p !== p) return {error: 'bad_request'}
+        const existing = notes.find(n => n.p === p)
+        if (existing) return ok({id: existing.id, created: false, p})
+        const id = String(nextId++).padStart(8, '0')
+        notes.push({
+          id,
+          k1: encodeCk1(signNoteOwnership(key)),
+          state: 'confirmed',
+          amount_msat: Number(fields.amount_msat),
+          host,
+          label: '',
+          p,
+          index,
+          ...(typeof fields.sig === 'string' ? {sig: fields.sig} : {})
+        })
+        return ok({id, created: true, p})
+      }
+      case 'heartwood_note_list':
+        return ok({total: notes.length, offset: 0, notes: notes.map(({k1: _k1, ...meta}) => meta)})
+      case 'heartwood_note_export': {
+        const n = notes.find(note => note.id === fields.id)
+        if (!n || n.state !== 'confirmed') return {error: 'invalid_state'}
+        return ok({k1: n.k1})
+      }
+      case 'heartwood_note_spent': {
+        const n = notes.find(note => note.id === fields.id)
+        if (!n || n.state !== 'confirmed') return {error: 'invalid_state'}
+        n.state = 'spent'
+        return ok({})
+      }
+      default:
+        return {error: 'unknown method'}
+    }
+  }
+
+  const transport: NostrTransport = {
+    async query() {
+      return []
+    },
+    subscribe(_relays, filter, onEvent) {
+      const sub = {filter, onEvent}
+      subs.push(sub)
+      return {
+        close() {
+          subs.splice(subs.indexOf(sub), 1)
+        }
+      }
+    },
+    async publish(relays, event) {
+      if (!relays.includes(relay)) return {ok: [], failed: relays}
+      if (event.kind === NIP46_KIND && event.tags.some(t => t[0] === 'p' && t[1] === pubkey)) {
+        const req = JSON.parse(nip44.decrypt(event.content, nip44.getConversationKey(secret, event.pubkey))) as {
+          id: string
+          method: string
+          params: unknown[]
+        }
+        log.push(req.method)
+        let body: {result?: unknown; error?: string}
+        if (req.method === 'connect') {
+          bound.add(event.pubkey)
+          body = {result: 'ack'}
+        } else if (!bound.has(event.pubkey)) {
+          body = {error: 'unauthorised'}
+        } else if (req.method === 'sign_event') {
+          // The real device puts a card up; this one holds at once.
+          const unsigned = JSON.parse(String(req.params[0])) as {kind: number; created_at: number; tags: string[][]; content: string}
+          body = {result: JSON.stringify(finalizeEvent(unsigned, secret))}
+        } else {
+          body = noteCmd(req.method, (req.params[0] ?? {}) as Record<string, unknown>)
+        }
+        const reply = answer(event.pubkey, req.id, body)
+        for (const sub of [...subs]) if (matchFilter(sub.filter, reply)) sub.onEvent(reply)
+      }
+      return {ok: relays, failed: []}
+    },
+    close() {}
+  }
+  return {
+    transport,
+    notes,
+    log,
+    pubkey,
+    branchFor,
+    answerAs(other: string) {
+      answerAs = other
+    },
+    uri: `bunker://${pubkey}?relay=${encodeURIComponent(relay)}&secret=pairing`
+  }
+}
+
+// The mint's own relay, which its wraps go to.
+const memoryRelay = () => {
+  const stored: Event[] = []
+  const transport: NostrTransport = {
+    async publish(relays, event) {
+      stored.push(event)
+      return {ok: relays, failed: []}
+    },
+    async query(_relays, filter: Filter) {
+      return stored.filter(event => matchFilter(filter, event))
+    },
+    subscribe() {
+      return {close() {}}
+    },
+    close() {}
+  }
+  return {stored, transport}
+}
+
+const freePort = (): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const probe = createServer()
+    probe.once('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address()
+      probe.close(() => resolve(typeof address === 'object' && address ? address.port : 0))
+    })
+  })
+
+type Mint = {moneyer: Moneyer; backend: FakeBackend; host: string; relay: ReturnType<typeof memoryRelay>}
+let mint: Mint | null = null
+afterEach(async () => {
+  await mint?.moneyer.close()
+  mint = null
+})
+
+// Registration closed, as on moneyer.dev: the name is the operator's to give,
+// and its owner can still say where it pays.
+const startMint = async (): Promise<Mint> => {
+  const port = await freePort()
+  const backend = createFakeBackend()
+  const relay = memoryRelay()
+  const moneyer = await createMoneyer(
+    {
+      host: '127.0.0.1',
+      port,
+      username: 'mint',
+      description: 'an LNURLcash note',
+      minSendableMsat: 1000,
+      maxSendableMsat: 100_000_000,
+      minMintMsat: 1000,
+      mintFee: null,
+      signingKey: bytesToHex(randomBytes(32)),
+      dbPath: ':memory:',
+      backend: {kind: 'fake'},
+      verify: true,
+      maxK1s: 21,
+      sunset: false,
+      publicOrigin: `http://127.0.0.1:${port}`,
+      zap: {nostrKey: bytesToHex(randomBytes(32)), relays: ['wss://relay.test'], names: {}}
+    },
+    {backend, nostr: relay.transport, zapPollMs: 20}
+  )
+  mint = {moneyer, backend, host: `127.0.0.1:${port}`, relay}
+  return mint
+}
+
+const waitFor = async (predicate: () => boolean, timeoutMs = 3_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('timed out')
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+const pay = async (theMint: Mint, name: string, amountMsat: number): Promise<void> => {
+  const before = theMint.relay.stored.filter(e => e.kind === 1059).length
+  const cb = (await (await fetch(`${theMint.moneyer.url}/z/cb/${name}?amount=${amountMsat}`)).json()) as {pr: string}
+  theMint.backend.control.settleInvoice(bolt11PaymentHash(cb.pr)!)
+  await waitFor(() => theMint.relay.stored.filter(e => e.kind === 1059).length > before)
+}
+
+const setUp = async () => {
+  const theMint = await startMint()
+  const device = fakeHeartwood('wss://device.test')
+  const {wallet} = makeWallet()
+  await wallet.addMint(`mint@${theMint.host}`)
+  await wallet.linkHeartwood(device.transport, device.uri)
+  theMint.moneyer.store.putOperatorZapName('donkey', device.pubkey)
+  return {theMint, device, wallet}
+}
+
+describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
+  it('points the name at the branch the device derives, on a request the device signs', async () => {
+    const {theMint, device, wallet} = await setUp()
+    const moved = await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    expect(moved).toEqual({address: `donkey@${theMint.host}`, toKeys: true})
+    const {pubkeyXOnly, chainCode} = cashNodeToCx1(device.branchFor(theMint.host))
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(encodeCx1(pubkeyXOnly, chainCode))
+    // The wallet's own key signed nothing: the device did.
+    expect(device.log).toEqual(['connect', 'heartwood_note_address', 'sign_event'])
+
+    const back = await wallet.heartwoodNameToKeys(device.transport, 'donkey', {toKeys: false})
+    expect(back.toKeys).toBe(false)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBeNull()
+  })
+
+  it('finds a payment the device never saw a wrap for, has the device keep it, and collects it', async () => {
+    const {theMint, device, wallet} = await setUp()
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    await pay(theMint, 'donkey', 21_000)
+
+    const scan = await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})
+    expect(scan.claimed).toEqual([{id: device.notes[0]!.id, index: 0, amountMsat: 21_000}])
+    expect(scan.scanned).toBe(1 + 3)
+    const kept = device.notes[0]!
+    expect(kept.host).toBe(`${theMint.host}/w`)
+    expect(kept.sig).toMatch(/^cs1/)
+
+    // A second scan finds it held and keeps nothing twice.
+    expect((await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})).claimed).toEqual([])
+    expect(device.notes).toHaveLength(1)
+
+    // Collecting releases a ck1, never the key, and the wallet rotates it.
+    const collected = await wallet.collectFromHeartwood(device.transport)
+    expect(collected.failed).toEqual([])
+    expect(collected.collected.map(r => r.note.amountMsat)).toEqual([21_000])
+    expect(device.notes[0]!.state).toBe('spent')
+    expect(wallet.balanceMsat()).toBe(21_000)
+    const stats = (await (await fetch(`${theMint.moneyer.url}/stats`)).json()) as {outstandingNotes: number}
+    expect(stats.outstandingNotes).toBe(1)
+  })
+
+  it('collects only the notes named, and leaves the rest on the device', async () => {
+    const {theMint, device, wallet} = await setUp()
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    await pay(theMint, 'donkey', 21_000)
+    await pay(theMint, 'donkey', 5_000)
+    await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})
+    const [first, second] = device.notes
+    await expect(wallet.collectFromHeartwood(device.transport, () => {}, {ids: ['nosuchid']})).rejects.toThrow('Nothing to collect')
+    expect(device.log).not.toContain('heartwood_note_export')
+
+    const result = await wallet.collectFromHeartwood(device.transport, () => {}, {ids: [second!.id]})
+    expect(result.collected.map(r => r.note.amountMsat)).toEqual([second!.amount_msat])
+    expect(device.notes.map(n => n.state)).toEqual(['confirmed', 'spent'])
+    expect(first!.state).toBe('confirmed')
+  })
+
+  it('refuses a branch the device says belongs to another identity, before anything is signed', async () => {
+    const {theMint, device, wallet} = await setUp()
+    device.answerAs(getPublicKey(generateSecretKey()))
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow('not the linked')
+    expect(device.log).not.toContain('sign_event')
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1 ?? null).toBeNull()
+  })
+
+  it("cannot move a name the device's key does not own", async () => {
+    const {theMint, device, wallet} = await setUp()
+    theMint.moneyer.store.putOperatorZapName('mule', getPublicKey(generateSecretKey()))
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'mule')).rejects.toThrow('taken')
+    expect(theMint.moneyer.store.zapName('mule')?.cx1 ?? null).toBeNull()
+  })
+})

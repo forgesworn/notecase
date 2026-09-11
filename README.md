@@ -234,7 +234,9 @@ notecase heartwood link bunker://...   # a heartwood signer as a note locker
 notecase heartwood inbox               # publishes the device's inbox relays (kind 10050), one hold
 notecase heartwood trust <npub|nip05>  # the device stores notes from this sender without a hold (a mint's zap key)
 notecase heartwood pair [label]        # mints a bunker URI for another wallet, one hold; first pairing needs the cable
-notecase heartwood collect             # brings in what arrived at the device by wrap
+notecase heartwood collect [<id>...]   # brings in what arrived at the device (or just the notes named)
+notecase heartwood address keys <name> # a name the DEVICE's key owns, paid to the device's own keys; one hold
+notecase heartwood address scan        # payments to those keys whose wrap never reached the device
 notecase backup shares --threshold 2 --count 3
 notecase sync on                       # keep the notes themselves on your relays
 notecase sync                          # pull, let the mints settle, publish what changed
@@ -491,6 +493,16 @@ leave a note. `heartwood trust <npub>` names a sender (a mint's zap key)
 whose notes the device stores without a hold. The web wallet has the same
 under Settings → Hardware signer: pair by bunker URI or QR, collect, trust,
 publish.
+
+A name whose owner is the device's npub can be paid to the device's own keys
+instead (LUD-25 Part 2). `heartwood address keys <name>` asks the device for
+the watch-only branch it derives from that identity key and has the device
+sign the request to the mint, on one hold. From then on the mint mints each
+payment to the device's next key and the wrap carries no secret at all, only
+where to look. Only the device can spend those notes - this wallet's words
+cannot - and the device's recovery phrase brings them back. `heartwood
+address scan` walks the branch for payments whose wrap never arrived and has
+the device keep them; `heartwood collect` takes them, as it takes wraps.
 
 Amounts are sats (`--msat` for precision). The PIN comes from the prompt
 or `$NOTECASE_PIN`. `NOTECASE_HOME` moves the store; `NOTECASE_ALLOW_PRIVATE=1`

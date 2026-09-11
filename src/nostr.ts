@@ -130,21 +130,28 @@ const base64 = (text: string): string => {
   return btoa(binary)
 }
 
-// A NIP-98 Authorization header: a signed statement that this key is
-// making this request to this URL with this body, and made it just now.
-// The mint reads the pubkey off it and needs no account of its own.
-export const nip98Header = (identity: NostrIdentity, url: string, method: string, body?: string): string => {
+// The unsigned NIP-98 event for one request, for a key held elsewhere (a
+// heartwood signs it on the device).
+export const nip98Template = (
+  url: string,
+  method: string,
+  body?: string
+): {kind: number; created_at: number; content: string; tags: string[][]} => {
   const tags: string[][] = [
     ['u', url],
     ['method', method.toUpperCase()]
   ]
   if (body !== undefined) tags.push(['payload', bytesToHex(sha256(utf8ToBytes(body)))])
-  const event = finalizeEvent(
-    {kind: NIP98_KIND, created_at: Math.floor(Date.now() / 1000), content: '', tags},
-    identity.secret
-  )
-  return `Nostr ${base64(JSON.stringify(event))}`
+  return {kind: NIP98_KIND, created_at: Math.floor(Date.now() / 1000), content: '', tags}
 }
+
+export const nip98Authorization = (signed: Event): string => `Nostr ${base64(JSON.stringify(signed))}`
+
+// A NIP-98 Authorization header: a signed statement that this key is
+// making this request to this URL with this body, and made it just now.
+// The mint reads the pubkey off it and needs no account of its own.
+export const nip98Header = (identity: NostrIdentity, url: string, method: string, body?: string): string =>
+  nip98Authorization(finalizeEvent(nip98Template(url, method, body), identity.secret))
 
 // What a zap said, when a note was minted by one. The mint carries the
 // payer's own kind 9734 alongside the note, so the wallet can show who
