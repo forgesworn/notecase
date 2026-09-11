@@ -312,6 +312,22 @@ mint cannot invent a sender.
 If the mint refuses the name, the note that was going to pay for it comes
 straight home under a fresh secret.
 
+**Paid to your own keys.** A wallet with recovery words hands the mint a
+`cx1` when it claims a name: a watch-only branch of its keys (LUD-25 Part
+2). A mint that takes it, moneyer 0.13 or later, stops holding anything
+that could spend what arrives. It credits each payment to your next key and
+sends a wrap saying only which key, and `notecase inbox` derives that key,
+checks the mint's certificate, and rotates the note onto a secret of its own
+at once. `address claim` says which way the mint took it.
+
+- `notecase address keys` moves a name you already hold onto your keys;
+  `address custodial` moves it back.
+- `notecase address scan` walks the branch for anything whose wrap never
+  arrived. The note is at the mint either way.
+
+The mint can see every key on that branch, so it can link what is paid to
+the name, as it could before. What it can no longer do is spend it.
+
 ### Letting something else spend from this wallet
 
 `nwc set` points notecase at somebody else's Lightning. The other

@@ -19,6 +19,23 @@ issues.
   knew hex secrets and hex signatures.
 - Takes lnurlcash-kit 0.11.0.
 
+**A lightning address paid to this wallet's own keys.**
+
+- `address claim` sends the mint a `cx1`, a watch-only branch of this
+  wallet's keys at lnurl-wallet's path, whenever the wallet has recovery
+  words. A mint that takes it (moneyer 0.13) credits each payment to the
+  wallet's next key and never holds a secret for it. The command says which
+  way the mint took the name.
+- `notecase inbox` opens the wrap such a mint sends, which carries no
+  secret: it derives the key at the index named, checks the key matches and
+  the certificate verifies, and rotates the note onto a secret of its own. A
+  wrap naming a key this wallet does not hold is skipped, with the reason.
+- `address keys` moves a name already held onto the wallet's keys, and
+  `address custodial` moves it back.
+- `address scan` walks the branch for payments whose wrap never arrived. A
+  spent key counts as used, and anything but "unknown" stops the walk rather
+  than reading as its end.
+
 ## 0.16.0 - 2026-09-09
 
 **A mint that says it is closing now gets said back.** `sunsetDate` is advance

@@ -4080,7 +4080,12 @@ const viewSettings = (): void => {
           confirm.addEventListener('click', () =>
             busy(confirm as HTMLButtonElement, async () => {
               const got = await w.registerName({name: wanted, mintHost: host})
-              toast(`${got.address} is yours. Anyone can pay you at it now.`, 'ok')
+              toast(
+                got.toKeys
+                  ? `${got.address} is yours, paid to your own keys - the mint never holds what arrives.`
+                  : `${got.address} is yours. Anyone can pay you at it now.`,
+                'ok'
+              )
               viewSettings()
             })
           )
