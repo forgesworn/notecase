@@ -247,17 +247,47 @@ const pay = async (theMint: Mint, name: string, amountMsat: number): Promise<voi
   await waitFor(() => theMint.relay.stored.filter(e => e.kind === 1059).length > before)
 }
 
-const setUp = async () => {
+const setUp = async (referenceRegistration = false) => {
   const theMint = await startMint()
   const device = fakeHeartwood('wss://device.test')
-  const {wallet} = makeWallet()
+  const registrations: {username: string; cx1: string}[] = []
+  const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
+    if (referenceRegistration && url.pathname === '/register' && url.searchParams.get('username') === '_') {
+      return Response.json({status: 'ERROR', reason: 'Invalid or reserved username.'})
+    }
+    if (referenceRegistration && url.pathname === '/register') {
+      const username = url.searchParams.get('username') ?? ''
+      const cx1 = url.searchParams.get('cx1') ?? ''
+      registrations.push({username, cx1})
+      theMint.moneyer.store.putOperatorZapName(username, device.pubkey)
+      theMint.moneyer.store.setZapNameCx1(username, cx1)
+      return Response.json({status: 'OK'})
+    }
+    return fetch(input, init)
+  }
+  const {wallet} = makeWallet(referenceRegistration ? {fetch: fetchImpl} : {})
   await wallet.addMint(`mint@${theMint.host}`)
   await wallet.linkHeartwood(device.transport, device.uri)
-  theMint.moneyer.store.putOperatorZapName('donkey', device.pubkey)
-  return {theMint, device, wallet}
+  if (!referenceRegistration) theMint.moneyer.store.putOperatorZapName('donkey', device.pubkey)
+  return {theMint, device, wallet, registrations}
 }
 
 describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
+  it('registers a reference-mint branch and claims a payment by scanning it', async () => {
+    const {theMint, device, wallet, registrations} = await setUp(true)
+    const moved = await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    expect(moved).toEqual({address: `donkey@${theMint.host}`, toKeys: true})
+    const branch = cashNodeToCx1(device.branchFor(theMint.host))
+    expect(registrations).toEqual([{username: 'donkey', cx1: encodeCx1(branch.pubkeyXOnly, branch.chainCode)}])
+    expect(device.log).not.toContain('sign_event')
+
+    await pay(theMint, 'donkey', 21_000)
+    const scan = await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})
+    expect(scan.claimed).toEqual([{id: device.notes[0]!.id, index: 0, amountMsat: 21_000}])
+    expect(device.notes[0]!.sig).toMatch(/^cs1/)
+  })
+
   it('points the name at the branch the device derives, on a request the device signs', async () => {
     const {theMint, device, wallet} = await setUp()
     const moved = await wallet.heartwoodNameToKeys(device.transport, 'donkey')

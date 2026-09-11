@@ -4021,7 +4021,7 @@ const viewSettings = (): void => {
 
     // lightning address
     const address = el(`<div class="card"><h3>Lightning address</h3>
-      <p class="warn" style="text-align:left;padding-top:12px">An address anyone can pay from any Lightning wallet. What arrives is a note sealed to this wallet's Nostr key, so it is yours seconds after it is paid, and the mint holds it for no longer than that.</p>
+      <p class="warn" style="text-align:left;padding-top:12px">An address anyone can pay from any Lightning wallet. Where the mint accepts Part 2 keys, what arrives belongs to this wallet's derived keys. Check the address below for payments whose relay notification never arrived.</p>
     </div>`)
     const claimed = w.lightningAddress()
     if (claimed) {
@@ -4031,6 +4031,22 @@ const viewSettings = (): void => {
       const copyAddress = el(`<button class="btn btn-ghost">${icons.copy}<span>Copy address</span></button>`)
       copyAddress.addEventListener('click', () => void copyText(claimed, 'Your lightning address'))
       address.append(copyAddress)
+      const scanAddress = el(`<button class="btn btn-ghost">${icons.refresh}<span>Check address for payments</span></button>`)
+      scanAddress.addEventListener('click', () =>
+        busy(scanAddress as HTMLButtonElement, async () => {
+          const at = claimed.lastIndexOf('@')
+          const host = claimed.slice(at + 1)
+          const result = await w.scanAddress(host)
+          toast(
+            result.received.length
+              ? `Found ${result.received.length} payment${result.received.length === 1 ? '' : 's'} - balance ${sats(w.balanceMsat())} sat.`
+              : `Checked ${result.scanned} keys; nothing else has arrived.`,
+            result.received.length ? 'ok' : ''
+          )
+          viewSettings()
+        })
+      )
+      address.append(scanAddress)
     } else {
       const form = el(`<div class="stack" style="padding-top:14px">
         <div class="field">
