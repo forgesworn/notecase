@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.17.1 - 2026-09-11
 
 - `address keys <name>` and `address custodial <name>` reach a name this
   wallet's key owns but never claimed itself, such as one the mint's operator
