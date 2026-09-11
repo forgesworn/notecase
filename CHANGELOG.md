@@ -8,6 +8,9 @@
   and `heartwood collect` refresh the reading, and `heartwood notes` now
   totals what is on the device. The signer's notes are not folded into this
   wallet's balance: they are not its money until collected.
+- A collect no longer promises a second hold. Firmware that takes
+  heartwood-esp32#129 writes a note off on the same hold that released it,
+  so the step now says to hold again only if the device asks.
 
 ## 0.19.1 - 2026-09-11
 
