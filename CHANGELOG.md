@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.17.0 - 2026-09-11
 
 **Takes LUD-25 Part 2 notes.** A note keyed by a public key and spent with a
 `ck1`, which is what a Part 2 wallet hands over and what a Part 2 mint
