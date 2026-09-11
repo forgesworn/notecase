@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.18.1 - 2026-09-11
+
+- Relays that take more than 3 s to open are reached. nostr-tools gives up
+  on a connection after 3 s, and through a VPN or Tor every relay can take
+  longer (2.8-4.5 s measured through ProtonVPN), so the slowest was dropped
+  from every request and reply subscription. When that relay was the one a
+  heartwood listened on, the device looked dead while it sat online. The pool
+  now waits up to 10 s. This is the wallet PWA's transport too.
+- A relay nostr-tools could not connect to counts as failed. It resolves that
+  attempt with a "connection failure" string, which read as a relay that took
+  the event.
+- Each relay's publish has a 20 s deadline, so a socket the network accepts
+  and then stalls can no longer hang a command for minutes.
+
 ## 0.18.0 - 2026-09-11
 
 **A heartwood can be paid to its own keys.** A lightning address whose owner
