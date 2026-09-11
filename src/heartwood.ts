@@ -31,6 +31,12 @@ export type DeviceNote = {
   label: string
   from?: string
   sent_to?: string
+  // A note paid to one of the device's own keys (LUD-25 Part 2): the cp1 it
+  // is filed under at the mint, and where on the device's branch it sits.
+  // Exporting one hands back a ck1, never the key.
+  p?: string
+  index?: number
+  sig?: string
 }
 
 export class HeartwoodError extends Error {}
@@ -196,6 +202,29 @@ export class HeartwoodClient {
   async trusted(): Promise<string[]> {
     const res = await this.note<{trusted: string[]}>('heartwood_note_trusted', {})
     return res.trusted
+  }
+
+  // The device's watch-only branch at a mint, derived from the identity this
+  // link serves as: what a mint needs to mint that npub's lightning-address
+  // payments straight to the device's own keys. No hold; it spends nothing.
+  // `pubkey` is whose branch it is.
+  async cashAddress(host: string): Promise<{cx1: string; pubkey: string}> {
+    const res = await this.note<{cx1: string; pubkey: string}>('heartwood_note_address', {host})
+    return {cx1: res.cx1, pubkey: res.pubkey}
+  }
+
+  // Have the device keep a note a scan found on its branch. It derives the
+  // key at `index` itself and refuses one that is not at `p`; nothing
+  // secret crosses to this machine. No hold, as for an import.
+  async claimKeyNote(claim: {host: string; index: number; amountMsat: number; p: string; sig?: string}): Promise<{id: string; created: boolean}> {
+    const res = await this.note<{id: string; created: boolean}>('heartwood_note_claim', {
+      host: claim.host,
+      index: claim.index,
+      amount_msat: claim.amountMsat,
+      p: claim.p,
+      ...(claim.sig ? {sig: claim.sig} : {})
+    })
+    return {id: res.id, created: res.created}
   }
 
   // Mint a slot for another wallet, from this one which is already bound.
