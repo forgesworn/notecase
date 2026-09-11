@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+**A heartwood can be paid to its own keys.** A lightning address whose owner
+is the heartwood's npub now takes LUD-25 Part 2 payments that only the device
+can spend. Needs heartwood-esp32 firmware that serves `heartwood_note_address`.
+
+- `heartwood address keys <name>` points the name at the watch-only branch the
+  device derives from its identity key, and `heartwood address custodial
+  <name>` points it back. The device signs the NIP-98 request itself, on one
+  hold; a device that answers for a different npub from the one linked is
+  refused before anything is signed.
+- `heartwood address scan` walks that branch at a mint for payments whose
+  wrap never reached the device, and has the device keep each one. It derives
+  every key itself; this wallet only works out where to look.
+- `heartwood collect` brings in notes paid to the device's keys as well as
+  notes that arrived by wrap, with their certificate checked, and takes note
+  ids so one note can come home while the rest stay on the device. `heartwood
+  notes` marks key notes.
+
 ## 0.17.1 - 2026-09-11
 
 - `address keys <name>` and `address custodial <name>` reach a name this
