@@ -386,3 +386,27 @@ describe('resolving a recipient', () => {
     await expect(resolveRecipient('alice@example.com', bad)).rejects.toThrow(/lists no key/)
   })
 })
+
+describe('publishing to relays', () => {
+  it('counts a relay that never answers as failed instead of waiting on it for ever', async () => {
+    const {publishToEach} = await import('../src/nostr.ts')
+    const never = new Promise<string>(() => {})
+    const result = await publishToEach(
+      [Promise.resolve('ok'), never, Promise.reject(new Error('refused'))],
+      ['wss://fine.example', 'wss://stalled.example', 'wss://refuses.example'],
+      50
+    )
+    expect(result.ok).toEqual(['wss://fine.example'])
+    expect(result.failed.sort()).toEqual(['wss://refuses.example', 'wss://stalled.example'])
+  })
+
+  it('counts a relay nostr-tools could not connect to as failed, though it resolves', async () => {
+    const {publishToEach} = await import('../src/nostr.ts')
+    const result = await publishToEach(
+      [Promise.resolve(''), Promise.resolve('connection failure: Error: connection timed out')],
+      ['wss://fine.example', 'wss://slow.example'],
+      50
+    )
+    expect(result).toEqual({ok: ['wss://fine.example'], failed: ['wss://slow.example']})
+  })
+})

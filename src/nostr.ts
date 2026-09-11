@@ -37,24 +37,67 @@ export type NostrTransport = {
   close(): void
 }
 
+// How long a relay gets to open. nostr-tools gives up after 3 s, and through
+// a VPN or Tor every relay can take longer: measured 2.8-4.5 s through
+// ProtonVPN on 2026-09-11, so the one relay a heartwood was listening on was
+// dropped from every request and the device never heard a thing.
+export const RELAY_CONNECT_MS = 10_000
+
+// How long one relay gets to take an event, connect included. Nothing above
+// the transport has a deadline of its own, so without this a relay the
+// network lets connect and then never answers holds the whole call open for
+// ever: seen through the same VPN, where `heartwood notes` hung for minutes
+// instead of saying the device did not answer.
+export const PUBLISH_TIMEOUT_MS = 20_000
+
+const withDeadline = <T>(promise: Promise<T>, ms: number): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timed out')), ms)
+    promise.then(
+      value => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      err => {
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
+
+// A relay that misses the deadline counts as failed, like one that refused.
+// So does one nostr-tools could not reach: it RESOLVES that attempt with a
+// "connection failure: ..." string rather than rejecting it, which read as a
+// relay that took the event.
+export const publishToEach = async (
+  attempts: Promise<unknown>[],
+  relays: string[],
+  ms: number = PUBLISH_TIMEOUT_MS
+): Promise<{ok: string[]; failed: string[]}> => {
+  const ok: string[] = []
+  const failed: string[] = []
+  await Promise.all(
+    attempts.map((attempt, i) =>
+      withDeadline(attempt, ms).then(
+        value => {
+          if (typeof value === 'string' && value.startsWith('connection failure')) failed.push(relays[i]!)
+          else ok.push(relays[i]!)
+        },
+        () => failed.push(relays[i]!)
+      )
+    )
+  )
+  return {ok, failed}
+}
+
 export const poolTransport = (): NostrTransport => {
   const pool = new SimplePool()
+  // A public field; the Node constructor's type only admits two options.
+  pool.maxWaitForConnection = RELAY_CONNECT_MS
   return {
     query: (relays, filter) => pool.querySync(relays, filter, {maxWait: 8_000}),
     subscribe: (relays, filter, onEvent) => pool.subscribe(relays, filter, {onevent: onEvent}),
-    publish: async (relays, event) => {
-      const ok: string[] = []
-      const failed: string[] = []
-      await Promise.all(
-        pool.publish(relays, event).map((p, i) =>
-          p.then(
-            () => ok.push(relays[i]!),
-            () => failed.push(relays[i]!)
-          )
-        )
-      )
-      return {ok, failed}
-    },
+    publish: (relays, event) => publishToEach(pool.publish(relays, event), relays),
     close: () => pool.destroy()
   }
 }
