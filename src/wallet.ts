@@ -27,6 +27,7 @@ import {
   mergeBatches,
   mergeNotesWithHash,
   noteDeclaredAmount,
+  noteIdOf,
   noteK1,
   noteSignature,
   probeBurnedNote,
@@ -94,6 +95,15 @@ import {HeartwoodClient, HeartwoodError, newHeartwoodLink, type DeviceNote, type
 export class InsufficientFundsError extends Error {}
 export class PinMismatchError extends Error {}
 export class WalletUsageError extends Error {}
+
+// The id a mint files a note under: sha256(k1) for a Part 1 secret, and the
+// key a Part 2 ck1 recovers to. Two different ck1 strings can name the same
+// note, so notes are compared by this, never by k1.
+const noteId = (k1: string): string => {
+  const id = noteIdOf(k1)
+  if (id === null) throw new WalletUsageError('That note carries a k1 that is neither a secret nor a ck1.')
+  return id
+}
 
 // A note whose offline signature does not verify against the key pinned
 // for its mint. The signature is the one thing a holder can check without
@@ -561,7 +571,7 @@ export class Wallet {
     replaces: string[]
   ): NoteRecord {
     return {
-      id: hashK1(k1),
+      id: noteId(k1),
       k1,
       amountMsat,
       baseUrl: template.baseUrl,
@@ -1311,12 +1321,12 @@ export class Wallet {
       )
     }
 
-    if (this.data.notes.some(note => note.id === hashK1(k1) && note.state !== 'spent' && note.state !== 'sent')) {
+    if (this.data.notes.some(note => note.id === noteId(k1) && note.state !== 'spent' && note.state !== 'sent')) {
       throw new WalletUsageError('This note is already in the wallet.')
     }
 
     const received: NoteRecord = {
-      id: hashK1(k1),
+      id: noteId(k1),
       k1,
       amountMsat: info.maxWithdrawable,
       baseUrl,
@@ -1899,7 +1909,7 @@ export class Wallet {
         `the signature on this note does not verify against any key ${mintHost} is known to sign with - the note may have been altered, or it may not come from that mint`
       )
     }
-    if (this.data.notes.some(note => note.id === hashK1(k1) && note.state !== 'spent' && note.state !== 'sent')) {
+    if (this.data.notes.some(note => note.id === noteId(k1) && note.state !== 'spent' && note.state !== 'sent')) {
       throw new WalletUsageError('This note is already in the wallet.')
     }
     // The mint's callback is not on a note URL, so it is borrowed from
@@ -1907,7 +1917,7 @@ export class Wallet {
     // reconcile asks the mint for it before rotating.
     const known = this.data.notes.find(note => note.baseUrl === baseUrl && note.callback)
     const received: NoteRecord = {
-      id: hashK1(k1),
+      id: noteId(k1),
       k1,
       amountMsat: declared,
       baseUrl,
@@ -3171,7 +3181,7 @@ export class Wallet {
     }
     const found: NoteRecord[] = []
     for (const restored of result.found) {
-      const id = hashK1(restored.k1)
+      const id = noteId(restored.k1)
       if (this.data.notes.some(note => note.id === id)) continue
       // The callback came back with the lookup, so there is nothing to ask
       // twice. Asking again by raw k1 - which is what this used to do -

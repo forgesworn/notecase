@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+**Takes LUD-25 Part 2 notes.** A note keyed by a public key and spent with a
+`ck1`, which is what a Part 2 wallet hands over and what a Part 2 mint
+issues.
+
+- `receive` takes a note URL carrying a `ck1`, checks its `cs1` certificate
+  against the mint's pinned key, and rotates it into a secret of this
+  wallet's own, as lnurl-wallet does. The note is never held as a `ck1` once
+  the wallet is online.
+- `receive --offline` and `verify` check a Part 2 note on its certificate
+  alone, and the next reconcile rotates it.
+- A note is known by the id the mint files it under. One Part 2 note has many
+  valid `ck1` strings, so taking the same note twice under two spellings is
+  refused as a note already in the wallet.
+- A backup holding a Part 2 note taken offline restores. The validator only
+  knew hex secrets and hex signatures.
+- Takes lnurlcash-kit 0.11.0.
+
 ## 0.16.0 - 2026-09-09
 
 **A mint that says it is closing now gets said back.** `sunsetDate` is advance
