@@ -56,7 +56,7 @@ notecase receive <note> [--force] | send <sats> [--notes <id,..>] | melt <bolt11
 notecase check [--apply] [--resign] [--mint <host>]
 notecase ladder [set <sats,...>] [--copies n] | prepare [--apply]
 notecase send <sats> --offline [--overpay] [--notes <id,..>] | receive --offline
-notecase address [claim <name> --mint <host>] | address keys | address custodial | address scan
+notecase address [claim <name> --mint <host>] | address keys [<name>] | address custodial [<name>] | address scan
 notecase balance | list [--all] | reconcile | verify <note>
 notecase nwc set <uri> / status / clear          # spend THROUGH another wallet
 notecase nwc grant <name> [--methods a,b] [--budget <sats>] [--max <sats>]
@@ -120,7 +120,7 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   - noteIds offline is the hand-over itself, not a pool: short pays nothing,
     over needs acceptOverpay. sendToNostr(t, msat, to, host?, {noteIds?, memo?})
   namePriceMsat(host?), registerName({name, mintHost?}) -> {address, paidMsat, toKeys},
-  lightningAddress(), payNameToKeys(toKeys?), addressCx1(host), scanAddress(host?, {gap?})
+  lightningAddress(), payNameToKeys(toKeys?, {name?, mintHost?}), addressCx1(host), scanAddress(host?, {gap?})
   - with a seed, registerName sends a cx1 (m/139'/1'/d1..d4, lnurl-wallet's path); a
     moneyer >=0.13 then pays the name to the wallet's keys, and the inbox opens the
     index-only wrap (/w?p=<cp1>&amount=&sig=<cs1>&i=) by deriving the key and rotating

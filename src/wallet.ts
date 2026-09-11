@@ -2256,7 +2256,7 @@ export class Wallet {
     // that does not know the field ignores it and pays custodially.
     const cx1 = this.addressCx1(entry.host)
     const body = JSON.stringify({name, ...(note ? {note: this.noteUrlFor(note)} : {}), ...(cx1 ? {cx1} : {})})
-    let answer: {status?: string; reason?: string; cx1?: string | null} = {}
+    let answer: {status?: string; reason?: string; cx1?: string | null; paidMsat?: unknown} = {}
     try {
       const fetchImpl = this.opts.fetch ?? fetch
       const response = await fetchImpl(url, {
@@ -2268,7 +2268,7 @@ export class Wallet {
         body,
         signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
       })
-      answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; cx1?: string | null}
+      answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; cx1?: string | null; paidMsat?: unknown}
       if (!response.ok || answer.status === 'ERROR') {
         throw new WalletUsageError(answer.reason ?? `${entry.host} refused the name (${response.status}).`)
       }
@@ -2286,21 +2286,54 @@ export class Wallet {
       throw err
     }
 
-    if (note) await this.markTaken(note)
+    // A mint answers paidMsat 0 when the name was already this key's and
+    // the request only changed where it pays: nothing was taken. The note
+    // went out in the request all the same, so it comes home under a fresh
+    // secret rather than being written off. A mint that does not say is
+    // taken at its word that the name was granted, and so paid for.
+    const paidMsat = typeof answer.paidMsat === 'number' ? answer.paidMsat : (note?.amountMsat ?? 0)
+    if (note) {
+      if (paidMsat === 0) {
+        try {
+          await this.reclaim(note)
+        } catch {
+          // left as sent - `reclaim` can bring it home later
+        }
+      } else {
+        await this.markTaken(note)
+      }
+    }
     this.data.settings.lightningAddress = `${name}@${entry.host}`
     await this.persist()
-    return {address: this.data.settings.lightningAddress, paidMsat: note?.amountMsat ?? 0, toKeys: typeof answer.cx1 === 'string'}
+    return {address: this.data.settings.lightningAddress, paidMsat, toKeys: typeof answer.cx1 === 'string'}
   }
 
   // Moves this wallet's name onto its own keys, or back off them. The key
   // that owns a name may resend it with a branch; payments already made
   // are not touched.
-  async payNameToKeys(toKeys = true): Promise<{address: string; toKeys: boolean}> {
-    const address = this.lightningAddress()
-    if (!address) throw new WalletUsageError('This wallet has no lightning address yet - `notecase address claim <name>`.')
-    const at = address.lastIndexOf('@')
-    const name = address.slice(0, at)
-    const entry = this.mintEntry(address.slice(at + 1))
+  //
+  // `name` reaches one this wallet owns but never recorded, such as a name
+  // the mint's operator set up for this wallet's key.
+  async payNameToKeys(
+    toKeys = true,
+    options: {name?: string; mintHost?: string} = {}
+  ): Promise<{address: string; toKeys: boolean}> {
+    let name: string
+    let entry: ReturnType<typeof this.mintEntry>
+    if (options.name !== undefined) {
+      name = options.name.trim().toLowerCase()
+      if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(name)) throw new WalletUsageError(`${options.name} is not a name a mint hands out.`)
+      entry = this.mintEntry(options.mintHost)
+    } else {
+      const recorded = this.lightningAddress()
+      if (!recorded) {
+        throw new WalletUsageError('This wallet has no lightning address recorded - name it: `notecase address keys <name>`.')
+      }
+      const at = recorded.lastIndexOf('@')
+      name = recorded.slice(0, at)
+      entry = this.mintEntry(options.mintHost ?? recorded.slice(at + 1))
+    }
+    const address = `${name}@${entry.host}`
     const cx1 = toKeys ? this.addressCx1(entry.host) : null
     if (toKeys && !cx1) throw new WalletUsageError('This wallet has no recovery words, so it has no keys to be paid to.')
     const discovery = await this.discoveryDocument(entry.host)
@@ -2320,6 +2353,11 @@ export class Wallet {
       throw new WalletUsageError(answer.reason ?? `${entry.host} refused (${response.status}).`)
     }
     if (toKeys && answer.cx1 !== cx1) throw new WalletUsageError(`${entry.host} does not pay names to keys yet.`)
+    // The mint just confirmed this key owns the name.
+    if (!this.data.settings.lightningAddress) {
+      this.data.settings.lightningAddress = address
+      await this.persist()
+    }
     return {address, toKeys: typeof answer.cx1 === 'string'}
   }
 

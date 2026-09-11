@@ -321,7 +321,9 @@ checks the mint's certificate, and rotates the note onto a secret of its own
 at once. `address claim` says which way the mint took it.
 
 - `notecase address keys` moves a name you already hold onto your keys;
-  `address custodial` moves it back.
+  `address custodial` moves it back. Give the name, `address keys <name>`,
+  for one your key owns that this wallet never claimed itself, such as a
+  name the mint's operator set up for you.
 - `notecase address scan` walks the branch for anything whose wrap never
   arrived. The note is at the mint either way.
 

@@ -43,7 +43,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase prepare [--apply] [--mint <host>]
   notecase send <sats> [--mint <host>] [--offline] [--overpay] [--notes <id,id>] [--strip-sig]
   notecase send <sats> --to <npub|nip05> [--notes <id,id>]
-  notecase address | address claim <name> [--mint <host>] | address keys | address custodial | address scan [--mint <host>]
+  notecase address | address claim <name> [--mint <host>] | address keys [<name>] | address custodial [<name>] | address scan [--mint <host>]
   notecase inbox
   notecase request <sats> [--memo <text>] [--wait <seconds>] [--mint <host>]
   notecase requests [--all]
@@ -1062,7 +1062,10 @@ const main = async (): Promise<void> => {
         return
       }
       if (sub === 'keys' || sub === 'custodial') {
-        const moved = await wallet.payNameToKeys(sub === 'keys')
+        const moved = await wallet.payNameToKeys(sub === 'keys', {
+          ...(wanted ? {name: wanted} : {}),
+          ...(values.mint ? {mintHost: values.mint} : {})
+        })
         console.log(
           moved.toKeys
             ? `${moved.address} now pays to your own keys. Payments already made are unchanged.`
