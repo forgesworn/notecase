@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.18.0 - 2026-09-11
 
 **A heartwood can be paid to its own keys.** A lightning address whose owner
 is the heartwood's npub now takes LUD-25 Part 2 payments that only the device
