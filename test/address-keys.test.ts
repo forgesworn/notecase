@@ -4,10 +4,11 @@ import {matchFilter, type Event, type Filter} from 'nostr-tools'
 import {createFakeBackend, createMoneyer, type FakeBackend, type Moneyer} from '@forgesworn/moneyer'
 import {bolt11PaymentHash} from 'farrier-kit/bolt11'
 import {bytesToHex, randomBytes} from '@noble/hashes/utils.js'
-import {isCk1} from 'lnurlcash-kit'
+import {hashK1, isCk1} from 'lnurlcash-kit'
 import type {NostrTransport} from '../src/nostr.ts'
 import {newMnemonic, seedFromMnemonic} from '../src/store.ts'
-import {makeWallet} from './helpers.ts'
+import {WalletUsageError} from '../src/wallet.ts'
+import {freshK1, makeWallet} from './helpers.ts'
 
 // A moneyer name with a cx1 is paid to this wallet's own keys. The gift wrap
 // says only where to look and at which index; the wallet derives the key,
@@ -47,7 +48,7 @@ const freePort = (): Promise<number> =>
 type Mint = {moneyer: Moneyer; backend: FakeBackend; host: string; relay: ReturnType<typeof memoryRelay>}
 let mint: Mint | null = null
 
-const startMint = async (): Promise<Mint> => {
+const startMint = async (namePriceMsat = 0): Promise<Mint> => {
   const port = await freePort()
   const backend = createFakeBackend()
   const relay = memoryRelay()
@@ -69,7 +70,7 @@ const startMint = async (): Promise<Mint> => {
       sunset: false,
       publicOrigin: `http://127.0.0.1:${port}`,
       zap: {nostrKey: bytesToHex(randomBytes(32)), relays: ['wss://relay.test'], names: {}},
-      namePriceMsat: 0
+      namePriceMsat
     },
     {backend, nostr: relay.transport, zapPollMs: 20}
   )
@@ -185,5 +186,37 @@ describe('a name paid to this wallet\'s keys', () => {
     // the rotated note, and nothing left on the key
     expect(stats.outstandingNotes).toBe(1)
     expect(wallet.balanceMsat()).toBe(21_000)
+  })
+
+  it('moves a name its key owns but never recorded, such as one the operator set up', async () => {
+    const theMint = await startMint()
+    const {wallet} = seededWallet()
+    await wallet.addMint(`mint@${theMint.host}`)
+    theMint.moneyer.store.putOperatorZapName('ops', (await wallet.ensureNostrIdentity()).pubkey)
+
+    await expect(wallet.payNameToKeys()).rejects.toThrow(WalletUsageError)
+    const moved = await wallet.payNameToKeys(true, {name: 'ops'})
+    expect(moved.toKeys).toBe(true)
+    expect(theMint.moneyer.store.zapName('ops')?.cx1).toBe(wallet.addressCx1(theMint.host))
+    expect(wallet.lightningAddress()).toBe(`ops@${theMint.host}`)
+  })
+
+  it('takes the note back when re-claiming a priced name it already owns', async () => {
+    const theMint = await startMint(21_000)
+    const {wallet} = seededWallet()
+    await wallet.addMint(`mint@${theMint.host}`)
+    const k1 = freshK1()
+    theMint.moneyer.store.creditNote(hashK1(k1), 50_000)
+    await wallet.receive(`${theMint.moneyer.url}/w?k1=${k1}&amount=50000`)
+
+    const first = await wallet.registerName({name: 'alice'})
+    expect(first.paidMsat).toBe(21_000)
+    expect(wallet.balanceMsat()).toBe(29_000)
+
+    // the mint only updates where the name pays, and takes nothing
+    const again = await wallet.registerName({name: 'alice'})
+    expect(again.paidMsat).toBe(0)
+    expect(again.toKeys).toBe(true)
+    expect(wallet.balanceMsat()).toBe(29_000)
   })
 })

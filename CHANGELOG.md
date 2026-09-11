@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- `address keys <name>` and `address custodial <name>` reach a name this
+  wallet's key owns but never claimed itself, such as one the mint's operator
+  set up. Without a name they use the address the wallet recorded, as before,
+  and a name moved this way is recorded if none was.
+- Claiming a priced name the wallet already owns no longer writes off the
+  note it sent. The mint takes no payment for that (it only updates where the
+  name pays, and answers `paidMsat: 0`), so the note comes home under a fresh
+  secret instead of being marked handed over.
+
 ## 0.17.0 - 2026-09-11
 
 **Takes LUD-25 Part 2 notes.** A note keyed by a public key and spent with a
