@@ -229,12 +229,15 @@ export class Wallet {
     // trusted set silently, and refuses a note whose signature does not
     // verify against what it has pinned.
     //
-    // So the kit's own requireSignatures is off by default here. Left on, it
-    // would refuse any mint publishing no mintPubkey outright - which is
-    // exactly the mint with no funding source that receive() deliberately
-    // accepts, and which the reference mint really does produce. A caller
-    // that wants the stricter posture can still pass it explicitly.
-    this.opts = {requireSignatures: false, ...opts}
+    // So the kit's own blanket checks are off by default here.
+    // requireMintPubkey, left on, would refuse any mint publishing no
+    // mintPubkey outright - which is exactly the mint with no funding source
+    // that receive() deliberately accepts, and which the reference mint
+    // really does produce. requireSignatures would refuse the plain notes
+    // LUD-25 Part 2 leaves unsigned (the kit still demands a cs1 on a cp1
+    // output either way). A caller that wants the stricter posture can still
+    // pass either explicitly.
+    this.opts = {requireSignatures: false, requireMintPubkey: false, ...opts}
   }
 
   // ---- queries ----
@@ -1212,9 +1215,10 @@ export class Wallet {
     const k1s = inputs.map(note => note.k1)
     try {
       let signatures: Array<string | undefined>
-      // LUD-25 requires a mint to sign every note a mutation mints, and
-      // lnurlcash-kit raises UnverifiableNoteError when one does not. That
-      // error means the mutation LANDED - `status` was OK - so the outputs
+      // LUD-25 Part 2 has a mint certify every cp1 output a mutation mints,
+      // and lnurlcash-kit raises UnverifiableNoteError when one comes back
+      // uncertified (and for a plain hash output too, if a caller turns
+      // requireSignatures on). That error means the mutation LANDED - `status` was OK - so the outputs
       // exist at the hashes this wallet just disclosed and the staged
       // secrets are the only copy of them. It is a success with no
       // signatures, never a failure: falling through to the unwind below

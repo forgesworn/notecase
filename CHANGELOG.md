@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- lnurlcash-kit 0.13.0, where a plain note is unsigned: LUD-25 Part 2
+  certifies `cp1` notes only, and a rotate, split or merge to a hash can
+  now come back with no signature. This wallet already took those; it
+  still checks any signature a note does carry against the mint's pinned
+  key. The kit's new `requireMintPubkey` is off here, so a mint that
+  publishes no signing key is still received from, as before.
+
 ## 0.19.0 - 2026-09-11
 
 **A lost heartwood's notes come back without it.**
