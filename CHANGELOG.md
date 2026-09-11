@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `balance` says what a linked heartwood holds, uncollected, from the last
+  time this wallet reached it, with when that was. Seeing money never waits
+  on a relay round trip and never needs a button press; `heartwood notes`
+  and `heartwood collect` refresh the reading, and `heartwood notes` now
+  totals what is on the device. The signer's notes are not folded into this
+  wallet's balance: they are not its money until collected.
+
 ## 0.19.1 - 2026-09-11
 
 - lnurlcash-kit 0.13.0, where a plain note is unsigned: LUD-25 Part 2

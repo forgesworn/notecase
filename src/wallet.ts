@@ -2517,7 +2517,32 @@ export class Wallet {
   }
 
   async heartwoodNotes(transport: NostrTransport): Promise<DeviceNote[]> {
-    return this.heartwoodClient(transport).listNotes()
+    const notes = await this.heartwoodClient(transport).listNotes()
+    this.rememberHeartwoodHeld(notes)
+    await this.persist()
+    return notes
+  }
+
+  // What the device held the last time this wallet reached it. Stale by
+  // nature: it is a record of a past conversation, not a live reading, and
+  // whoever shows it says when it was taken.
+  heartwoodHeld(): {msat: number; notes: number; at: number} | undefined {
+    return this.data.settings.heartwood?.held
+  }
+
+  // Called with a full locker listing. `spentIds` are notes this wallet has
+  // just taken, which the device will have marked spent, so they are gone
+  // from the total without another round trip.
+  private rememberHeartwoodHeld(notes: DeviceNote[], spentIds: string[] = []): void {
+    const link = this.data.settings.heartwood
+    if (!link) return
+    const gone = new Set(spentIds)
+    const live = notes.filter(note => note.state === 'confirmed' && !gone.has(note.id))
+    link.held = {
+      msat: live.reduce((total, note) => total + note.amount_msat, 0),
+      notes: live.length,
+      at: Math.floor(Date.now() / 1000)
+    }
   }
 
   // A sender the device stores notes from without a hold. `sender` is an
@@ -2613,7 +2638,9 @@ export class Wallet {
     const client = this.heartwoodClient(transport)
     const branch = decodeCx1((await client.cashAddress(entry.host)).cx1)
     if (!branch) throw new HeartwoodError('The device answered with something that is not a cx1.')
-    const held = new Set((await client.listNotes()).flatMap(note => (note.p ? [note.p] : [])))
+    const inventory = await client.listNotes()
+    this.rememberHeartwoodHeld(inventory)
+    const held = new Set(inventory.flatMap(note => (note.p ? [note.p] : [])))
     // The device keeps a note's withdraw endpoint without its scheme.
     const noteHost = baseUrl.replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '')
     const gap = options.gap ?? 20
@@ -2679,7 +2706,8 @@ export class Wallet {
     const client = this.heartwoodClient(transport)
     // What arrived: by wrap from a sender, or paid to one of the device's
     // own keys (a key note carries its cp1 whichever way it came).
-    let held = (await client.listNotes()).filter(n => n.state === 'confirmed' && (n.from || n.p))
+    const inventory = await client.listNotes()
+    let held = inventory.filter(n => n.state === 'confirmed' && (n.from || n.p))
     if (options.ids?.length) {
       const missing = options.ids.filter(id => !held.some(n => n.id === id))
       if (missing.length) {
@@ -2690,6 +2718,7 @@ export class Wallet {
     const collected: ReceiveResult[] = []
     const failed: {id: string; reason: string}[] = []
     if (!held.length) {
+      this.rememberHeartwoodHeld(inventory)
       await this.persist()
       return {collected, failed}
     }
@@ -2761,6 +2790,7 @@ export class Wallet {
       )
       for (const mark of marks) if (mark) failed.push(mark)
     }
+    this.rememberHeartwoodHeld(inventory, claimed.map(note => note.id))
     await this.persist()
     return {collected, failed}
   }

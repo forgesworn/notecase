@@ -229,6 +229,34 @@ describe('a linked heartwood', () => {
     expect(wallet.balanceMsat()).toBe(9_000)
   })
 
+  it('remembers what the device holds, so a balance needs no round trip', async () => {
+    mint = await createMockMint({})
+    const device = fakeDevice('wss://dev.example')
+    const {wallet, data} = makeWallet()
+    await wallet.linkHeartwood(device.transport, device.uri)
+    expect(wallet.heartwoodHeld()).toBeUndefined()
+
+    const k1 = freshK1()
+    mint.state.creditNote(k1, 9_000)
+    const host = `${new URL(mint.url).host}/w`
+    device.notes.push({id: 'aaaa1111', k1, state: 'confirmed', amount_msat: 9_000, host, from: 'cc'.repeat(32)})
+    device.notes.push({id: 'bbbb2222', k1: freshK1(), state: 'confirmed', amount_msat: 1_000, host})
+    device.notes.push({id: 'cccc3333', k1: freshK1(), state: 'spent', amount_msat: 5_000, host})
+
+    // Listing is enough to learn it, and what is spent on the device is not
+    // part of what it holds.
+    await wallet.heartwoodNotes(device.transport)
+    expect(wallet.heartwoodHeld()).toMatchObject({msat: 10_000, notes: 2})
+    expect(data.settings.heartwood?.held?.msat).toBe(10_000)
+
+    // A collect takes one of them, and the reading follows without another
+    // listing. The device's own note stays where it is.
+    await wallet.collectFromHeartwood(device.transport)
+    expect(wallet.heartwoodHeld()).toMatchObject({msat: 1_000, notes: 1})
+    // What the device holds is never this wallet's balance.
+    expect(wallet.balanceMsat()).toBe(9_000)
+  })
+
   it('asks the device to seal its own note to an npub and relays the wrap', async () => {
     const device = fakeDevice('wss://dev.example')
     const {wallet} = makeWallet()
