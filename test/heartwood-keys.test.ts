@@ -295,6 +295,22 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     expect(stats.outstandingNotes).toBe(1)
   })
 
+  it('collects only the notes named, and leaves the rest on the device', async () => {
+    const {theMint, device, wallet} = await setUp()
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    await pay(theMint, 'donkey', 21_000)
+    await pay(theMint, 'donkey', 5_000)
+    await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})
+    const [first, second] = device.notes
+    await expect(wallet.collectFromHeartwood(device.transport, () => {}, {ids: ['nosuchid']})).rejects.toThrow('Nothing to collect')
+    expect(device.log).not.toContain('heartwood_note_export')
+
+    const result = await wallet.collectFromHeartwood(device.transport, () => {}, {ids: [second!.id]})
+    expect(result.collected.map(r => r.note.amountMsat)).toEqual([second!.amount_msat])
+    expect(device.notes.map(n => n.state)).toEqual(['confirmed', 'spent'])
+    expect(first!.state).toBe('confirmed')
+  })
+
   it('refuses a branch the device says belongs to another identity, before anything is signed', async () => {
     const {theMint, device, wallet} = await setUp()
     device.answerAs(getPublicKey(generateSecretKey()))

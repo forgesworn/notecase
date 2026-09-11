@@ -57,7 +57,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase verify <note>
   notecase nwc set [uri] | nwc status | nwc clear
   notecase nostr init | nostr show | nostr relays [set <url>...]
-  notecase heartwood link <bunker://...> | heartwood notes | heartwood collect
+  notecase heartwood link <bunker://...> | heartwood notes | heartwood collect [<id>...]
   notecase heartwood send <id> --to <npub> | heartwood unlink
   notecase heartwood address keys <name> | address custodial <name> | address scan [--mint <host>]
   notecase backup export | backup shares [--threshold N --count M] | backup recover-key
@@ -1224,7 +1224,8 @@ const main = async (): Promise<void> => {
           if (result.ok.length) console.log(`  published on: ${result.ok.join(', ')}`)
           if (result.failed.length) console.log(`  failed: ${result.failed.join(', ')}`)
         } else if (sub === 'collect') {
-          const result = await wallet.collectFromHeartwood(transport, step => console.log(`  ${step}`))
+          const ids = rest.slice(1)
+          const result = await wallet.collectFromHeartwood(transport, step => console.log(`  ${step}`), ids.length ? {ids} : {})
           for (const r of result.collected) {
             console.log(`Collected ${sats(r.note.amountMsat)} at ${r.note.mintHost} (${shortId(r.note)}).`)
           }
@@ -1262,7 +1263,7 @@ const main = async (): Promise<void> => {
           if (sent.relays.length) console.log(`  on: ${sent.relays.join(', ')}`)
           if (sent.failed.length) console.log(`  failed: ${sent.failed.join(', ')}`)
         } else {
-          console.log('heartwood link <bunker://...> | inbox | notes | collect | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | pair [label] | address keys|custodial <name> | address scan | unlink')
+          console.log('heartwood link <bunker://...> | inbox | notes | collect [id...] | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | pair [label] | address keys|custodial <name> | address scan | unlink')
         }
       } finally {
         transport.close()

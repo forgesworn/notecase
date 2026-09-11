@@ -234,7 +234,7 @@ notecase heartwood link bunker://...   # a heartwood signer as a note locker
 notecase heartwood inbox               # publishes the device's inbox relays (kind 10050), one hold
 notecase heartwood trust <npub|nip05>  # the device stores notes from this sender without a hold (a mint's zap key)
 notecase heartwood pair [label]        # mints a bunker URI for another wallet, one hold; first pairing needs the cable
-notecase heartwood collect             # brings in what arrived at the device by wrap
+notecase heartwood collect [<id>...]   # brings in what arrived at the device (or just the notes named)
 notecase heartwood address keys <name> # a name the DEVICE's key owns, paid to the device's own keys; one hold
 notecase heartwood address scan        # payments to those keys whose wrap never reached the device
 notecase backup shares --threshold 2 --count 3

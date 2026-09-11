@@ -2588,14 +2588,26 @@ export class Wallet {
   // (which rotates it), then marked spent there (a second hold). A note the
   // mint reports spent is marked spent on the device too - that is the
   // truth, however it got that way.
+  //
+  // `ids` narrows it to those notes, so one can come home and the rest stay
+  // on the device. Naming a note that is not there to collect is refused
+  // before any hold.
   async collectFromHeartwood(
     transport: NostrTransport,
-    onProgress: (step: string) => void = () => {}
+    onProgress: (step: string) => void = () => {},
+    options: {ids?: string[]} = {}
   ): Promise<{collected: ReceiveResult[]; failed: {id: string; reason: string}[]}> {
     const client = this.heartwoodClient(transport)
     // What arrived: by wrap from a sender, or paid to one of the device's
     // own keys (a key note carries its cp1 whichever way it came).
-    const held = (await client.listNotes()).filter(n => n.state === 'confirmed' && (n.from || n.p))
+    let held = (await client.listNotes()).filter(n => n.state === 'confirmed' && (n.from || n.p))
+    if (options.ids?.length) {
+      const missing = options.ids.filter(id => !held.some(n => n.id === id))
+      if (missing.length) {
+        throw new WalletUsageError(`Nothing to collect under ${missing.join(', ')} - \`heartwood notes\` lists what the device holds.`)
+      }
+      held = held.filter(n => options.ids!.includes(n.id))
+    }
     const collected: ReceiveResult[] = []
     const failed: {id: string; reason: string}[] = []
     if (!held.length) {
