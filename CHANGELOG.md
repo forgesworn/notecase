@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.20.0 - 2026-09-12
 
 - A hold the device is waiting for is asked for again every few seconds,
   with the terminal bell, until it is answered or the call gives up. Said
