@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A hold the device is waiting for is asked for again every few seconds,
+  with the terminal bell, until it is answered or the call gives up. Said
+  once into a terminal nobody is watching, a card is missed and the command
+  reports a timeout that reads like a fault. The bell only rings on a
+  terminal, so piped output is unchanged.
+
 - Lightning-address claims now work with the reference `lnurl-mint` as well
   as Moneyer. Notecase detects its free, first-come `/register` route without
   changing state and registers the wallet's or linked heartwood's `cx1`
