@@ -19,6 +19,7 @@ import {invoiceFromNwc, nwcStatus, payWithNwc} from './nwc.ts'
 import {NwcService, connectionUri} from './nwcservice.ts'
 import {walletBridge} from './nwcbridge.ts'
 import {npubOf, poolTransport, recipientPubkey} from './nostr.ts'
+import {holdNagger} from './holdnag.ts'
 import type {NoteRecord} from './types.ts'
 
 const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
@@ -1234,16 +1235,18 @@ const main = async (): Promise<void> => {
           }
         } else if (sub === 'trust' || sub === 'untrust') {
           if (!arg) throw new WalletUsageError(`heartwood ${sub} <npub|hex|nip05>`)
-          if (sub === 'trust') console.log('  hold the device button to trust this sender')
-          const result = await wallet.heartwoodTrust(transport, arg, sub === 'untrust')
+          const nag = holdNagger()
+          if (sub === 'trust') nag.step('hold the device button to trust this sender')
+          const result = await wallet.heartwoodTrust(transport, arg, sub === 'untrust').finally(() => nag.stop())
           console.log(
             result.changed
               ? `${npubOf(result.pubkeyHex)} is ${result.trusted ? 'now trusted: its notes are stored without a hold.' : 'no longer trusted.'}`
               : `${npubOf(result.pubkeyHex)} was already ${result.trusted ? 'trusted' : 'untrusted'}.`
           )
         } else if (sub === 'pair') {
-          console.log('  hold the device button to mint a slot for another wallet')
-          const result = await wallet.heartwoodPairWallet(transport, arg ?? 'another wallet')
+          const nag = holdNagger()
+          nag.step('hold the device button to mint a slot for another wallet')
+          const result = await wallet.heartwoodPairWallet(transport, arg ?? 'another wallet').finally(() => nag.stop())
           console.log(`Slot ${result.slotIndex} ("${result.label}"). Paste this into the other wallet once; the secret is one-time:`)
           console.log(result.uri)
         } else if (sub === 'trusted') {
@@ -1251,14 +1254,18 @@ const main = async (): Promise<void> => {
           if (!trusted.length) console.log('The device trusts no senders; every note needs a hold.')
           for (const pk of trusted) console.log(npubOf(pk))
         } else if (sub === 'inbox') {
-          console.log('  hold the device button to sign its inbox list')
-          const result = await wallet.publishHeartwoodInbox(transport)
+          const nag = holdNagger()
+          nag.step('hold the device button to sign its inbox list')
+          const result = await wallet.publishHeartwoodInbox(transport).finally(() => nag.stop())
           console.log(`Device inbox (kind 10050) lists ${result.relays.join(', ')}.`)
           if (result.ok.length) console.log(`  published on: ${result.ok.join(', ')}`)
           if (result.failed.length) console.log(`  failed: ${result.failed.join(', ')}`)
         } else if (sub === 'collect') {
           const ids = rest.slice(1)
-          const result = await wallet.collectFromHeartwood(transport, step => console.log(`  ${step}`), ids.length ? {ids} : {})
+          const nag = holdNagger()
+          const result = await wallet
+            .collectFromHeartwood(transport, step => nag.step(step), ids.length ? {ids} : {})
+            .finally(() => nag.stop())
           for (const r of result.collected) {
             console.log(`Collected ${sats(r.note.amountMsat)} at ${r.note.mintHost} (${shortId(r.note)}).`)
           }
@@ -1309,8 +1316,9 @@ const main = async (): Promise<void> => {
           )
         } else if (sub === 'send') {
           if (!arg || !values.to) throw new WalletUsageError('heartwood send <id> --to <npub>')
-          console.log('  hold the device button to send')
-          const sent = await wallet.heartwoodSend(transport, arg, values.to)
+          const nag = holdNagger()
+          nag.step('hold the device button to send')
+          const sent = await wallet.heartwoodSend(transport, arg, values.to).finally(() => nag.stop())
           console.log(`Sent ${arg} to ${npubOf(sent.recipientHex)}.`)
           if (!sent.inboxKnown) console.log('  warning: they publish no inbox relays (kind 10050) - the wrap went to your relays.')
           if (sent.relays.length) console.log(`  on: ${sent.relays.join(', ')}`)
