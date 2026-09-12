@@ -2619,6 +2619,14 @@ export class Wallet {
   // A sender the device stores notes from without a hold. `sender` is an
   // npub, hex or NIP-05, as for send; a public mint publishes its key as
   // `nostrPubkey` on its zap payRequest.
+  // Relabel one of the device's notes. Needs firmware that serves
+  // `heartwood_note_rename` over the relay (heartwood-esp32#96); older
+  // firmware answers that the method is unknown, and the label can then only
+  // be fixed over the cable.
+  async heartwoodRename(transport: NostrTransport, noteId: string, label: string): Promise<void> {
+    await this.heartwoodClient(transport).renameNote(noteId, label)
+  }
+
   async heartwoodTrust(transport: NostrTransport, sender: string, remove = false): Promise<{pubkeyHex: string; trusted: boolean; changed: boolean}> {
     const pubkeyHex = await resolveRecipient(sender, this.opts.fetch ?? fetch)
     const client = this.heartwoodClient(transport)

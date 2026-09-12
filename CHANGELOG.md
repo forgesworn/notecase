@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `heartwood rename <id> <label>` relabels a note the device holds, over the
+  relay and on one hold. A label is what `heartwood notes` shows and the one
+  thing that can be wrong without anything being lost, and until now it could
+  only be corrected over the cable, which a WiFi-standalone board does not
+  have. Needs firmware that serves `heartwood_note_rename`
+  (heartwood-esp32#96); older firmware answers that the method is unknown.
+
 ## 0.20.0 - 2026-09-12
 
 - A hold the device is waiting for is asked for again every few seconds,

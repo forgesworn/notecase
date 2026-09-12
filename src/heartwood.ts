@@ -182,6 +182,13 @@ export class HeartwoodClient {
     await this.note('heartwood_note_spent', {id}, true)
   }
 
+  // Relabel a note the device holds. The label is what `heartwood notes`
+  // shows, and the only thing here that can be wrong without anything being
+  // lost. Gated on the device: it changes what the owner is shown.
+  async renameNote(id: string, label: string): Promise<void> {
+    await this.note('heartwood_note_rename', {id, label}, true)
+  }
+
   // Seal a note to `recipientHex` on the device. What comes back is the
   // kind 1059 to relay; this machine never sees the secret.
   async sendNote(id: string, recipientHex: string): Promise<Event> {
