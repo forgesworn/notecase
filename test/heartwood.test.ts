@@ -19,7 +19,7 @@ afterEach(async () => {
   mint = null
 })
 
-type Locker = {id: string; k1: string; state: string; amount_msat: number; host: string; from?: string; sent_to?: string}
+type Locker = {id: string; k1: string; state: string; amount_msat: number; host: string; label?: string; from?: string; sent_to?: string}
 
 const fakeDevice = (relay: string) => {
   const secret = generateSecretKey()
@@ -58,6 +58,14 @@ const fakeDevice = (relay: string) => {
         if (!n) return {error: 'not_found'}
         if (n.state !== 'confirmed') return {error: 'invalid_state'}
         n.state = 'spent'
+        return {result: JSON.stringify({ok: true})}
+      }
+      case 'heartwood_note_rename': {
+        const n = find()
+        if (!n) return {error: 'not_found'}
+        const label = String(fields.label ?? '')
+        if (!label || label.length > 24) return {error: 'bad_label'}
+        n.label = label
         return {result: JSON.stringify({ok: true})}
       }
       case 'heartwood_note_trust': {
@@ -255,6 +263,24 @@ describe('a linked heartwood', () => {
     expect(wallet.heartwoodHeld()).toMatchObject({msat: 1_000, notes: 1})
     // What the device holds is never this wallet's balance.
     expect(wallet.balanceMsat()).toBe(9_000)
+  })
+
+  it('relabels a note the device holds, and the list shows the new label', async () => {
+    const device = fakeDevice('wss://dev.example')
+    const {wallet} = makeWallet()
+    await wallet.linkHeartwood(device.transport, device.uri)
+    device.notes.push({id: 'aaaa1111', k1: freshK1(), state: 'confirmed', amount_msat: 9_000, host: 'm.example/w', label: 'zap'})
+
+    await wallet.heartwoodRename(device.transport, 'aaaa1111', 'rent money')
+    expect(device.notes[0]!.label).toBe('rent money')
+    expect((await wallet.heartwoodNotes(device.transport))[0]!.label).toBe('rent money')
+    // The device is what gates this; the wallet's part is to ask on the
+    // method the firmware serves and wait long enough for a hold.
+    expect(device.log).toContain('heartwood_note_rename')
+
+    // A label the device refuses is reported, and changes nothing.
+    await expect(wallet.heartwoodRename(device.transport, 'aaaa1111', 'x'.repeat(40))).rejects.toThrow()
+    expect(device.notes[0]!.label).toBe('rent money')
   })
 
   it('asks the device to seal its own note to an npub and relays the wrap', async () => {

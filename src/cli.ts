@@ -59,7 +59,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase nwc set [uri] | nwc status | nwc clear
   notecase nostr init | nostr show | nostr relays [set <url>...]
   notecase heartwood link <bunker://...> | heartwood notes | heartwood collect [<id>...]
-  notecase heartwood send <id> --to <npub> | heartwood unlink
+  notecase heartwood send <id> --to <npub> | heartwood rename <id> <label> | heartwood unlink
   notecase heartwood address keys <name> | address custodial <name> | address scan [--mint <host>]
   notecase heartwood recover [--npub <master npub>] [--mint <host>]   a lost heartwood's notes, from its nsec or phrase
   notecase backup export | backup shares [--threshold N --count M] | backup recover-key
@@ -1314,6 +1314,13 @@ const main = async (): Promise<void> => {
           console.log(
             `Checked ${result.scanned} keys on the ${result.mode} master's branch; recovered ${result.received.length} note${result.received.length === 1 ? '' : 's'}.`
           )
+        } else if (sub === 'rename') {
+          const label = rest.slice(2).join(' ').trim()
+          if (!arg || !label) throw new WalletUsageError('heartwood rename <id> <label>')
+          const nag = holdNagger()
+          nag.step('hold the device button to relabel the note')
+          await wallet.heartwoodRename(transport, arg, label).finally(() => nag.stop())
+          console.log(`${arg} is now "${label}".`)
         } else if (sub === 'send') {
           if (!arg || !values.to) throw new WalletUsageError('heartwood send <id> --to <npub>')
           const nag = holdNagger()
