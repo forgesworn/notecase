@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- A linked heartwood's notes are now written down, note by note, every time
+  this wallet lists the locker: the device's id, the amount, the mint host,
+  the state, the label, and for a note paid to the device's own keys its
+  index on the branch. The inventory rides along in `notecase backup` and
+  comes back on a restore; an older backup that has none restores unchanged.
+
+  The locker is a till, not a vault. A bearer note IS its secret, so the
+  device keeps its notes out of every backup on purpose - a restored copy on
+  a second board is a double-spend. What that leaves unsaid is that a board
+  which dies takes its notes with it, unrecoverably, and until now its owner
+  could not even say what was lost. Backing up the inventory rather than the
+  secrets carries no new risk and makes the loss legible: nothing here spends
+  anything, and nothing here comes back if the board is gone, but it names
+  exactly what existed and is what you show a mint. Collect promptly and keep
+  little on the device (heartwood-esp32#86).
+
+- `heartwood notes` no longer just fails when the device cannot be reached.
+  It falls back to the last reading, dated and plainly marked as past, and
+  says that these are the device's notes rather than this wallet's. Asking
+  what is on a locker is not moving money, and a board that is asleep, off
+  its relay or dead is exactly when the question gets asked. A device that
+  answers is unchanged, and one that answers with fewer notes than last time
+  replaces the reading rather than merging into it.
+
 - `heartwood rename <id> <label>` relabels a note the device holds, over the
   relay and on one hold. A label is what `heartwood notes` shows and the one
   thing that can be wrong without anything being lost, and until now it could

@@ -178,6 +178,38 @@ export type PaymentRequestRecord = {
   encoded: string
 }
 
+// One line of a linked heartwood's inventory: what the device said it held,
+// with nothing that could spend it.
+//
+// A bearer note IS its secret, so the device deliberately keeps its notes
+// out of every backup - a restored copy on a second board is a double-spend.
+// The cost of that is unstated and severe: a board that dies takes its notes
+// with it, and the owner cannot even say what was lost. Backing up the
+// INVENTORY rather than the secrets carries no new risk and makes the loss
+// legible - the owner knows exactly what existed and can show a mint what it
+// was. Nothing from an export ever goes in here: that would be a wallet note
+// in its own right.
+export type HeartwoodInventoryNote = {
+  // the device's own handle on the note, as `heartwood collect` names it
+  id: string
+  amountMsat: number
+  // host[:port] and the withdraw path, as the device records it: it keeps
+  // the endpoint without its scheme, so this is not the bare host a wallet
+  // note carries.
+  host: string
+  state: 'pending' | 'confirmed' | 'spent'
+  // The device's own words, shown as text and never trusted.
+  label?: string
+  // Where on the device's branch a Part 2 note sits. A position, not a key:
+  // only the device can derive what spends it.
+  index?: number
+}
+
+// How many lines of it are kept. A heartwood's note slot is a couple of
+// megabytes, so this is far above anything a board can hold; it is here so
+// that a wallet never writes a backup its own validator would refuse.
+export const MAX_HEARTWOOD_INVENTORY = 1024
+
 export type MintInfo = {
   name?: string
   description?: string
@@ -279,6 +311,11 @@ export type WalletData = {
       // being awake and on a relay, and a hold is for MOVING money, never
       // for looking at it. Refreshed by every call that lists the locker.
       held?: {msat: number; notes: number; at: number}
+      // The same reading, note by note (heartwood-esp32#86). Written in the
+      // same breath as `held`, so `held.at` dates both, and REPLACED rather
+      // than merged: a device answering with fewer notes than last time has
+      // lost or spent them, and a merge would keep insisting they exist.
+      inventory?: HeartwoodInventoryNote[]
     }
   }
   mints: MintEntry[]

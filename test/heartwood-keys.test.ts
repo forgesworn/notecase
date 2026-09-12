@@ -314,6 +314,14 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     expect(kept.host).toBe(`${theMint.host}/w`)
     expect(kept.sig).toMatch(/^cs1/)
 
+    // A scan puts a note ON the device, so the inventory it leaves behind
+    // has to include it - by its index on the branch, never its ck1.
+    expect(wallet.heartwoodInventory()!.notes).toEqual([
+      {id: kept.id, amountMsat: 21_000, host: `${theMint.host}/w`, state: 'confirmed', index: 0}
+    ])
+    expect(wallet.heartwoodHeld()).toMatchObject({msat: 21_000, notes: 1})
+    expect(JSON.stringify(wallet.heartwoodInventory()!.notes)).not.toContain(kept.k1)
+
     // A second scan finds it held and keeps nothing twice.
     expect((await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})).claimed).toEqual([])
     expect(device.notes).toHaveLength(1)

@@ -1,6 +1,7 @@
 import {bytesToHex, randomBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {isCk1, isCs1} from 'lnurlcash-kit'
 import {sealWallet, unsealWallet} from './cryptobox.ts'
+import {MAX_HEARTWOOD_INVENTORY} from './types.ts'
 import type {WalletData} from './types.ts'
 
 // A portable, restore-anywhere backup. The device keystore's PIN wrapping
@@ -49,8 +50,67 @@ const isHost = (value: unknown): boolean => {
   }
 }
 
+// The device records a note's withdraw endpoint without its scheme, so a
+// locker note's host is host[:port] and a path, not the bare host a wallet
+// note carries. Round-tripped through a URL for the same reason as isHost:
+// nothing that could smuggle a query, a fragment or markup into a screen.
+const isHostPath = (value: unknown): boolean => {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 300) return false
+  try {
+    const url = new URL(`http://${value}`)
+    const canonical = `${url.host}${url.pathname === '/' ? '' : url.pathname}`
+    return canonical.toLowerCase() === value.toLowerCase()
+  } catch {
+    return false
+  }
+}
+
+// Somebody else's words, on their way to a terminal: length-capped, and no
+// control characters, which is what an ANSI escape needs to be one.
+const isPlainText = (value: unknown, max: number): boolean =>
+  typeof value === 'string' && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value)
+
 const isAmount = (value: unknown): boolean => typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+const isCount = (value: unknown): boolean => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 const isTimestamp = (value: unknown): boolean => typeof value === 'number' && Number.isFinite(value)
+
+// A linked heartwood, and what it last said it held. The inventory is the
+// only backup a locker's notes get (heartwood-esp32#86): it names what
+// existed and can spend none of it, so an older backup that predates it is
+// a wallet with no reading yet, never a wallet to refuse.
+const LOCKER_STATES = new Set(['pending', 'confirmed', 'spent'])
+// An allowlist rather than a list of things to refuse. An inventory has one
+// designed shape, and the risk here is not a field somebody thought to ban -
+// it is a note's secret arriving in a field nobody had thought about at all.
+const LOCKER_FIELDS = new Set(['id', 'amountMsat', 'host', 'state', 'label', 'index'])
+
+const isHeartwood = (value: unknown): boolean => {
+  if (!isRecord(value)) return false
+  if (typeof value.uri !== 'string' || !value.uri.startsWith('bunker://')) return false
+  for (const key of ['devicePubkey', 'clientSecretHex'] as const) {
+    if (typeof value[key] !== 'string' || !HEX64.test(value[key])) return false
+  }
+  if (!Array.isArray(value.relays) || value.relays.length > 32) return false
+  if (value.relays.some(relay => typeof relay !== 'string' || !/^wss?:\/\/[^\s]{1,500}$/.test(relay))) return false
+  if (value.held !== undefined) {
+    if (!isRecord(value.held)) return false
+    if (!isCount(value.held.msat) || !isCount(value.held.notes) || !isTimestamp(value.held.at)) return false
+  }
+  if (value.inventory !== undefined) {
+    if (!Array.isArray(value.inventory) || value.inventory.length > MAX_HEARTWOOD_INVENTORY) return false
+    for (const note of value.inventory) {
+      if (!isRecord(note)) return false
+      // The device's ids are its own handles, not a mint's 64-hex hash.
+      if (typeof note.id !== 'string' || !/^[0-9a-zA-Z_-]{1,64}$/.test(note.id)) return false
+      if (!isAmount(note.amountMsat) || !isHostPath(note.host)) return false
+      if (typeof note.state !== 'string' || !LOCKER_STATES.has(note.state)) return false
+      if (note.label !== undefined && !isPlainText(note.label, 200)) return false
+      if (note.index !== undefined && !isCount(note.index)) return false
+      if (Object.keys(note).some(field => !LOCKER_FIELDS.has(field))) return false
+    }
+  }
+  return true
+}
 
 const isWalletData = (data: unknown): data is WalletData => {
   // Version 1 wallets predate the seed. They import, and are upgraded in
@@ -76,6 +136,9 @@ const isWalletData = (data: unknown): data is WalletData => {
   ) {
     return false
   }
+  // Absent in every backup taken before the locker inventory existed, and
+  // absent in any wallet that has never paired one. Both restore.
+  if (data.settings.heartwood !== undefined && !isHeartwood(data.settings.heartwood)) return false
 
   if (!isRecord(data.pubkeyPins)) return false
   if (Object.values(data.pubkeyPins).some(pin => typeof pin !== 'string' || !HEX.test(pin))) return false

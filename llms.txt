@@ -132,6 +132,15 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     sends no wrap, so address scan (also available in the web settings) finds payments
   heartwoodNameToKeys(t, name, {toKeys?, mintHost?}), heartwoodScanAddress(t, host?, {gap?}),
   collectFromHeartwood(t, onProgress?, {ids?}), recoverHeartwoodNotes(input, {expectedPubkey, mintHost?, passphrase?, gap?})
+  heartwoodNotes(t), heartwoodNotesOrLastSeen(t) -> {live:true, notes} | {live:false, notes, at, reason},
+  heartwoodHeld(), heartwoodInventory() -> {notes, at}
+  - the locker is a till, not a vault: a note IS its secret, so the device keeps its
+    notes out of every backup (a restored copy on a second board double-spends), and a
+    dead board's notes are gone. Every listing records the INVENTORY instead -
+    settings.heartwood.inventory, per note {id, amountMsat, host, state, label?, index?},
+    dated by settings.heartwood.held.at. Nothing spendable ever enters it; it backs up
+    and restores, and an older backup with none restores unchanged. A collected note
+    leaves it, and a shorter reading replaces the last one rather than merging
   - a heartwood derives its branch from the identity key that owns the name
     (HMAC-SHA256(key, "LNURLcash/nostr-seed") -> m/139'/1'/d1..d4), hands over the
     cx1 (heartwood_note_address); it signs Moneyer's NIP-98 itself, while the reference

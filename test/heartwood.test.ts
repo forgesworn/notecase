@@ -4,6 +4,7 @@ import {finalizeEvent, generateSecretKey, getPublicKey, matchFilter, type Event,
 import {nip44} from 'nostr-tools'
 import {bytesToHex, hexToBytes} from '@noble/hashes/utils.js'
 import {Wallet} from '../src/wallet.ts'
+import {exportBackup, importBackup} from '../src/backup.ts'
 import {HeartwoodError, NIP46_KIND, parseBunkerUri} from '../src/heartwood.ts'
 import {GIFT_WRAP_KIND, INBOX_RELAYS_KIND, identityFromSecret, inboxRelays, newIdentitySecretHex, npubOf, unwrapNote, wrapNote, type NostrTransport} from '../src/nostr.ts'
 import {freshK1, makeWallet} from './helpers.ts'
@@ -19,7 +20,34 @@ afterEach(async () => {
   mint = null
 })
 
-type Locker = {id: string; k1: string; state: string; amount_msat: number; host: string; label?: string; from?: string; sent_to?: string}
+type Locker = {
+  id: string
+  k1: string
+  state: string
+  amount_msat: number
+  host: string
+  label?: string
+  from?: string
+  sent_to?: string
+  p?: string
+  index?: number
+}
+
+// A relay nobody is on: the request goes nowhere and says so at once, which
+// is the reachability failure a test can assert without waiting out a
+// device's hold window.
+const deadRelay = (): NostrTransport => ({
+  async query() {
+    return []
+  },
+  subscribe() {
+    return {close() {}}
+  },
+  async publish(relays) {
+    return {ok: [], failed: relays}
+  },
+  close() {}
+})
 
 const fakeDevice = (relay: string) => {
   const secret = generateSecretKey()
@@ -367,6 +395,126 @@ describe('a linked heartwood', () => {
     await expect(wallet.linkHeartwood(device.transport, device.uri.replace('pairingsecret', 'nope'))).rejects.toThrow('secret mismatch')
     expect(data.settings.heartwood).toBeUndefined()
     await expect(wallet.heartwoodNotes(device.transport)).rejects.toThrow('No heartwood is linked')
+  })
+})
+
+// A bearer note IS its secret, so the device keeps its notes out of every
+// backup: a restored copy on a second board is a double-spend. What that
+// leaves unsaid is that a board which dies takes its notes with it, and its
+// owner cannot even say what was lost. The inventory is the answer
+// (heartwood-esp32#86) - ids, amounts, hosts, states, key indices, and not
+// one thing that can spend any of it.
+describe('the locker inventory', () => {
+  it('records what the device holds, note by note, and never a secret', async () => {
+    const device = fakeDevice('wss://dev.example')
+    const {wallet, data} = makeWallet()
+    await wallet.linkHeartwood(device.transport, device.uri)
+    expect(wallet.heartwoodInventory()).toBeUndefined()
+
+    const zapK1 = freshK1()
+    const keyK1 = freshK1()
+    device.notes.push({id: 'aaaa1111', k1: zapK1, state: 'confirmed', amount_msat: 9_000, host: 'm.example/w', label: 'zap', from: 'cc'.repeat(32)})
+    device.notes.push({id: 'bbbb2222', k1: keyK1, state: 'confirmed', amount_msat: 1_000, host: 'm.example/w', p: 'cp1xyz', index: 4})
+    device.notes.push({id: 'cccc3333', k1: freshK1(), state: 'spent', amount_msat: 5_000, host: 'm.example/w'})
+
+    await wallet.heartwoodNotes(device.transport)
+    const seen = wallet.heartwoodInventory()!
+    expect(seen.notes).toEqual([
+      {id: 'aaaa1111', amountMsat: 9_000, host: 'm.example/w', state: 'confirmed', label: 'zap'},
+      {id: 'bbbb2222', amountMsat: 1_000, host: 'm.example/w', state: 'confirmed', index: 4},
+      {id: 'cccc3333', amountMsat: 5_000, host: 'm.example/w', state: 'spent'}
+    ])
+    // Dated by the same reading the totals are, and the totals still work.
+    expect(seen.at).toBe(wallet.heartwoodHeld()!.at)
+    expect(wallet.heartwoodHeld()).toMatchObject({msat: 10_000, notes: 2})
+
+    // Not the cp1 either: a position on the device's branch is all that is
+    // kept, because only the device can derive what spends it.
+    const written = JSON.stringify(data.settings.heartwood!.inventory)
+    for (const secret of [zapK1, keyK1, 'cp1xyz']) expect(written).not.toContain(secret)
+  })
+
+  it('loses a collected note from the inventory, and replaces a shorter reading rather than merging', async () => {
+    mint = await createMockMint({})
+    const device = fakeDevice('wss://dev.example')
+    const {wallet} = makeWallet()
+    await wallet.linkHeartwood(device.transport, device.uri)
+
+    const k1 = freshK1()
+    mint.state.creditNote(k1, 9_000)
+    const host = `${new URL(mint.url).host}/w`
+    device.notes.push({id: 'aaaa1111', k1, state: 'confirmed', amount_msat: 9_000, host, from: 'cc'.repeat(32)})
+    device.notes.push({id: 'bbbb2222', k1: freshK1(), state: 'confirmed', amount_msat: 1_000, host})
+
+    await wallet.heartwoodNotes(device.transport)
+    expect(wallet.heartwoodInventory()!.notes.map(n => n.id)).toEqual(['aaaa1111', 'bbbb2222'])
+
+    // A collect knows exactly which ids it took, so they go without another
+    // round trip.
+    await wallet.collectFromHeartwood(device.transport)
+    expect(wallet.heartwoodInventory()!.notes.map(n => n.id)).toEqual(['bbbb2222'])
+    expect(JSON.stringify(wallet.heartwoodInventory()!.notes)).not.toContain(k1)
+
+    // A device answering with less than last time has lost or spent it. The
+    // reading is replaced outright; merging would keep insisting it is there.
+    device.notes.length = 0
+    await wallet.heartwoodNotes(device.transport)
+    expect(wallet.heartwoodInventory()!.notes).toEqual([])
+    expect(wallet.heartwoodHeld()).toMatchObject({msat: 0, notes: 0})
+  })
+
+  it('falls back to the last reading when the device cannot be reached, and says it is past', async () => {
+    const device = fakeDevice('wss://dev.example')
+    const {wallet, data} = makeWallet()
+    await wallet.linkHeartwood(device.transport, device.uri)
+    device.notes.push({id: 'aaaa1111', k1: freshK1(), state: 'confirmed', amount_msat: 9_000, host: 'm.example/w', label: 'zap'})
+
+    const fresh = await wallet.heartwoodNotesOrLastSeen(device.transport)
+    expect(fresh.live).toBe(true)
+    expect(fresh.notes.map(n => n.id)).toEqual(['aaaa1111'])
+
+    // Two hours later, with the device off its relay.
+    const takenAt = data.settings.heartwood!.held!.at - 7_200
+    data.settings.heartwood!.held!.at = takenAt
+
+    const stale = await wallet.heartwoodNotesOrLastSeen(deadRelay())
+    expect(stale.live).toBe(false)
+    if (stale.live) throw new Error('unreachable')
+    // Dated by when it was taken, not by now: whoever prints this has to be
+    // able to say how old it is.
+    expect(stale.at).toBe(takenAt)
+    expect(stale.reason).toMatch(/No relay took the request/)
+    expect(stale.notes).toEqual([
+      {id: 'aaaa1111', amountMsat: 9_000, host: 'm.example/w', state: 'confirmed', label: 'zap'}
+    ])
+    // A stale reading is never written back as if it were a live one.
+    expect(wallet.heartwoodHeld()!.at).toBe(takenAt)
+  })
+
+  it('survives a backup and restore, so a dead board is still legible', async () => {
+    const device = fakeDevice('wss://dev.example')
+    const {wallet, data} = makeWallet()
+    await wallet.linkHeartwood(device.transport, device.uri)
+    device.notes.push({id: 'aaaa1111', k1: freshK1(), state: 'confirmed', amount_msat: 9_000, host: 'm.example/w', label: 'zap'})
+    device.notes.push({id: 'bbbb2222', k1: freshK1(), state: 'confirmed', amount_msat: 1_000, host: 'm.example/w', p: 'cp1xyz', index: 4})
+    await wallet.heartwoodNotes(device.transport)
+
+    // What this wallet writes down is what its own validator takes: a
+    // reading that only round-trips by hand is no backup at all.
+    const file = await exportBackup(data, 'correct horse battery')
+    const restored = await importBackup(file, 'correct horse battery')
+    expect(restored.settings.heartwood?.inventory).toEqual(data.settings.heartwood!.inventory)
+    expect(restored.settings.heartwood?.held).toEqual(data.settings.heartwood!.held)
+  })
+
+  it('reports the failure plainly when there is no reading to fall back on', async () => {
+    const device = fakeDevice('wss://dev.example')
+    const {wallet} = makeWallet()
+    await wallet.linkHeartwood(device.transport, device.uri)
+    await expect(wallet.heartwoodNotesOrLastSeen(deadRelay())).rejects.toThrow(HeartwoodError)
+    // and with nothing linked at all, the usage error still comes through
+    const {wallet: bare} = makeWallet()
+    await expect(bare.heartwoodNotesOrLastSeen(deadRelay())).rejects.toThrow('No heartwood is linked')
   })
 })
 
