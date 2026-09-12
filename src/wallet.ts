@@ -61,7 +61,8 @@ import {
 import {bytesToHex, hexToBytes, randomBytes} from '@noble/hashes/utils.js'
 import {tryDecodeBolt11} from 'farrier-kit/bolt11'
 import {verifyPreimage} from 'farrier-kit/preimage'
-import type {MeltRecord, MintEntry, MintInfo, NoteOrigin, NoteRecord, PaymentRequestRecord, PendingMint, WalletData} from './types.ts'
+import {MAX_HEARTWOOD_INVENTORY} from './types.ts'
+import type {HeartwoodInventoryNote, MeltRecord, MintEntry, MintInfo, NoteOrigin, NoteRecord, PaymentRequestRecord, PendingMint, WalletData} from './types.ts'
 import {newConnection, type NwcConnection} from './nwcservice.ts'
 import {
   buildMintBackup,
@@ -2594,11 +2595,41 @@ export class Wallet {
     return notes
   }
 
+  // `heartwood notes`, falling back to the last reading when the device
+  // cannot be reached. Asking what is on a locker is not moving money, and a
+  // board that is asleep, off its relay or dead is exactly when the question
+  // gets asked - an owner who cannot say what was on it has lost twice. The
+  // live answer is returned unchanged whenever there is one; with no stored
+  // reading to fall back on the original failure is rethrown.
+  async heartwoodNotesOrLastSeen(
+    transport: NostrTransport
+  ): Promise<
+    | {live: true; notes: DeviceNote[]}
+    | {live: false; notes: HeartwoodInventoryNote[]; at: number; reason: string}
+  > {
+    try {
+      return {live: true, notes: await this.heartwoodNotes(transport)}
+    } catch (err) {
+      const last = this.heartwoodInventory()
+      if (!last) throw err
+      return {live: false, notes: last.notes, at: last.at, reason: (err as Error).message}
+    }
+  }
+
   // What the device held the last time this wallet reached it. Stale by
   // nature: it is a record of a past conversation, not a live reading, and
   // whoever shows it says when it was taken.
   heartwoodHeld(): {msat: number; notes: number; at: number} | undefined {
     return this.data.settings.heartwood?.held
+  }
+
+  // The same reading note by note, and when it was taken. The device's
+  // notes, never this wallet's: nothing here can spend anything, and nothing
+  // here comes back if the board is gone.
+  heartwoodInventory(): {notes: HeartwoodInventoryNote[]; at: number} | undefined {
+    const link = this.data.settings.heartwood
+    if (!link?.inventory || !link.held) return undefined
+    return {notes: link.inventory, at: link.held.at}
   }
 
   // Called with a full locker listing. `spentIds` are notes this wallet has
@@ -2608,12 +2639,25 @@ export class Wallet {
     const link = this.data.settings.heartwood
     if (!link) return
     const gone = new Set(spentIds)
-    const live = notes.filter(note => note.state === 'confirmed' && !gone.has(note.id))
+    const kept = notes.filter(note => !gone.has(note.id))
+    const live = kept.filter(note => note.state === 'confirmed')
     link.held = {
       msat: live.reduce((total, note) => total + note.amount_msat, 0),
       notes: live.length,
       at: Math.floor(Date.now() / 1000)
     }
+    // The listing replaces the last one outright. Copied field by field so
+    // that whatever else a listing carries - and an export never reaches
+    // here, but the rule has to hold whatever the firmware grows - only the
+    // unspendable part is ever written down.
+    link.inventory = kept.slice(0, MAX_HEARTWOOD_INVENTORY).map(note => ({
+      id: note.id,
+      amountMsat: note.amount_msat,
+      host: note.host,
+      state: note.state,
+      ...(note.label ? {label: note.label} : {}),
+      ...(note.p && typeof note.index === 'number' ? {index: note.index} : {})
+    }))
   }
 
   // A sender the device stores notes from without a hold. `sender` is an
@@ -2769,7 +2813,22 @@ export class Wallet {
         ...(typeof sig === 'string' ? {sig} : {})
       })
       claimed.push({id: kept.id, index: at, amountMsat: info.maxWithdrawable})
+      inventory.push({
+        id: kept.id,
+        state: 'confirmed',
+        amount_msat: info.maxWithdrawable,
+        host: noteHost,
+        label: '',
+        p: cp1,
+        index: at
+      })
     }
+    // A scan puts notes ON the device, so the reading taken before the walk
+    // is already short by exactly these. Recorded again here, and persisted:
+    // what a scan has just found is the part most worth being able to name
+    // later.
+    this.rememberHeartwoodHeld(inventory)
+    await this.persist()
     return {claimed, scanned: index}
   }
 

@@ -1222,16 +1222,40 @@ const main = async (): Promise<void> => {
           await wallet.unlinkHeartwood()
           console.log('Unlinked.')
         } else if (sub === 'notes') {
-          const notes = await wallet.heartwoodNotes(transport)
-          if (!notes.length) console.log('The device holds no notes.')
-          for (const n of notes) {
-            const who = n.from ? ` from ${npubOf(n.from).slice(0, 16)}…` : n.sent_to ? ` sent to ${npubOf(n.sent_to).slice(0, 16)}…` : ''
-            const key = n.p ? ` (its own key #${n.index})` : ''
-            console.log(`${n.id}  ${n.state.padEnd(9)} ${sats(n.amount_msat).padStart(12)}  ${n.host}${key}${who}`)
-          }
-          const live = notes.filter(n => n.state === 'confirmed')
-          if (live.length) {
-            console.log(`${sats(live.reduce((total, n) => total + n.amount_msat, 0))} on the device in ${live.length} live note(s).`)
+          const answer = await wallet.heartwoodNotesOrLastSeen(transport)
+          if (answer.live) {
+            if (!answer.notes.length) console.log('The device holds no notes.')
+            for (const n of answer.notes) {
+              const who = n.from ? ` from ${npubOf(n.from).slice(0, 16)}…` : n.sent_to ? ` sent to ${npubOf(n.sent_to).slice(0, 16)}…` : ''
+              const key = n.p ? ` (its own key #${n.index})` : ''
+              console.log(`${n.id}  ${n.state.padEnd(9)} ${sats(n.amount_msat).padStart(12)}  ${n.host}${key}${who}`)
+            }
+            const live = answer.notes.filter(n => n.state === 'confirmed')
+            if (live.length) {
+              console.log(`${sats(live.reduce((total, n) => total + n.amount_msat, 0))} on the device in ${live.length} live note(s).`)
+            }
+          } else {
+            // Not a live reading, and it must not be mistaken for one. What
+            // is printed is the inventory this wallet wrote down last time it
+            // reached the device (heartwood-esp32#86): enough to say what
+            // exists, not enough to spend any of it.
+            console.log(`The device did not answer: ${answer.reason}`)
+            console.log(`This is the last reading, taken ${seenAgo(answer.at)} - not what the device holds now.`)
+            if (!answer.notes.length) console.log('  it held no notes then.')
+            for (const n of answer.notes) {
+              const key = typeof n.index === 'number' ? ` (its own key #${n.index})` : ''
+              const label = n.label ? `  "${n.label}"` : ''
+              console.log(`${n.id}  ${n.state.padEnd(9)} ${sats(n.amountMsat).padStart(12)}  ${n.host}${key}${label}`)
+            }
+            const live = answer.notes.filter(n => n.state === 'confirmed')
+            if (live.length) {
+              console.log(
+                `${sats(live.reduce((total, n) => total + n.amountMsat, 0))} was on the device in ${live.length} live note(s), ${seenAgo(answer.at)}.`
+              )
+            }
+            console.log('These are the DEVICE\'s notes, not this wallet\'s: `heartwood collect` brings them here.')
+            console.log('A note is its own secret, so it is on that board and nowhere else. If the board is')
+            console.log('dead or wiped, this list says what was lost; nothing restores it.')
           }
         } else if (sub === 'trust' || sub === 'untrust') {
           if (!arg) throw new WalletUsageError(`heartwood ${sub} <npub|hex|nip05>`)

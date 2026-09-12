@@ -43,6 +43,7 @@ export {payWithNwc, invoiceFromNwc, nwcStatus, NwcPaymentUnprovenError, type Nwc
 export {emptyWallet} from './types.ts'
 export type {
   WalletData,
+  HeartwoodInventoryNote,
   NoteRecord,
   NoteState,
   NoteOrigin,

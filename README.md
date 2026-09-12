@@ -231,6 +231,7 @@ notecase nwc grants | nwc revoke <name> | nwc refill <name> [--budget <sats>]
 notecase nwc serve                     # answer NIP-47 for the grants above
 notecase nostr init                    # your npub + publishes your inbox relays (kind 10050)
 notecase heartwood link bunker://...   # a heartwood signer as a note locker
+notecase heartwood notes               # what it holds; the last reading, dated, if it cannot be reached
 notecase heartwood inbox               # publishes the device's inbox relays (kind 10050), one hold
 notecase heartwood trust <npub|nip05>  # the device stores notes from this sender without a hold (a mint's zap key)
 notecase heartwood pair [label]        # mints a bunker URI for another wallet, one hold; first pairing needs the cable
@@ -502,6 +503,21 @@ leave a note. `heartwood trust <npub>` names a sender (a mint's zap key)
 whose notes the device stores without a hold. The web wallet has the same
 under Settings → Hardware signer: pair by bunker URI or QR, collect, trust,
 publish.
+
+**The locker is a till, not a vault.** A bearer note IS its secret, so the
+device keeps its notes out of every backup on purpose: a restored copy on a
+second board is a double-spend, and whichever board redeems first wins. The
+price of that is plain - a board that is lost, wiped or dead takes its notes
+with it, and no seed phrase, share set or export brings them back. So collect
+promptly and keep little on it. `heartwood collect` empties it on one hold.
+
+What `notecase backup` does carry is the *inventory*: per note the device's
+id, the amount, the mint host, the state and, for a note paid to the device's
+own keys, its index on the branch. None of that can spend anything, so it
+adds no double-spend risk - but it turns a dead board from an unknown loss
+into a known one, and it is what you show a mint to say what existed.
+`heartwood notes` falls back to it, marked as a past reading and dated, when
+the device does not answer.
 
 A name whose owner is the device's npub can be paid to the device's own keys
 instead (LUD-25 Part 2). `heartwood address keys <name>` asks the device for

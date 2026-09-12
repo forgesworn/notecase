@@ -108,6 +108,81 @@ describe('backup', () => {
     expect(restored).toEqual(data)
   })
 
+  // The one backup a heartwood's notes ever get. The secrets stay on the
+  // board on purpose - a copy restored onto a second one is a double-spend -
+  // so what travels is the inventory: what existed, and nothing that spends
+  // it (heartwood-esp32#86).
+  it('round-trips a linked heartwood and the inventory of what it held', async () => {
+    const data = sample()
+    data.settings.heartwood = {
+      uri: `bunker://${'1'.repeat(64)}?relay=wss%3A%2F%2Fdev.example`,
+      devicePubkey: '1'.repeat(64),
+      relays: ['wss://dev.example'],
+      clientSecretHex: '2'.repeat(64),
+      held: {msat: 10_000, notes: 2, at: 1_757_000_000},
+      inventory: [
+        {id: 'aaaa1111', amountMsat: 9_000, host: 'mint.example/w', state: 'confirmed', label: 'zap'},
+        {id: 'bbbb2222', amountMsat: 1_000, host: 'mint.example/w', state: 'confirmed', index: 4},
+        {id: 'cccc3333', amountMsat: 5_000, host: 'mint.example/w', state: 'spent'}
+      ]
+    }
+    const file = await exportBackup(data, 'correct horse battery')
+    expect(await importBackup(file, 'correct horse battery')).toEqual(data)
+  })
+
+  it('restores an older backup, from before the inventory existed', async () => {
+    const data = sample()
+    // A wallet paired with a locker but taken before anything was written
+    // down about it, and a wallet that never paired one at all. Neither is
+    // a file to refuse.
+    data.settings.heartwood = {
+      uri: `bunker://${'1'.repeat(64)}?relay=wss%3A%2F%2Fdev.example`,
+      devicePubkey: '1'.repeat(64),
+      relays: ['wss://dev.example'],
+      clientSecretHex: '2'.repeat(64)
+    }
+    const paired = await exportBackup(data, 'correct horse battery')
+    expect(await importBackup(paired, 'correct horse battery')).toEqual(data)
+
+    delete data.settings.heartwood
+    const unpaired = await exportBackup(data, 'correct horse battery')
+    expect(await importBackup(unpaired, 'correct horse battery')).toEqual(data)
+  })
+
+  it('rejects an inventory carrying anything spendable, or anything shaped to reach a terminal', async () => {
+    const withLocker = (note: Record<string, unknown>) => {
+      const data = sample()
+      data.settings.heartwood = {
+        uri: `bunker://${'1'.repeat(64)}?relay=wss%3A%2F%2Fdev.example`,
+        devicePubkey: '1'.repeat(64),
+        relays: ['wss://dev.example'],
+        clientSecretHex: '2'.repeat(64),
+        inventory: [note as never]
+      }
+      return data
+    }
+    const good = {id: 'aaaa1111', amountMsat: 9_000, host: 'mint.example/w', state: 'confirmed'}
+    for (const bad of [
+      {...good, k1: 'd'.repeat(64)},
+      {...good, sig: 'cs1abc'},
+      {...good, secret: 'd'.repeat(64)},
+      // and a field nobody designed in, whatever it turned out to hold
+      {...good, whatever: 'd'.repeat(64)},
+      {...good, host: '<script>alert(1)</script>'},
+      {...good, label: 'zap\u001b[2Jgone'},
+      {...good, state: 'load-bearing'},
+      {...good, amountMsat: '9000'}
+    ]) {
+      const file = await exportBackup(withLocker(bad), 'correct horse battery')
+      await expect(importBackup(file, 'correct horse battery')).rejects.toThrow(
+        'The backup decrypted but does not hold a valid wallet.'
+      )
+    }
+    // and the shape it refuses is genuinely narrower than the one it takes
+    const fine = await exportBackup(withLocker(good), 'correct horse battery')
+    await expect(importBackup(fine, 'correct horse battery')).resolves.toBeTruthy()
+  })
+
   it('rejects a decrypted backup carrying hostile string fields', async () => {
     const tampered = sample()
     tampered.notes[0]!.mintHost = '<script>alert(1)</script>'
