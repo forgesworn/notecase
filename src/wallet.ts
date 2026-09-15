@@ -21,6 +21,7 @@ import {
   encodeCp1,
   encodeCx1,
   fetchNoteInfoByHash,
+  fetchNoteInfoByPubkey,
   signNoteOwnership,
   deriveCashSecret,
   cashNodeToHex,
@@ -32,6 +33,7 @@ import {
   fetchMintAddress,
   fetchPayRequest,
   paymentRequestAmountMsat,
+  signAddressProof,
   type PaymentRequest,
   hashK1,
   meltNote,
@@ -54,10 +56,9 @@ import {
   mintAddressUrl,
   verifyNoteSignature,
   withNewK1,
-  UnverifiableNoteError,
   type LnurlcashOptions,
   type MintFee
-} from 'lnurlcash-kit'
+} from './lnurlcash.js'
 import {bytesToHex, hexToBytes, randomBytes} from '@noble/hashes/utils.js'
 import {tryDecodeBolt11} from 'farrier-kit/bolt11'
 import {verifyPreimage} from 'farrier-kit/preimage'
@@ -298,6 +299,11 @@ export class Wallet {
     if (!pay.withdrawLink) {
       throw new WalletUsageError('That service takes payments but does not mint LNURLcash notes.')
     }
+    if ((pay.commentAllowed ?? 0) < 64) {
+      throw new WalletUsageError(
+        'That mint does not accept the 64-character output commitment required to keep the payment preimage from becoming the note.'
+      )
+    }
     const host = serverOf(payUrl)
     const entry: MintEntry = {
       input,
@@ -508,39 +514,59 @@ export class Wallet {
     return {url, body: body ?? {}}
   }
 
-  // The reference lnurl-mint deliberately leaves username ownership and
-  // registration service-specific. Its implementation offers a free,
-  // first-come GET /register?username=&cx1= route instead of moneyer's
-  // authenticated POST /names. Probe with the reference mint's reserved
-  // `_` identity and an invalid branch: an enabled route gives its specific
-  // "Invalid or reserved username" LNURL error before it can write, while a
-  // disabled or absent route says "Not found". This is a simple cross-origin
-  // GET, so the browser does not need a preflight.
-  private async referenceRegistrationUrl(discoveryUrl: string): Promise<string | null> {
-    const url = new URL('/register', discoveryUrl).toString()
+  // The reference lnurl-mint manages addresses at POST/DELETE /p/{username}.
+  // There is no advertised capability bit, so probe its reserved `_` identity
+  // with values which can never reach storage: an enabled route rejects the
+  // name before decoding the branch or proof, while a disabled/absent route
+  // says Not found. v0.8.1 permits this cross-origin POST without a preflight.
+  private async referenceRegistrationServer(discoveryUrl: string): Promise<string | null> {
     try {
       const fetchImpl = this.opts.fetch ?? fetch
-      const probe = new URL(url)
-      probe.searchParams.set('username', '_')
+      const probe = new URL('/p/_', discoveryUrl)
       probe.searchParams.set('cx1', '_')
+      probe.searchParams.set('sig', '00'.repeat(65))
       const response = await fetchImpl(probe, {
+        method: 'POST',
         headers: {accept: 'application/json'},
         signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
       })
       const answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; detail?: string}
       const reason = answer.reason ?? answer.detail ?? ''
-      return answer.status === 'ERROR' && reason.includes('Invalid or reserved username') ? url : null
+      return answer.status === 'ERROR' && reason.includes('Invalid or reserved username') ? discoveryUrl : null
     } catch {
       return null
     }
   }
 
-  private async registerReferenceName(url: string, name: string, cx1: string): Promise<void> {
-    const registration = new URL(url)
-    registration.searchParams.set('username', name)
+  private async registerReferenceName(
+    server: string,
+    name: string,
+    cx1: string,
+    indexZeroSecretKey: Uint8Array,
+    npub?: string
+  ): Promise<void> {
+    const registration = new URL(`/p/${encodeURIComponent(name)}`, server)
     registration.searchParams.set('cx1', cx1)
+    registration.searchParams.set('sig', bytesToHex(signAddressProof(indexZeroSecretKey, 'register', name)))
+    if (npub) registration.searchParams.set('npub', npub)
     const fetchImpl = this.opts.fetch ?? fetch
     const response = await fetchImpl(registration, {
+      method: 'POST',
+      headers: {accept: 'application/json'},
+      signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
+    })
+    const answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; detail?: string}
+    if (!response.ok || answer.status !== 'OK') {
+      throw new WalletUsageError(answer.reason ?? answer.detail ?? `${registration.host} refused (${response.status}).`)
+    }
+  }
+
+  private async unregisterReferenceName(server: string, name: string, indexZeroSecretKey: Uint8Array): Promise<void> {
+    const registration = new URL(`/p/${encodeURIComponent(name)}`, server)
+    registration.searchParams.set('sig', bytesToHex(signAddressProof(indexZeroSecretKey, 'unregister', name)))
+    const fetchImpl = this.opts.fetch ?? fetch
+    const response = await fetchImpl(registration, {
+      method: 'DELETE',
       headers: {accept: 'application/json'},
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
     })
@@ -686,6 +712,28 @@ export class Wallet {
     if (!node) return null
     const {pubkeyXOnly, chainCode} = cashNodeToCx1(node)
     return encodeCx1(pubkeyXOnly, chainCode)
+  }
+
+  private addressRegistration(host: string): {cx1: string; indexZeroSecretKey: Uint8Array} | null {
+    return this.addressRegistrations(host)[0] ?? null
+  }
+
+  private addressRegistrations(host: string): Array<{cx1: string; indexZeroSecretKey: Uint8Array}> {
+    return this.addressNodes(host).map(node => {
+      const {pubkeyXOnly, chainCode} = cashNodeToCx1(node)
+      return {
+        cx1: encodeCx1(pubkeyXOnly, chainCode),
+        indexZeroSecretKey: deriveNoteSecretKey(node.privateKey, node.chainCode, 0)
+      }
+    })
+  }
+
+  private addressProofRegistration(host: string, address: string): {cx1: string; indexZeroSecretKey: Uint8Array} | null {
+    const registrations = this.addressRegistrations(host)
+    if (this.data.settings.lightningAddress !== address || !this.data.settings.lightningAddressCx1) {
+      return registrations[0] ?? null
+    }
+    return registrations.find(registration => registration.cx1 === this.data.settings.lightningAddressCx1) ?? null
   }
 
   // The ck1 note for index `index` on a branch, and the cp1 it sits at.
@@ -1258,50 +1306,25 @@ export class Wallet {
     const k1s = inputs.map(note => note.k1)
     try {
       let signatures: Array<string | undefined>
-      // LUD-25 Part 2 has a mint certify every cp1 output a mutation mints,
-      // and lnurlcash-kit raises UnverifiableNoteError when one comes back
-      // uncertified (and for a plain hash output too, if a caller turns
-      // requireSignatures on). That error means the mutation LANDED - `status` was OK - so the outputs
-      // exist at the hashes this wallet just disclosed and the staged
-      // secrets are the only copy of them. It is a success with no
-      // signatures, never a failure: falling through to the unwind below
-      // would delete the only key to real money and leave the burned inputs
-      // on the books as live.
-      //
-      // A mint with no funding source legitimately issues unsigned notes,
-      // which is why this wallet accepts them at all - see receive().
-      const landedUnsigned = (err: unknown): Array<string | undefined> => {
-        if (!(err instanceof UnverifiableNoteError)) throw err
-        return plan.kind === 'split' ? [undefined, undefined] : [undefined]
-      }
+      // The adapter returns optional raw signatures for legacy outputs so a
+      // reference mint in no-signer mode does not make us discard a mutation
+      // that has already landed. A cp1 output still requires its cs1.
       if (plan.kind === 'split') {
-        try {
-          const result = await splitNoteWithHash(
-            template.callback,
-            k1s,
-            plan.amountMsat,
-            hashK1(staged[0]!.k1),
-            hashK1(staged[1]!.k1),
-            this.opts
-          )
-          signatures = [result.signature, result.changeSignature]
-        } catch (err) {
-          signatures = landedUnsigned(err)
-        }
+        const result = await splitNoteWithHash(
+          template.callback,
+          k1s,
+          plan.amountMsat,
+          hashK1(staged[0]!.k1),
+          hashK1(staged[1]!.k1),
+          this.opts
+        )
+        signatures = [result.signature, result.changeSignature]
       } else if (plan.kind === 'merge') {
-        try {
-          const result = await mergeNotesWithHash(template.callback, k1s, hashK1(staged[0]!.k1), this.opts)
-          signatures = [result.signature]
-        } catch (err) {
-          signatures = landedUnsigned(err)
-        }
+        const result = await mergeNotesWithHash(template.callback, k1s, hashK1(staged[0]!.k1), this.opts)
+        signatures = [result.signature]
       } else {
-        try {
-          const result = await rotateNoteWithHash(template.callback, k1s[0]!, hashK1(staged[0]!.k1), this.opts)
-          signatures = [result.signature]
-        } catch (err) {
-          signatures = landedUnsigned(err)
-        }
+        const result = await rotateNoteWithHash(template.callback, k1s[0]!, hashK1(staged[0]!.k1), this.opts)
+        signatures = [result.signature]
       }
       for (const input of inputs) this.touch(input, 'spent')
       staged.forEach((note, index) => {
@@ -2288,7 +2311,7 @@ export class Wallet {
     const price = discovery?.body.namePriceMsat
     if (typeof price === 'number' && Number.isSafeInteger(price) && price >= 0) return price
     if (!discovery) return null
-    return (await this.referenceRegistrationUrl(discovery.url)) ? 0 : null
+    return (await this.referenceRegistrationServer(discovery.url)) ? 0 : null
   }
 
   // Claims `name@host` at a mint. The mint takes a note of its own as
@@ -2312,16 +2335,25 @@ export class Wallet {
     const price = discovery.body.namePriceMsat
     const identity = await this.ensureNostrIdentity()
 
-    // lnurl-mint's reference route is free and takes only the watch-only
-    // branch. It owns no spend key and receives no note as a registration
-    // fee. Keep this path separate from moneyer's authenticated, optionally
-    // paid name claim below so neither service's ownership model is blurred.
+    // lnurl-mint's reference route is free and takes the watch-only branch,
+    // its index-0 ownership proof and (when available) this wallet's npub.
+    // Keep this separate from moneyer's authenticated, optionally paid name
+    // claim below so neither service's ownership model is blurred.
     if (typeof price !== 'number' || !Number.isSafeInteger(price) || price < 0) {
-      const url = await this.referenceRegistrationUrl(discovery.url)
-      const cx1 = this.addressCx1(entry.host)
-      if (!url || !cx1) throw new WalletUsageError(`${entry.host} is not handing out lightning addresses.`)
-      await this.registerReferenceName(url, name, cx1)
-      this.data.settings.lightningAddress = `${name}@${entry.host}`
+      const server = await this.referenceRegistrationServer(discovery.url)
+      const registration = this.addressRegistration(entry.host)
+      const address = `${name}@${entry.host}`
+      const proof = this.addressProofRegistration(entry.host, address)
+      if (!server || !registration || !proof) throw new WalletUsageError(`${entry.host} is not handing out lightning addresses.`)
+      await this.registerReferenceName(
+        server,
+        name,
+        registration.cx1,
+        proof.indexZeroSecretKey,
+        identity.npub
+      )
+      this.data.settings.lightningAddress = address
+      this.data.settings.lightningAddressCx1 = registration.cx1
       await this.persist()
       return {address: this.data.settings.lightningAddress, paidMsat: 0, toKeys: true}
     }
@@ -2388,6 +2420,7 @@ export class Wallet {
       }
     }
     this.data.settings.lightningAddress = `${name}@${entry.host}`
+    delete this.data.settings.lightningAddressCx1
     await this.persist()
     return {address: this.data.settings.lightningAddress, paidMsat, toKeys: typeof answer.cx1 === 'string'}
   }
@@ -2426,20 +2459,30 @@ export class Wallet {
     const discovery = await this.discoveryDocument(entry.host)
     if (!discovery) throw new WalletUsageError(`${entry.host} does not publish where to manage names.`)
 
-    // A fresh reference-mint name can be pointed straight at this wallet's
-    // branch. That service does not bind names to Nostr keys and cannot move
-    // or clear an existing registration, so only its to-keys direction is
-    // available here. Moneyer's signed ownership path remains below.
-    if (toKeys) {
-      const referenceUrl = await this.referenceRegistrationUrl(discovery.url)
-      if (referenceUrl && cx1) {
-        await this.registerReferenceName(referenceUrl, name, cx1)
-        if (!this.data.settings.lightningAddress) {
-          this.data.settings.lightningAddress = address
-          await this.persist()
-        }
+    // The reference mint can register or replace the branch using the current
+    // branch's index-0 proof. It has no "custodial" mode: DELETE releases the
+    // address entirely, which is exposed separately by unregisterName.
+    const referenceServer = await this.referenceRegistrationServer(discovery.url)
+    if (referenceServer) {
+      if (!toKeys) {
+        throw new WalletUsageError('A reference-mint address cannot be switched to custodial payout; unregister it instead.')
+      }
+      const registration = this.addressRegistration(entry.host)
+      const proof = this.addressProofRegistration(entry.host, address)
+      if (registration && proof) {
+        await this.registerReferenceName(
+          referenceServer,
+          name,
+          registration.cx1,
+          proof.indexZeroSecretKey,
+          identity.npub
+        )
+        this.data.settings.lightningAddress = address
+        this.data.settings.lightningAddressCx1 = registration.cx1
+        await this.persist()
         return {address, toKeys: true}
       }
+      throw new WalletUsageError('This wallet no longer has the branch key currently registered for that address.')
     }
     const url = new URL('/names', discovery.url).toString()
     const body = JSON.stringify({name, cx1})
@@ -2458,9 +2501,47 @@ export class Wallet {
     // The mint just confirmed this key owns the name.
     if (!this.data.settings.lightningAddress) {
       this.data.settings.lightningAddress = address
+      delete this.data.settings.lightningAddressCx1
       await this.persist()
     }
     return {address, toKeys: typeof answer.cx1 === 'string'}
+  }
+
+  // Releases a reference-mint address. This is deliberately not the same as
+  // moneyer's "custodial" payout mode: DELETE /p/{username} makes the name
+  // unclaimed, and the index-0 branch proof prevents anybody else releasing
+  // it. A transport failure is surfaced without retrying because the delete
+  // may already have landed.
+  async unregisterName(options: {name?: string; mintHost?: string} = {}): Promise<{address: string}> {
+    let name: string
+    let entry: ReturnType<typeof this.mintEntry>
+    if (options.name !== undefined) {
+      name = options.name.trim().toLowerCase()
+      if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(name)) {
+        throw new WalletUsageError(`${options.name} is not a name a mint hands out.`)
+      }
+      entry = this.mintEntry(options.mintHost)
+    } else {
+      const recorded = this.lightningAddress()
+      if (!recorded) throw new WalletUsageError('This wallet has no lightning address recorded.')
+      const at = recorded.lastIndexOf('@')
+      name = recorded.slice(0, at)
+      entry = this.mintEntry(options.mintHost ?? recorded.slice(at + 1))
+    }
+    const address = `${name}@${entry.host}`
+    await this.ensureNostrIdentity()
+    const registration = this.addressProofRegistration(entry.host, address)
+    if (!registration) throw new WalletUsageError('This wallet has no key able to prove ownership of that address.')
+    const discovery = await this.discoveryDocument(entry.host)
+    const server = discovery ? await this.referenceRegistrationServer(discovery.url) : null
+    if (!server) throw new WalletUsageError(`${entry.host} does not expose reference address management.`)
+    await this.unregisterReferenceName(server, name, registration.indexZeroSecretKey)
+    if (this.data.settings.lightningAddress === address) {
+      delete this.data.settings.lightningAddress
+      delete this.data.settings.lightningAddressCx1
+      await this.persist()
+    }
+    return {address}
   }
 
   // Walks a mint's address branch and takes what was paid to this wallet's
@@ -2509,7 +2590,7 @@ export class Wallet {
       index += 1
       let info: Awaited<ReturnType<typeof fetchNoteInfoByHash>>
       try {
-        info = await fetchNoteInfoByHash(baseUrl, cp1, this.opts)
+        info = await fetchNoteInfoByPubkey(baseUrl, cp1, this.opts)
       } catch (err) {
         if (err instanceof NoteUnknownError) {
           quiet += 1
@@ -2693,7 +2774,7 @@ export class Wallet {
   // keys (LUD-25 Part 2), or back to notes sealed to its npub. The device
   // hands over the watch-only branch. For a mint which binds the name to
   // its npub, it signs the NIP-98 request itself, on one hold. The reference
-  // mint's free first-come route needs no signature. Only the device can
+  // reference mint needs a separate index-0 branch proof. Only the device can
   // spend what the name is paid after this: the branch comes from its
   // identity key, not from these words.
   // Payments already made are not touched.
@@ -2723,15 +2804,13 @@ export class Wallet {
     const discovery = await this.discoveryDocument(entry.host)
     if (!discovery) throw new WalletUsageError(`${entry.host} does not publish where to manage names.`)
 
-    // A fresh reference-mint name can be pointed straight at the device's
-    // branch. That service does not bind names to Nostr keys and cannot move
-    // or clear an existing registration, so only its to-keys direction is
-    // available here. Moneyer's signed ownership path remains below.
+    // A current reference mint requires a proof from the branch's index-0
+    // key even for a fresh registration. Heartwood exposes the branch but not
+    // that proof operation yet, so do not pretend its cx1 alone can register.
     if (toKeys) {
-      const referenceUrl = await this.referenceRegistrationUrl(discovery.url)
-      if (referenceUrl && cx1) {
-        await this.registerReferenceName(referenceUrl, wanted, cx1)
-        return {address: `${wanted}@${entry.host}`, toKeys: true}
+      const referenceServer = await this.referenceRegistrationServer(discovery.url)
+      if (referenceServer && cx1) {
+        throw new WalletUsageError('Heartwood cannot yet sign the index-0 proof required to register this reference-mint address.')
       }
     }
     const url = new URL('/names', discovery.url).toString()
@@ -2790,7 +2869,7 @@ export class Wallet {
       const cp1 = encodeCp1(deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, at))
       let info: Awaited<ReturnType<typeof fetchNoteInfoByHash>>
       try {
-        info = await fetchNoteInfoByHash(baseUrl, cp1, this.opts)
+        info = await fetchNoteInfoByPubkey(baseUrl, cp1, this.opts)
       } catch (err) {
         if (err instanceof NoteUnknownError) {
           quiet += 1

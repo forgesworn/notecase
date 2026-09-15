@@ -1,7 +1,7 @@
 // notecase - a case for Lightning bearer notes (LNURLcash, LUD-25).
 //
 // A second, independent wallet implementation: not a fork of the reference
-// wallet, built instead on lnurlcash-kit for the protocol, farrier-kit for
+// wallet, built instead on @lnurlcash/kit for the protocol, farrier-kit for
 // invoice verification, nwc-kit for the Lightning arm, keystore-kit for
 // key-at-rest and shamir-words for backup shares.
 //

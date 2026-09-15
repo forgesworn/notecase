@@ -17,7 +17,7 @@ import {
   wrapNote,
   type NostrTransport
 } from '../src/nostr.ts'
-import {noteK1, resolveNoteInput} from 'lnurlcash-kit'
+import {noteK1, resolveNoteInput} from '../src/lnurlcash.js'
 import {freshK1, makeWallet} from './helpers.ts'
 
 // Two wallets and a relay that is a list. The mint is the conformance

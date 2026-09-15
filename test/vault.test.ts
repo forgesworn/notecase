@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
-import {buildNoteUrl, fetchNoteInfo, hashK1} from 'lnurlcash-kit'
+import {buildNoteUrl, fetchNoteInfo, hashK1} from '../src/lnurlcash.js'
 import {bytesToHex, hexToBytes, randomBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {ed25519} from '@noble/curves/ed25519.js'
 import {
@@ -16,7 +16,7 @@ import {
   type VaultTransport
 } from '../src/vault.ts'
 import {freshK1, makeWallet} from './helpers.ts'
-import {cashNodeToHex, deriveCashDomainNode, deriveCashRoot} from 'lnurlcash-kit'
+import {cashNodeToHex, deriveCashDomainNode, deriveCashRoot} from '../src/lnurlcash.js'
 import {seedFromMnemonic} from '../src/store.ts'
 import {Wallet} from '../src/wallet.ts'
 import {emptyWallet} from '../src/types.ts'

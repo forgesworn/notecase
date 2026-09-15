@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
-import {mintFeeBand, type LnurlcashOptions} from 'lnurlcash-kit'
+import {mintFeeBand, type LnurlcashOptions} from '../src/lnurlcash.js'
 import {makeWallet} from './helpers.ts'
 
 // What a mint says about itself.

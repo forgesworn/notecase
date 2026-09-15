@@ -1,4 +1,4 @@
-import {buildNoteUrl, rotateNoteWithHash} from 'lnurlcash-kit'
+import {buildNoteUrl, rotateNoteWithHash} from './lnurlcash.js'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {ed25519} from '@noble/curves/ed25519.js'
 import type {Wallet} from './wallet.ts'

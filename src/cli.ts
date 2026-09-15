@@ -4,7 +4,7 @@ import {createInterface} from 'node:readline/promises'
 import {Writable} from 'node:stream'
 import {utf8ToBytes} from '@noble/hashes/utils.js'
 import {splitSecret, shareToWords, wordsToShare, reconstructSecret} from '@forgesworn/shamir-words'
-import {NoteSpentError, NoteUnknownError, toBech32Lnurl} from 'lnurlcash-kit'
+import {NoteSpentError, NoteUnknownError, toBech32Lnurl} from './lnurlcash.js'
 import {initWallet, openWallet, BadMnemonicError, NoWalletError, WrongPinError, seedFromMnemonic, type WalletStore} from './store.ts'
 import {
   Wallet,
@@ -44,7 +44,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase prepare [--apply] [--mint <host>]
   notecase send <sats> [--mint <host>] [--offline] [--overpay] [--notes <id,id>] [--strip-sig]
   notecase send <sats> --to <npub|nip05> [--notes <id,id>]
-  notecase address | address claim <name> [--mint <host>] | address keys [<name>] | address custodial [<name>] | address scan [--mint <host>]
+  notecase address | address claim <name> [--mint <host>] | address unregister [<name>] [--mint <host>] | address keys [<name>] | address custodial [<name>] | address scan [--mint <host>]
   notecase inbox
   notecase request <sats> [--memo <text>] [--wait <seconds>] [--mint <host>]
   notecase requests [--all]
@@ -1102,6 +1102,14 @@ const main = async (): Promise<void> => {
             ? `${moved.address} now pays to your own keys. Payments already made are unchanged.`
             : `${moved.address} now pays as notes sealed to your npub.`
         )
+        return
+      }
+      if (sub === 'unregister') {
+        const removed = await wallet.unregisterName({
+          ...(wanted ? {name: wanted} : {}),
+          ...(values.mint ? {mintHost: values.mint} : {})
+        })
+        console.log(`${removed.address} is unregistered and can now be claimed again.`)
         return
       }
       if (sub === 'scan') {

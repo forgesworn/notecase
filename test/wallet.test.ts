@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
-import {AmbiguousMintError, PendingNoteError, ProtocolError, ServiceRejectedError, hashK1} from 'lnurlcash-kit'
+import {AmbiguousMintError, PendingNoteError, ProtocolError, ServiceRejectedError, hashK1} from '../src/lnurlcash.js'
 import {fakeBolt11} from '@forgesworn/moneyer'
 import {BadSignatureError, InsufficientFundsError, Wallet} from '../src/wallet.ts'
 import type {PendingMint, WalletData} from '../src/types.ts'
@@ -55,7 +55,7 @@ describe('receiving', () => {
   })
 
   it('stores nothing when the mint echoes back a different k1', async () => {
-    const theMint = await start({echoWrongK1: true})
+    const theMint = await start({hashLookup: 'echoesK1'})
     const {wallet, data} = makeWallet()
     const note = fund(theMint, 21_000)
     await expect(wallet.receive(note.url)).rejects.toThrow(ProtocolError)
@@ -100,18 +100,18 @@ describe('sending', () => {
 })
 
 describe('the crash window', () => {
-  // LUD-25 now requires a mint to answer a byte-identical retried mutation
-  // with the success it already gave, and lnurlcash-kit re-sends one whose
-  // answer was lost. So against a conforming mint the dropped connection
-  // below is simply invisible: the receive completes, and the crash-window
-  // machinery never has to run.
-  it('completes a dropped mutation by asking the mint again', async () => {
+  // The reference kit does not automatically replay an ambiguous mutation.
+  // Notecase keeps the staged output and reconciles it once connectivity
+  // returns, without risking a second state change.
+  it('reconciles a dropped mutation without discarding its output', async () => {
     const theMint = await start({dropAfterMutation: true})
-    const {wallet} = makeWallet()
+    const {wallet, data} = makeWallet()
     const note = fund(theMint, 21_000)
 
-    const result = await wallet.receive(note.url)
-    expect(result.note.amountMsat).toBe(21_000)
+    await expect(wallet.receive(note.url)).rejects.toThrow(AmbiguousMintError)
+    expect(data.notes.some(record => record.state === 'ambiguous')).toBe(true)
+    theMint.state.opts.dropAfterMutation = false
+    await wallet.reconcile()
     expect(wallet.balanceMsat()).toBe(21_000)
   })
 
@@ -571,7 +571,7 @@ describe('mint claims', () => {
     let down = true
     const fetchImpl: typeof fetch = (input, init) => {
       const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
-      if (down && url.pathname === '/w' && url.searchParams.has('k1')) {
+      if (down && url.pathname === '/w' && ['k1', 'h', 'p'].some(field => url.searchParams.has(field))) {
         return Promise.reject(new Error('connection reset'))
       }
       return fetch(input, init)
@@ -770,7 +770,11 @@ describe('checking notes against their mints', () => {
     let held: string | null = null
     const fetchImpl: typeof globalThis.fetch = async (input, init) => {
       const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
-      if (held && url.pathname === '/w' && url.searchParams.get('k1') === held) {
+      if (
+        held &&
+        url.pathname === '/w' &&
+        (url.searchParams.get('k1') === held || url.searchParams.get('h') === hashK1(held))
+      ) {
         return new Response(JSON.stringify({status: 'ERROR', reason: 'pending'}), {
           headers: {'content-type': 'application/json'}
         })
@@ -845,7 +849,7 @@ describe('a note whose signature does not verify', () => {
   })
 
   // A mint with no funding source publishes no mintPubkey at all - the
-  // reference mint does exactly that. lnurlcash-kit refuses such a response
+  // reference mint does exactly that. @lnurlcash/kit refuses such a response
   // by default, which would make those mints unusable here; this wallet does
   // its own verification instead, so it keeps accepting them.
   it('receives from a mint that publishes no signing key at all', async () => {

@@ -1,5 +1,5 @@
 import {bytesToHex, randomBytes} from '@noble/hashes/utils.js'
-import type {LnurlcashOptions} from 'lnurlcash-kit'
+import type {LnurlcashOptions} from '../src/lnurlcash.js'
 import {Wallet} from '../src/wallet.ts'
 import {emptyWallet, type WalletData} from '../src/types.ts'
 

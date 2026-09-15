@@ -1,5 +1,5 @@
 import {bytesToHex, randomBytes, utf8ToBytes} from '@noble/hashes/utils.js'
-import {isCk1, isCs1} from 'lnurlcash-kit'
+import {isAnyCs1, isCk1} from './lnurlcash.js'
 import {sealWallet, unsealWallet} from './cryptobox.ts'
 import {MAX_HEARTWOOD_INVENTORY} from './types.ts'
 import type {WalletData} from './types.ts'
@@ -147,7 +147,8 @@ const isWalletData = (data: unknown): data is WalletData => {
   for (const note of data.notes) {
     if (!isRecord(note)) return false
     if (typeof note.id !== 'string' || !HEX64.test(note.id)) return false
-    // A Part 2 note's k1 is a ck1 and its signature a cs1.
+    // A Part 2 note's k1 is a ck1 and its certificate is either the original
+    // cs1 form or the current amount-bearing cs1-family encoding.
     if (typeof note.k1 !== 'string' || !(HEX64.test(note.k1) || isCk1(note.k1))) return false
     if (!isAmount(note.amountMsat)) return false
     if (!isHttpUrl(note.baseUrl)) return false
@@ -160,7 +161,7 @@ const isWalletData = (data: unknown): data is WalletData => {
     if (typeof note.origin !== 'string' || !NOTE_ORIGINS.has(note.origin)) return false
     if (
       note.signature !== undefined &&
-      (typeof note.signature !== 'string' || !(HEX.test(note.signature) || isCs1(note.signature)))
+      (typeof note.signature !== 'string' || !(HEX.test(note.signature) || isAnyCs1(note.signature)))
     ) {
       return false
     }

@@ -32,7 +32,7 @@ import {
   resolveNoteInput,
   toBech32Lnurl,
   verifyNoteSignature
-} from 'lnurlcash-kit'
+} from '../../src/lnurlcash.js'
 import {
   Wallet,
   BadSignatureError,

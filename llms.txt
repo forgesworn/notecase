@@ -5,7 +5,7 @@ and melt Lightning bearer notes. CLI plus a reusable engine. ESM-only. MIT.
 
 Install: not yet on npm - build from source (see README)
 Companion mint: @forgesworn/moneyer
-Protocol client it builds on: lnurlcash-kit
+Protocol client it builds on: @lnurlcash/kit 0.14
 Draft spec: https://github.com/lnurl/luds/pull/301
 
 ## The rules the engine enforces (and any wallet MUST)
@@ -123,13 +123,15 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   - noteIds offline is the hand-over itself, not a pool: short pays nothing,
     over needs acceptOverpay. sendToNostr(t, msat, to, host?, {noteIds?, memo?})
   namePriceMsat(host?), registerName({name, mintHost?}) -> {address, paidMsat, toKeys},
-  lightningAddress(), payNameToKeys(toKeys?, {name?, mintHost?}), addressCx1(host), scanAddress(host?, {gap?})
+  lightningAddress(), payNameToKeys(toKeys?, {name?, mintHost?}), unregisterName({name?, mintHost?}), addressCx1(host), scanAddress(host?, {gap?})
   - with a seed, registerName sends a cx1 (m/139'/1'/d1..d4, lnurl-wallet's path); a
     moneyer >=0.13 then pays the name to the wallet's keys, and the inbox opens the
-    index-only wrap (/w?p=<cp1>&amount=&sig=<cs1>&i=) by deriving the key and rotating
-  - the reference lnurl-mint is detected with a non-mutating reserved-name probe, then takes
-    a free first-come GET /register?username=&cx1=; it proves no Nostr ownership and
-    sends no wrap, so address scan (also available in the web settings) finds payments
+    index-only wrap (/w?p=<cp1>&sig=<amount-bearing-cs1>&i=) by deriving the key and rotating
+  - the reference lnurl-mint is detected with a reserved-name probe, then takes signed
+    POST/DELETE /p/{username} requests. The signature proves control of the branch's
+    index-0 key; an update is signed by the branch currently recorded, then the new
+    public cx1 becomes current locally. An optional npub also makes the name NIP-05. It sends no wrap, so
+    address scan (also available in the web settings) finds payments
   heartwoodNameToKeys(t, name, {toKeys?, mintHost?}), heartwoodScanAddress(t, host?, {gap?}),
   collectFromHeartwood(t, onProgress?, {ids?}), recoverHeartwoodNotes(input, {expectedPubkey, mintHost?, passphrase?, gap?})
   heartwoodNotes(t), heartwoodNotesOrLastSeen(t) -> {live:true, notes} | {live:false, notes, at, reason},
@@ -143,9 +145,10 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     leaves it, and a shorter reading replaces the last one rather than merging
   - a heartwood derives its branch from the identity key that owns the name
     (HMAC-SHA256(key, "LNURLcash/nostr-seed") -> m/139'/1'/d1..d4), hands over the
-    cx1 (heartwood_note_address); it signs Moneyer's NIP-98 itself, while the reference
-    mint's free first-come route asks for no signature. Only the device can spend what
-    arrives. A scan has the device claim a key (heartwood_note_claim)
+    cx1 (heartwood_note_address); it signs Moneyer's NIP-98 itself. Current reference
+    registration also needs an index-0 branch proof, which Heartwood does not yet expose,
+    so Notecase refuses that path instead of registering from cx1 alone. Only the device
+    can spend what arrives. A scan has the device claim a key (heartwood_note_claim)
   - with no recovery words the wallet's own branch comes from its Nostr key the same way
   identityCandidates(input, passphrase?) / identitySecretFor(input, npubHex) (src/identitysecret.ts):
     a heartwood master's secret from an nsec (bunker or tree-nsec) or BIP-39 phrase

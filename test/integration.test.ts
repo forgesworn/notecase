@@ -8,7 +8,7 @@ import {
   type MoneyerConfig
 } from '@forgesworn/moneyer'
 import {bolt11PaymentHash} from 'farrier-kit/bolt11'
-import {fetchInvoiceVerification} from 'lnurlcash-kit'
+import {fetchInvoiceVerification} from '../src/lnurlcash.js'
 import {bytesToHex, randomBytes} from '@noble/hashes/utils.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {hexToBytes} from '@noble/hashes/utils.js'

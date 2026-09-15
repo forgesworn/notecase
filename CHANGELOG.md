@@ -1,6 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.21.0 - 2026-09-15
+
+- Move the protocol boundary from the archived unscoped package to
+  `@lnurlcash/kit` 0.14. Notecase-owned recovery, payment-request, fee, key
+  derivation and per-wallet transport policy remain local rather than being
+  dropped or pushed into the reference wallet package.
+- Accept amount-bearing `cs1` certificates throughout device storage and
+  encrypted backup validation. Legacy raw mutation signatures remain valid;
+  a reference mint running without a signer is retained and reconciled rather
+  than losing the newly disclosed output.
+- Recovery uses secret-free hash lookup first. Raw-`k1` fallback is a separate
+  path used only after the holder explicitly allows secret disclosure.
+- Replace the obsolete proof-free `/register` compatibility path with the
+  reference mint's signed `POST/DELETE /p/{username}` flow. Software wallets
+  prove control with the branch's index-0 key and may publish their npub for
+  NIP-05; Heartwood registration is refused until the device can make that
+  proof, rather than treating a public `cx1` as ownership.
+- Remember the public branch currently registered so a branch migration is
+  signed by the old index-0 key, as the reference mint requires, before the
+  replacement branch becomes current.
 
 - A linked heartwood's notes are now written down, note by note, every time
   this wallet lists the locker: the device's id, the amount, the mint host,

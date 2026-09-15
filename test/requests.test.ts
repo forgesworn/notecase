@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
 import {matchFilter, type Event, type Filter} from 'nostr-tools'
-import {decodePaymentRequest, isPaymentRequest} from 'lnurlcash-kit'
+import {decodePaymentRequest, isPaymentRequest} from '../src/lnurlcash.js'
 import {WalletUsageError} from '../src/wallet.ts'
 import {buildNoteRumor, type NostrTransport} from '../src/nostr.ts'
 import {freshK1, makeWallet} from './helpers.ts'

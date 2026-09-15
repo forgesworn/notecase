@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
-import {deriveCashRoot, deriveCashSecret, deriveNoteRoot, deriveNoteSecret, hashK1} from 'lnurlcash-kit'
+import {deriveCashRoot, deriveCashSecret, deriveNoteRoot, deriveNoteSecret, hashK1} from '../src/lnurlcash.js'
 import {hexToBytes} from '@noble/hashes/utils.js'
 import {Wallet, WalletUsageError} from '../src/wallet.ts'
 import {newMnemonic, seedFromMnemonic} from '../src/store.ts'
@@ -135,12 +135,19 @@ describe('restoring from the words', () => {
     const expected = original.wallet.balanceMsat()
     expect(expected).toBe(70_000)
 
+    // Simulate an older service only after the notes exist: published kit
+    // 0.14 requires a service to advertise raw-k1 fallback during ordinary
+    // receive, while this test is specifically about restore's explicit
+    // secret-disclosure fallback.
+    theMint.state.opts.hashLookup = false
+
     // a fresh device: the same words, the same mint, nothing else
     const fresh = seeded(WORDS)
     await fresh.wallet.addMint(`mint@${hostOf(theMint)}`)
     expect(fresh.wallet.balanceMsat()).toBe(0)
 
-    // the mock mint answers no lookups by hash, so these walk by secret
+    // This deliberately old service answers no lookups by hash, so the
+    // explicitly authorised fallback walks by secret.
     const restored = await fresh.wallet.restoreFromMint(hostOf(theMint), {
       allowSecretDisclosure: true
     })
@@ -177,11 +184,10 @@ describe('restoring from the words', () => {
     const restored = await wallet.restoreFromMint(host, {allowSecretDisclosure: true})
     expect(restored.found.map(note => note.index)).toEqual([2])
     expect(wallet.balanceMsat()).toBe(7_000)
-    // 3 would be right for a walk that disclosed nothing. This one asked
-    // by secret, so it burned every index it touched looking for more:
-    // minting into any of them now would mint a note the mint's log
-    // already holds the secret for.
-    expect(restored.next).toBe(23)
+    // Secret-free lookup still distinguishes retained spent notes from
+    // unknown indices, so the next unused index is immediately after the
+    // live note rather than after the twenty-index gap.
+    expect(restored.next).toBe(3)
   })
 
   // The reason restoreFromMint walks two ladders. Notes minted before

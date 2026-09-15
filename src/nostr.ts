@@ -2,7 +2,7 @@ import {SimplePool, finalizeEvent, generateSecretKey, getEventHash, getPublicKey
 import {nip19, nip44, nip59} from 'nostr-tools'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {sha256} from '@noble/hashes/sha2.js'
-import {isCp1, resolveNoteInput, noteK1, noteDeclaredAmount} from 'lnurlcash-kit'
+import {isCp1, resolveNoteInput, noteK1, noteDeclaredAmount} from './lnurlcash.js'
 
 // Bearer notes over Nostr. A note is one string - the LUD-25 URL - so it
 // travels as the content of a NIP-59 rumor, sealed to the recipient's
@@ -226,8 +226,8 @@ const zapFromDescription = (tags: string[][]): ZapDetail | null => {
 export type NoteRumor = {noteUrl: string; amountMsat: number; host: string; key?: KeyNote}
 export type KeyNote = {cp1: string; index: number}
 
-// `/w?p=<cp1>&amount=&sig=<cs1>&i=<index>`, with no k1. Anything else is not
-// a key note.
+// `/w?p=<cp1>&sig=<amount-bearing-cs1>&i=<index>`, with no k1. Older senders
+// may also duplicate `amount`; either form is a key note.
 const keyNoteOf = (content: string): {url: string; key: KeyNote} | null => {
   let url: URL
   try {
