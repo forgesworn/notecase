@@ -19,10 +19,10 @@ dogfoods the ForgeSworn stack end to end:
 The companion mint is [`@forgesworn/moneyer`](https://github.com/forgesworn/moneyer);
 the two are integration-tested against each other, and notecase is tested
 against the adversarial mock mint from
-[lnurlcash-conformance](https://github.com/TheCryptoDonkey/lnurlcash-conformance).
+[lnurlcash-conformance](https://github.com/lnurlcash/lnurlcash-conformance).
 
 Other wallets, mints and libraries speaking the same protocol are indexed
-in [awesome-lnurlcash](https://github.com/TheCryptoDonkey/awesome-lnurlcash).
+in [awesome-lnurlcash](https://github.com/lnurlcash/awesome-lnurlcash).
 
 ## The safety design
 
