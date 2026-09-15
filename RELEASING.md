@@ -90,6 +90,6 @@ Any failure blocks the publish.
 Because the package is scoped, `publishConfig.access` is set to `public`; a
 scoped package defaults to restricted and would otherwise fail to publish.
 
-notecase depends on `lnurlcash-kit` and `keystore-kit` at published versions,
+notecase depends on `@lnurlcash/kit` and `keystore-kit` at published versions,
 and carries `@forgesworn/moneyer` as a devDependency for the end-to-end
 integration test. Release those first if a change spans repos.
