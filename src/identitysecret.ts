@@ -4,7 +4,7 @@ import {hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {mnemonicToSeedSync, validateMnemonic} from '@scure/bip39'
 import {wordlist} from '@scure/bip39/wordlists/english.js'
 import {getPublicKey, nip19} from 'nostr-tools'
-import {deriveCashChild, deriveCashMaster} from 'lnurlcash-kit'
+import {deriveCashChild, deriveCashMaster} from './lnurlcash.js'
 import {normaliseMnemonic} from './seed.ts'
 
 // The secret a heartwood master holds, from what its owner wrote down.

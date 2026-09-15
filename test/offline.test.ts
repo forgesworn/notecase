@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
-import {NoteSpentError} from 'lnurlcash-kit'
+import {NoteSpentError} from '../src/lnurlcash.js'
 import {BadSignatureError, InsufficientFundsError, WalletUsageError} from '../src/wallet.ts'
 import {freshK1, makeWallet} from './helpers.ts'
 

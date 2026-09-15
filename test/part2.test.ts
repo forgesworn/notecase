@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createFakeBackend, createMoneyer, type FakeBackend, type Moneyer} from '@forgesworn/moneyer'
-import {encodeCk1, isCk1, noteIdOf, signNoteOwnership} from 'lnurlcash-kit'
+import {encodeCk1, isCk1, noteIdOf, signNoteOwnership} from '../src/lnurlcash.js'
 import {secp256k1} from '@noble/curves/secp256k1.js'
 import {bytesToHex, hexToBytes, randomBytes} from '@noble/hashes/utils.js'
 import {exportBackup, importBackup} from '../src/backup.ts'

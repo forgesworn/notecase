@@ -37,7 +37,7 @@ const rotatedTo = (mint: Mint, newKey: string, options: {publishOldKey: boolean}
   const fetchImpl: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
     const response = await fetch(input, init)
-    if (url.pathname === '/w' && url.searchParams.has('k1')) {
+    if (url.pathname === '/w' && ['k1', 'h', 'p'].some(field => url.searchParams.has(field))) {
       const body = (await response.json()) as Record<string, unknown>
       return Response.json({...body, mintPubkey: newKey})
     }

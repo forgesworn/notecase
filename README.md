@@ -10,7 +10,7 @@ dogfoods the ForgeSworn stack end to end:
 
 | library | what notecase uses it for |
 | --- | --- |
-| [`lnurlcash-kit`](https://github.com/TheCryptoDonkey/lnurlcash-kit) | the whole LUD-25 client: resolve, info, rotate, split, merge, melt, mint, verify - and its error taxonomy, which the safety choreography hangs off |
+| [`@lnurlcash/kit`](https://github.com/lnurlcash/lnurl-wallet/tree/main/src/lib) | the reference-wallet protocol package: resolve, info, rotate, split, merge, melt, mint and verify |
 | [`farrier-kit`](https://github.com/forgesworn/farrier-kit) | BOLT-11 decoding before anything is paid, Lightning Address resolution for melt-to-address, preimage verification after settlement, DNS-pinned fetch |
 | [`@forgesworn/nwc-kit`](https://github.com/forgesworn/nwc-kit) | the optional Lightning arm: pay mint invoices and issue melt invoices through a wallet you already trust |
 | [`keystore-kit`](https://github.com/forgesworn/keystore-kit) | PIN protection for the store key |
@@ -305,10 +305,17 @@ cuts one out of your balance and the mint burns it; where the price is
 zero, nothing is cut at all. Moneyer binds the name to this wallet's Nostr
 key with a signed NIP-98 request, without an account.
 
-The reference `lnurl-mint` has a different, service-specific route: names
-are free and first-come, and the claim sends the wallet's `cx1` branch but
-does not prove ownership of a Nostr key. Notecase detects that route without
-registering anything, then uses it when you confirm the name.
+The reference `lnurl-mint` has a different management route. A claim sends
+the wallet's `cx1` branch plus a signature from that branch's index-0 key,
+proving the wallet controls the keys it is registering. Notecase detects the
+route with a reserved-name request that cannot write, then uses signed
+`POST /p/<name>` to register or update it. Its npub is included too, so the
+same name can resolve over NIP-05. `notecase address unregister [name]`
+releases it with the action-separated `DELETE` proof.
+
+When changing branches, Notecase retains the current public `cx1` and uses
+that old branch for the one update proof; only after the mint confirms the
+change does the replacement branch become the registered one locally.
 
 On Moneyer, what arrives at the address is a bearer note sealed to that same
 key, so it is yours seconds after it is paid and the mint holds it for no
@@ -332,8 +339,9 @@ sends a wrap saying only which key, and `notecase inbox` derives that key,
 checks the mint's certificate, and rotates the note onto a secret of its own
 at once. `address claim` says which way the mint took it.
 
-- `notecase address keys` moves a name you already hold onto your keys;
-  `address custodial` moves it back. Give the name, `address keys <name>`,
+- `notecase address keys` moves a Moneyer name you already hold onto your keys;
+  `address custodial` moves it back. A reference-mint address has no custodial
+  payout mode; use `address unregister` to release it. Give the name, `address keys <name>`,
   for one your key owns that this wallet never claimed itself, such as a
   name the mint's operator set up for you.
 - `notecase address scan` walks the branch for anything whose wrap never
@@ -522,8 +530,10 @@ the device does not answer.
 A name whose owner is the device's npub can be paid to the device's own keys
 instead (LUD-25 Part 2). `heartwood address keys <name>` asks the device for
 the watch-only branch it derives from that identity key. Moneyer has the device
-sign the ownership request, on one hold; the reference mint instead registers
-a free, first-come name without Nostr ownership proof. From then on the mint mints each
+sign the ownership request, on one hold. Current reference-mint registration
+requires a separate signature from the branch's index-0 key; Heartwood does not
+yet expose that operation, so Notecase refuses that registration instead of
+pretending a public `cx1` proves control. Once registered, the mint mints each
 payment to the device's next key and the wrap carries no secret at all, only
 where to look. Only the device can spend those notes - this wallet's words
 cannot - and the device's recovery phrase brings them back. `heartwood

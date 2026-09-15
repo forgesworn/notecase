@@ -5,7 +5,7 @@ import {parseProxy, socks5Connect} from './proxy.ts'
 // DNS-pinned fetch, which resolves once, rejects any private or reserved
 // answer, and pins the socket to the approved address - closing the
 // rebinding window a check-then-fetch guard leaves open. Loopback literals
-// pass straight to global fetch: lnurlcash-kit already restricts http to
+// pass straight to global fetch: @lnurlcash/kit already restricts http to
 // loopback and .onion, and a literal cannot rebind.
 //
 // NOTECASE_ALLOW_PRIVATE=1 lets LAN-hosted mints through, for people who

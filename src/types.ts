@@ -14,7 +14,7 @@
 //              note can be reclaimed if the recipient never takes it
 //   spent      burned at the mint; kept for history
 
-import type {NoteScheme} from 'lnurlcash-kit'
+import type {NoteScheme} from './lnurlcash.js'
 import type {NwcConnection} from './nwcservice.ts'
 
 export type NoteState = 'live' | 'staged' | 'ambiguous' | 'melting' | 'sent' | 'spent'
@@ -295,6 +295,11 @@ export type WalletData = {
     // A lightning address claimed at a mint, as name@host. Payments to it
     // arrive as notes sealed to this wallet's Nostr key.
     lightningAddress?: string
+    // The branch currently registered for a reference-mint address. An
+    // update to another branch must be signed by this old branch's index-0
+    // key, so retaining the public cx1 selects the right local private node
+    // without storing any additional secret.
+    lightningAddressCx1?: string
     // The hardware vault this wallet has met over the wire, by the identity
     // key it proved. Trust on first use: a different key later is either a
     // different device or a wiped one, and both deserve a stop.

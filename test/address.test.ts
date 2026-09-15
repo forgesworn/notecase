@@ -4,7 +4,7 @@ import {finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type Event}
 import {bytesToHex} from '@noble/hashes/utils.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {utf8ToBytes} from '@noble/hashes/utils.js'
-import {noteK1} from 'lnurlcash-kit'
+import {noteK1} from '../src/lnurlcash.js'
 import {WalletUsageError} from '../src/wallet.ts'
 import {freshK1, makeWallet} from './helpers.ts'
 
@@ -53,17 +53,26 @@ const sellingNames = (theMint: Mint, options: {priceMsat: number | null; refuse?
   return {fetchImpl, seen}
 }
 
-// The reference lnurl-mint's service-specific registration: a free,
-// first-come GET carrying only the username and watch-only branch.
+// The current reference lnurl-mint's signed POST/DELETE /p/{username}
+// management surface. The reserved-name probe can never reach storage.
 const referenceNames = () => {
-  const seen: {username: string; cx1: string}[] = []
+  const seen: Array<{method: string; username: string; cx1?: string; sig: string; npub?: string}> = []
   const fetchImpl: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
-    if (url.pathname === '/register' && url.searchParams.get('username') === '_') {
+    if (url.pathname === '/p/_' && init?.method === 'POST') {
       return Response.json({status: 'ERROR', reason: 'Invalid or reserved username.'})
     }
-    if (url.pathname === '/register') {
-      seen.push({username: url.searchParams.get('username') ?? '', cx1: url.searchParams.get('cx1') ?? ''})
+    const match = url.pathname.match(/^\/p\/([^/]+)$/)
+    if (match && (init?.method === 'POST' || init?.method === 'DELETE')) {
+      const cx1 = url.searchParams.get('cx1')
+      const npub = url.searchParams.get('npub')
+      seen.push({
+        method: init.method,
+        username: decodeURIComponent(match[1]!),
+        ...(cx1 ? {cx1} : {}),
+        sig: url.searchParams.get('sig') ?? '',
+        ...(npub ? {npub} : {})
+      })
       return Response.json({status: 'OK'})
     }
     return fetch(input, init)
@@ -176,8 +185,41 @@ describe('claiming a lightning address', () => {
     const claimed = await wallet.registerName({name: 'Donkey'})
 
     expect(claimed).toEqual({address: `donkey@${hostOf(mint)}`, paidMsat: 0, toKeys: true})
-    expect(reference.seen).toEqual([{username: 'donkey', cx1: wallet.addressCx1(hostOf(mint))}])
+    expect(reference.seen).toEqual([
+      {
+        method: 'POST',
+        username: 'donkey',
+        cx1: wallet.addressCx1(hostOf(mint)),
+        sig: expect.stringMatching(/^[0-9a-f]{130}$/),
+        npub: wallet.nostrIdentity()!.npub
+      }
+    ])
     expect(wallet.lightningAddress()).toBe(`donkey@${hostOf(mint)}`)
+  })
+
+  it('updates and unregisters a reference address with action-separated proofs', async () => {
+    mint = await createMockMint()
+    const reference = referenceNames()
+    const {wallet, data} = makeWallet({fetch: reference.fetchImpl})
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+
+    await wallet.registerName({name: 'donkey'})
+    const firstCx1 = reference.seen[0]!.cx1
+    // A wallet created before recovery words used its Nostr branch. Adding a
+    // seed changes the preferred receiving branch, but the old registered
+    // branch must authorise that one migration.
+    data.seedHex = freshK1()
+    await expect(wallet.payNameToKeys(true)).resolves.toEqual({
+      address: `donkey@${hostOf(mint)}`,
+      toKeys: true
+    })
+    await expect(wallet.unregisterName()).resolves.toEqual({address: `donkey@${hostOf(mint)}`})
+
+    expect(reference.seen.map(request => request.method)).toEqual(['POST', 'POST', 'DELETE'])
+    expect(reference.seen[0]!.sig).toBe(reference.seen[1]!.sig)
+    expect(reference.seen[1]!.cx1).not.toBe(firstCx1)
+    expect(reference.seen[2]!.sig).not.toBe(reference.seen[1]!.sig)
+    expect(wallet.lightningAddress()).toBeNull()
   })
 })
 

@@ -1,0 +1,97 @@
+import {secp256k1} from '@noble/curves/secp256k1.js'
+import {hmac} from '@noble/hashes/hmac.js'
+import {sha256} from '@noble/hashes/sha2.js'
+import {bytesToHex, utf8ToBytes} from '@noble/hashes/utils.js'
+import {
+  decodeCk1,
+  hashK1,
+  isPreimage,
+  recoverNoteOwnershipPubkey,
+  type MintFee
+} from '@lnurlcash/kit'
+import {
+  deriveCashChild,
+  deriveCashDomainNode,
+  deriveCashRoot,
+  type CashNode
+} from './cash.js'
+
+export type RandomSecret = () => string
+
+export const defaultRandomSecret: RandomSecret = () =>
+  bytesToHex(crypto.getRandomValues(new Uint8Array(32)))
+
+export type MintFeeBand = {minNetMsat: number; maxNetMsat: number}
+
+export const mintFeeBand = (grossMsat: number, fee: MintFee): MintFeeBand => {
+  const exactFee = fee.baseFeeMsat + Math.floor((grossMsat * fee.feePpm) / 1_000_000)
+  const roundedFee = Math.ceil(exactFee / 1000) * 1000
+  return {
+    minNetMsat: Math.max(0, grossMsat - roundedFee),
+    maxNetMsat: Math.max(0, grossMsat - exactFee)
+  }
+}
+
+export const noteIdOf = (k1: string): string | null => {
+  if (typeof k1 !== 'string') return null
+  const value = k1.trim().toLowerCase()
+  if (isPreimage(value)) return hashK1(value)
+  const signature = decodeCk1(value)
+  const pubkey = signature ? recoverNoteOwnershipPubkey(signature) : null
+  return pubkey ? bytesToHex(pubkey) : null
+}
+
+export const deriveCashAddressNode = (root: CashNode, host: string): CashNode =>
+  deriveCashDomainNode(deriveCashChild(root, 1 + 0x80000000), host)
+
+export type CashXpub = {pubkeyXOnly: Uint8Array; chainCode: Uint8Array}
+
+export const cashNodeToCx1 = (node: CashNode): CashXpub => ({
+  pubkeyXOnly: secp256k1.getPublicKey(node.privateKey, true).slice(1),
+  chainCode: node.chainCode.slice()
+})
+
+export const NOSTR_CASH_SEED_LABEL = 'LNURLcash/nostr-seed'
+
+export const deriveNostrCashSeed = (secretKey: Uint8Array): Uint8Array => {
+  if (!(secretKey instanceof Uint8Array) || secretKey.length !== 32) {
+    throw new RangeError('A Nostr secret key is 32 bytes.')
+  }
+  return hmac(sha256, secretKey, utf8ToBytes(NOSTR_CASH_SEED_LABEL))
+}
+
+export const deriveNostrAddressNode = (secretKey: Uint8Array, host: string): CashNode =>
+  deriveCashAddressNode(deriveCashRoot(deriveNostrCashSeed(secretKey)), host)
+
+export type MergeBatchOptions = {budget?: number; maxNotes?: number}
+
+export const mergeBatches = (
+  callback: string,
+  k1s: string[],
+  options: MergeBatchOptions | number = {}
+): string[][] => {
+  const {budget = 2000, maxNotes = 20} =
+    typeof options === 'number' ? {budget: options, maxNotes: 20} : options
+  const placeholder = '0'.repeat(64)
+  new URL(callback)
+  const fits = (candidate: string[], carried: boolean): boolean => {
+    const url = new URL(callback)
+    if (carried) url.searchParams.append('k1', placeholder)
+    for (const k1 of candidate) url.searchParams.append('k1', k1)
+    url.searchParams.append('h', placeholder)
+    return url.href.length <= budget
+  }
+  const batches: string[][] = []
+  let batch: string[] = []
+  for (const k1 of k1s) {
+    const next = [...batch, k1]
+    if (batch.length > 0 && (next.length > maxNotes || !fits(next, batches.length > 0))) {
+      batches.push(batch)
+      batch = [k1]
+    } else {
+      batch = next
+    }
+  }
+  if (batch.length > 0) batches.push(batch)
+  return batches
+}
