@@ -12,7 +12,9 @@ import {
   deriveCashRoot,
   deriveCashDomainNode,
   deriveCashAddressNode,
+  deriveLegacyCashAddressNode,
   deriveNostrAddressNode,
+  deriveLegacyNostrAddressNode,
   deriveNoteSecretKey,
   cashNodeToCx1,
   decodeCx1,
@@ -682,7 +684,8 @@ export class Wallet {
   }
 
   // LUD-25 Part 2: the branch a mint pays this wallet's name to. With
-  // recovery words it is lnurl-wallet's path m/139'/1'/d1..d4 from them.
+  // recovery words it is the spec's path m/139'/d1..d4 from them, the same
+  // branch lnurl-wallet derives from the same words.
   // Without, it is the same path from this wallet's Nostr key
   // (deriveNostrAddressNode, exactly as a heartwood derives it), so a wallet
   // that never made words is paid to keys of its own too, and its Nostr key
@@ -696,12 +699,19 @@ export class Wallet {
   // Every branch this wallet could have been paid on at a mint, the one it
   // hands out first. A wallet that took a name before it had words was paid
   // on its Nostr key's branch, and it still holds that key.
+  //
+  // The spec's m/139'/d1..d4 branches come first, so a name is only ever
+  // handed out on one. The m/139'/1' branches every wallet used before
+  // 2026-09-16 follow: notes were paid to them and names still point at
+  // them, so they are walked and signed for, never handed out again.
   private addressNodes(host: string): ReturnType<typeof deriveCashAddressNode>[] {
-    const nodes: ReturnType<typeof deriveCashAddressNode>[] = []
     const root = this.cashRoot()
-    if (root) nodes.push(deriveCashAddressNode(root, host))
     const identity = this.nostrIdentity()
+    const nodes: ReturnType<typeof deriveCashAddressNode>[] = []
+    if (root) nodes.push(deriveCashAddressNode(root, host))
     if (identity) nodes.push(deriveNostrAddressNode(identity.secret, host))
+    if (root) nodes.push(deriveLegacyCashAddressNode(root, host))
+    if (identity) nodes.push(deriveLegacyNostrAddressNode(identity.secret, host))
     return nodes
   }
 
@@ -2634,11 +2644,21 @@ export class Wallet {
     }
     try {
       const baseUrl = await this.withdrawBase(entry)
-      const node = deriveNostrAddressNode(identity.secret, entry.host)
-      const walked = await this.takeFromBranch(baseUrl, node, options.gap ?? 20)
-      node.privateKey.fill(0)
+      // Heartwood firmware still derives the old path, so both.
+      const received: ReceiveResult[] = []
+      let scanned = 0
+      for (const derive of [deriveNostrAddressNode, deriveLegacyNostrAddressNode]) {
+        const node = derive(identity.secret, entry.host)
+        try {
+          const walked = await this.takeFromBranch(baseUrl, node, options.gap ?? 20)
+          received.push(...walked.received)
+          scanned += walked.scanned
+        } finally {
+          node.privateKey.fill(0)
+        }
+      }
       await this.persist()
-      return {...walked, mode: identity.mode}
+      return {received, scanned, mode: identity.mode}
     } finally {
       identity.secret.fill(0)
     }

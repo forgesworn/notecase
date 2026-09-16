@@ -9,7 +9,7 @@ import {sha256} from '@noble/hashes/sha2.js'
 import {bytesToHex, hexToBytes, randomBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {
   cashNodeToCx1,
-  deriveCashAddressNode,
+  deriveLegacyCashAddressNode,
   deriveCashRoot,
   deriveNoteSecretKey,
   encodeCk1,
@@ -25,7 +25,7 @@ import {legacyEcdsaCk1, makeWallet} from './helpers.ts'
 // A lightning address owned by a heartwood's own npub, paid to the device's
 // own keys (LUD-25 Part 2). The device derives its address branch from that
 // identity key - seed = HMAC-SHA256(key, "LNURLcash/nostr-seed"), then
-// lnurl-wallet's m/139'/1'/d1..d4 - which is what the fake below does, with
+// the old m/139'/1'/d1..d4 firmware still uses - which is what the fake below does, with
 // the kit, exactly as heartwood-esp32's cash_key.rs does in Rust against
 // vectors the kit produced. The mint is a real moneyer.
 
@@ -37,7 +37,7 @@ const fakeHeartwood = (relay: string) => {
   const secret = generateSecretKey()
   const pubkey = getPublicKey(secret)
   const branchFor = (host: string) =>
-    deriveCashAddressNode(deriveCashRoot(hmac(sha256, secret, utf8ToBytes(NOSTR_SEED_LABEL))), host)
+    deriveLegacyCashAddressNode(deriveCashRoot(hmac(sha256, secret, utf8ToBytes(NOSTR_SEED_LABEL))), host)
   const notes: Held[] = []
   const bound = new Set<string>()
   const log: string[] = []
@@ -356,7 +356,9 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     const result = await rescuer.recoverHeartwoodNotes(device.nsec, opts)
     expect(result.mode).toBe('bunker')
     expect(result.received.map(r => r.note.amountMsat).sort((a, b) => a - b)).toEqual([5_000, 21_000])
-    expect(result.scanned).toBe(2 + 3)
+    // the spec's branch first, where this firmware was never paid, then the
+    // old m/139'/1' one it still hands out
+    expect(result.scanned).toBe(3 + 2 + 3)
     expect(rescuer.balanceMsat()).toBe(26_000)
     // taken, so a second recovery finds the keys spent and takes nothing
     expect((await rescuer.recoverHeartwoodNotes(device.nsec, opts)).received).toEqual([])

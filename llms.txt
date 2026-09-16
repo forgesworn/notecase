@@ -124,7 +124,7 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     over needs acceptOverpay. sendToNostr(t, msat, to, host?, {noteIds?, memo?})
   namePriceMsat(host?), registerName({name, mintHost?}) -> {address, paidMsat, toKeys},
   lightningAddress(), payNameToKeys(toKeys?, {name?, mintHost?}), unregisterName({name?, mintHost?}), addressCx1(host), scanAddress(host?, {gap?})
-  - with a seed, registerName sends a cx1 (m/139'/1'/d1..d4, lnurl-wallet's path); a
+  - with a seed, registerName sends a cx1 (the spec's m/139'/d1..d4, as lnurl-wallet); a
     moneyer >=0.13 then pays the name to the wallet's keys, and the inbox opens the
     index-only wrap (/w?p=<cp1>&sig=<amount-bearing-cs1>&i=) by deriving the key and rotating
   - the reference lnurl-mint is detected with a reserved-name probe, then takes signed
@@ -143,8 +143,12 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     dated by settings.heartwood.held.at. Nothing spendable ever enters it; it backs up
     and restores, and an older backup with none restores unchanged. A collected note
     leaves it, and a shorter reading replaces the last one rather than merging
+  - notes and names on the pre-2026-09-16 m/139'/1'/d1..d4 branches (words and Nostr key)
+    are still received, scanned and proven for; they are never handed out again, and
+    payNameToKeys moves such a name onto the spec's branch
   - a heartwood derives its branch from the identity key that owns the name
-    (HMAC-SHA256(key, "LNURLcash/nostr-seed") -> m/139'/1'/d1..d4), hands over the
+    (HMAC-SHA256(key, "LNURLcash/nostr-seed") -> m/139'/1'/d1..d4 in firmware today;
+    a words-less wallet hands out m/139'/d1..d4, as conformance's nostr-seed.json), hands over the
     cx1 (heartwood_note_address); it signs Moneyer's NIP-98 itself. Current reference
     registration also needs an index-0 branch proof, which Heartwood does not yet expose,
     so Notecase refuses that path instead of registering from cx1 alone. Only the device
