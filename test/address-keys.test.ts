@@ -4,7 +4,16 @@ import {matchFilter, type Event, type Filter} from 'nostr-tools'
 import {createFakeBackend, createMoneyer, type FakeBackend, type Moneyer} from '@forgesworn/moneyer'
 import {bolt11PaymentHash} from 'farrier-kit/bolt11'
 import {bytesToHex, randomBytes} from '@noble/hashes/utils.js'
-import {cashNodeToCx1, deriveNostrAddressNode, encodeCx1, hashK1, isCk1} from '../src/lnurlcash.js'
+import {
+  cashNodeToCx1,
+  deriveCashRoot,
+  deriveLegacyCashAddressNode,
+  deriveNostrAddressNode,
+  encodeCx1,
+  hashK1,
+  isCk1
+} from '../src/lnurlcash.js'
+import {hexToBytes} from '@noble/hashes/utils.js'
 import type {NostrTransport} from '../src/nostr.ts'
 import {newMnemonic, seedFromMnemonic} from '../src/store.ts'
 import {WalletUsageError} from '../src/wallet.ts'
@@ -135,8 +144,9 @@ describe('a name paid to this wallet\'s keys', () => {
 
     const scan = await wallet.scanAddress(theMint.host, {gap: 5})
     expect(scan.received.map(r => r.note.amountMsat).sort((a, b) => a - b)).toEqual([5_000, 21_000])
-    // the words branch, then the Nostr key's, where nothing was paid
-    expect(scan.scanned).toBe(2 + 5 + 5)
+    // the words branch, then the Nostr key's and both old m/139'/1'
+    // branches, where nothing was paid
+    expect(scan.scanned).toBe(2 + 5 + 5 + 5 + 5)
     expect(wallet.balanceMsat()).toBe(26_000)
 
     // the wraps that arrive late find their notes already taken
@@ -186,6 +196,37 @@ describe('a name paid to this wallet\'s keys', () => {
     expect(made.wallet.balanceMsat()).toBe(26_000)
   })
 
+  it("keeps paying a name still on the old m/139'/1' branch, and moves it onto the spec's", async () => {
+    const theMint = await startMint()
+    const made = seededWallet()
+    await made.wallet.addMint(`mint@${theMint.host}`)
+    await made.wallet.registerName({name: 'alice'})
+    // where a wallet before 2026-09-16 pointed the name
+    const legacy = cashNodeToCx1(deriveLegacyCashAddressNode(deriveCashRoot(hexToBytes(made.data.seedHex!)), theMint.host))
+    const legacyCx1 = encodeCx1(legacy.pubkeyXOnly, legacy.chainCode)
+    expect(legacyCx1).not.toBe(made.wallet.addressCx1(theMint.host))
+    theMint.moneyer.store.setZapNameCx1('alice', legacyCx1)
+
+    await pay(theMint, 'alice', 21_000)
+    const got = await made.wallet.receiveFromNostr(theMint.relay.transport)
+    expect(got.skipped).toEqual([])
+    expect(got.received.map(r => r.note.amountMsat)).toEqual([21_000])
+
+    // a wrap that never arrived is still found by the walk
+    await pay(theMint, 'alice', 5_000)
+    theMint.relay.stored.length = 0
+    const scan = await made.wallet.scanAddress(theMint.host, {gap: 3})
+    expect(scan.received.map(r => r.note.amountMsat)).toEqual([5_000])
+
+    await made.wallet.payNameToKeys()
+    expect(theMint.moneyer.store.zapName('alice')?.cx1).toBe(made.wallet.addressCx1(theMint.host))
+    await pay(theMint, 'alice', 3_000)
+    expect((await made.wallet.receiveFromNostr(theMint.relay.transport)).received.map(r => r.note.amountMsat)).toEqual([3_000])
+    expect(made.wallet.balanceMsat()).toBe(29_000)
+    const stats = (await (await fetch(`${theMint.moneyer.url}/stats`)).json()) as {outstandingMsat: number}
+    expect(stats.outstandingMsat).toBe(29_000)
+  })
+
   it('leaves the key spent once taken, so a later scan counts it as used and takes nothing twice', async () => {
     const theMint = await startMint()
     const {wallet} = seededWallet()
@@ -196,7 +237,7 @@ describe('a name paid to this wallet\'s keys', () => {
 
     const scan = await wallet.scanAddress(theMint.host, {gap: 3})
     expect(scan.received).toEqual([])
-    expect(scan.scanned).toBe(1 + 3 + 3)
+    expect(scan.scanned).toBe(1 + 3 + 3 + 3 + 3)
     const stats = (await (await fetch(`${theMint.moneyer.url}/stats`)).json()) as {outstandingNotes: number}
     // the rotated note, and nothing left on the key
     expect(stats.outstandingNotes).toBe(1)

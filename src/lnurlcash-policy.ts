@@ -39,7 +39,17 @@ export const noteIdOf = (k1: string): string | null => {
   return owner ? bytesToHex(owner.pubkeyXOnly) : null
 }
 
+// LUD-25 Part 2's address branch, the literal `m/139'/d1..d4` with the
+// hashing key at `m/139'/0`: the node the Part 1 ladder already hangs off,
+// whose hardened children a `cx1` cannot reach. lnurl-wallet moved here on
+// 2026-09-16 (#166), so recovery words shared with it name the same branch.
 export const deriveCashAddressNode = (root: CashNode, host: string): CashNode =>
+  deriveCashDomainNode(root, host)
+
+// The branch every wallet used before that, `m/139'/1'/d1..d4`. Never handed
+// out again, but notes were paid to it and names still point at it, so it is
+// walked and signed for until nothing can be left on it.
+export const deriveLegacyCashAddressNode = (root: CashNode, host: string): CashNode =>
   deriveCashDomainNode(deriveCashChild(root, 1 + 0x80000000), host)
 
 export type CashXpub = {pubkeyXOnly: Uint8Array; chainCode: Uint8Array}
@@ -60,6 +70,11 @@ export const deriveNostrCashSeed = (secretKey: Uint8Array): Uint8Array => {
 
 export const deriveNostrAddressNode = (secretKey: Uint8Array, host: string): CashNode =>
   deriveCashAddressNode(deriveCashRoot(deriveNostrCashSeed(secretKey)), host)
+
+// The same identity's branch on the old path, which heartwood firmware still
+// derives and hands out.
+export const deriveLegacyNostrAddressNode = (secretKey: Uint8Array, host: string): CashNode =>
+  deriveLegacyCashAddressNode(deriveCashRoot(deriveNostrCashSeed(secretKey)), host)
 
 export type MergeBatchOptions = {budget?: number; maxNotes?: number}
 

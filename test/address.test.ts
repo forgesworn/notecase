@@ -5,7 +5,15 @@ import {schnorr} from '@noble/curves/secp256k1.js'
 import {bytesToHex, hexToBytes} from '@noble/hashes/utils.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {utf8ToBytes} from '@noble/hashes/utils.js'
-import {decodeCx1, deriveNotePubkey, noteK1} from '../src/lnurlcash.js'
+import {
+  cashNodeToCx1,
+  decodeCx1,
+  deriveCashRoot,
+  deriveLegacyCashAddressNode,
+  deriveNotePubkey,
+  encodeCx1,
+  noteK1
+} from '../src/lnurlcash.js'
 import {WalletUsageError} from '../src/wallet.ts'
 import {freshK1, makeWallet} from './helpers.ts'
 
@@ -227,6 +235,31 @@ describe('claiming a lightning address', () => {
     expect(reference.seen[1]!.cx1).not.toBe(firstCx1)
     expect(reference.seen[2]!.sig).not.toBe(reference.seen[1]!.sig)
     expect(wallet.lightningAddress()).toBeNull()
+  })
+})
+
+describe("a reference name on the old m/139'/1' branch", () => {
+  it("moves onto the spec's branch, proven by the old branch's index-0 key", async () => {
+    mint = await createMockMint()
+    const reference = referenceNames()
+    const {wallet, data} = makeWallet({fetch: reference.fetchImpl})
+    data.seedHex = freshK1()
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    await wallet.ensureNostrIdentity()
+    const host = hostOf(mint)
+    const legacy = cashNodeToCx1(deriveLegacyCashAddressNode(deriveCashRoot(hexToBytes(data.seedHex)), host))
+    const legacyCx1 = encodeCx1(legacy.pubkeyXOnly, legacy.chainCode)
+    // what a wallet before 2026-09-16 recorded
+    data.settings.lightningAddress = `donkey@${host}`
+    data.settings.lightningAddressCx1 = legacyCx1
+
+    await expect(wallet.payNameToKeys(true)).resolves.toEqual({address: `donkey@${host}`, toKeys: true})
+    const moved = reference.seen[0]!
+    expect(moved.cx1).toBe(wallet.addressCx1(host))
+    expect(moved.cx1).not.toBe(legacyCx1)
+    const pk0 = deriveNotePubkey(legacy.pubkeyXOnly, legacy.chainCode, 0)
+    expect(schnorr.verify(hexToBytes(moved.sig!), sha256(utf8ToBytes('LNURLcash:register:donkey')), pk0)).toBe(true)
+    expect(data.settings.lightningAddressCx1).toBe(moved.cx1)
   })
 })
 

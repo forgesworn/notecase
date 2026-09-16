@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.23.0 - 2026-09-16
+
+- Hand out the spec's address branch, `m/139'/d1..d4` with the hashing key
+  at `m/139'/0`, for recovery words and for a words-less wallet's Nostr key.
+  lnurl-wallet moved to it the same day (#166), so a name it registered from
+  the same words was paid to keys notecase never walked, and notecase could
+  not sign to move or release it. Pinned to lnurl-wallet's own vector and to
+  conformance 0.13.0's `part2.json` and `nostr-seed.json`.
+- Keep the old `m/139'/1'` branches, words and Nostr key, for everything
+  already on them: key notes still receive, `address scan` and heartwood
+  recovery walk both, and a name still pointing there is proven by its old
+  index-0 key. `address keys` moves such a name onto the new branch.
+  Nothing is handed out on the old path again.
+- Heartwood firmware still derives the old path. Notes it is paid still
+  collect and recover as before.
+
 ## 0.22.0 - 2026-09-16
 
 **Deploy moneyer 0.16.0 (or any mint on `@lnurlcash/kit` >= 0.18.1) first.**
