@@ -20,7 +20,7 @@ import {
 } from '../src/lnurlcash.js'
 import {NIP46_KIND, type DeviceNote} from '../src/heartwood.ts'
 import type {NostrTransport} from '../src/nostr.ts'
-import {makeWallet} from './helpers.ts'
+import {legacyEcdsaCk1, makeWallet} from './helpers.ts'
 
 // A lightning address owned by a heartwood's own npub, paid to the device's
 // own keys (LUD-25 Part 2). The device derives its address branch from that
@@ -79,7 +79,8 @@ const fakeHeartwood = (relay: string) => {
         const id = String(nextId++).padStart(8, '0')
         notes.push({
           id,
-          k1: encodeCk1(signNoteOwnership(key)),
+          // what the firmware exports: the 65-byte ECDSA shape
+          k1: legacyEcdsaCk1(key),
           state: 'confirmed',
           amount_msat: Number(fields.amount_msat),
           host,

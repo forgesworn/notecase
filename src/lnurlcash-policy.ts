@@ -3,7 +3,6 @@ import {hmac} from '@noble/hashes/hmac.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {bytesToHex, utf8ToBytes} from '@noble/hashes/utils.js'
 import {
-  decodeCk1,
   hashK1,
   isPreimage,
   recoverNoteOwnershipPubkey,
@@ -36,9 +35,8 @@ export const noteIdOf = (k1: string): string | null => {
   if (typeof k1 !== 'string') return null
   const value = k1.trim().toLowerCase()
   if (isPreimage(value)) return hashK1(value)
-  const signature = decodeCk1(value)
-  const pubkey = signature ? recoverNoteOwnershipPubkey(signature) : null
-  return pubkey ? bytesToHex(pubkey) : null
+  const owner = recoverNoteOwnershipPubkey(value)
+  return owner ? bytesToHex(owner.pubkeyXOnly) : null
 }
 
 export const deriveCashAddressNode = (root: CashNode, host: string): CashNode =>

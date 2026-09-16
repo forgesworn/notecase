@@ -739,7 +739,8 @@ export class Wallet {
   // The ck1 note for index `index` on a branch, and the cp1 it sits at.
   // Deterministic, so deriving it again gives the same note URL.
   private keyNoteOn(node: ReturnType<typeof deriveCashAddressNode>, index: number): {ck1: string; cp1: string} {
-    const ck1 = encodeCk1(signNoteOwnership(deriveNoteSecretKey(node.privateKey, node.chainCode, index)))
+    const {pubkeyXOnly, signature} = signNoteOwnership(deriveNoteSecretKey(node.privateKey, node.chainCode, index))
+    const ck1 = encodeCk1(pubkeyXOnly, signature)
     return {ck1, cp1: encodeCp1(hexToBytes(noteId(ck1)))}
   }
 

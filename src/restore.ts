@@ -264,7 +264,12 @@ const restoreSchemes = async (
       hashLookupsConfirmed = true
     } catch (err) {
       if (err instanceof NoteSpentError) hashLookupsConfirmed = true
-      else if (!(err instanceof NoteUnknownError) && !(err instanceof ServiceError)) throw err
+      else if (
+        !(err instanceof NoteUnknownError) &&
+        !(err instanceof ServiceError) &&
+        !(err instanceof PendingNoteError)
+      )
+        throw err
     }
   }
 
