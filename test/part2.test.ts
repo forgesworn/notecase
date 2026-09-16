@@ -5,7 +5,7 @@ import {secp256k1} from '@noble/curves/secp256k1.js'
 import {bytesToHex, hexToBytes, randomBytes} from '@noble/hashes/utils.js'
 import {exportBackup, importBackup} from '../src/backup.ts'
 import {BadSignatureError, WalletUsageError} from '../src/wallet.ts'
-import {freshK1, makeWallet} from './helpers.ts'
+import {freshK1, legacyEcdsaCk1, makeWallet} from './helpers.ts'
 
 // LUD-25 Part 2: a note keyed by a public key and spent with its ck1. The
 // wallet takes one, checks its cs1 certificate, and rotates it into a secret
@@ -48,19 +48,15 @@ const partTwoNote = async (theMint: {moneyer: Moneyer}, amountMsat: number): Pro
   const sk = secp256k1.utils.randomSecretKey()
   const id = bytesToHex(secp256k1.getPublicKey(sk, true).slice(1))
   theMint.moneyer.store.creditNote(id, amountMsat)
-  const ck1 = encodeCk1(signNoteOwnership(sk))
+  const {pubkeyXOnly, signature} = signNoteOwnership(sk)
+  const ck1 = encodeCk1(pubkeyXOnly, signature)
   const info = (await (await fetch(`${theMint.moneyer.url}/w?k1=${ck1}`)).json()) as {sig: string}
   return {id, ck1, sig: info.sig, url: `${theMint.moneyer.url}/w?k1=${ck1}&amount=${amountMsat}&sig=${info.sig}`, sk}
 }
 
-// The same note's ck1 spelled differently: (r, n - s), recovery id flipped.
-const malleated = (note: PartTwoNote): string => {
-  const sig = signNoteOwnership(note.sk)
-  const n = secp256k1.Point.Fn.ORDER
-  const s = BigInt(`0x${bytesToHex(sig.subarray(32, 64))}`)
-  const flipped = hexToBytes((n - s).toString(16).padStart(64, '0'))
-  return encodeCk1(new Uint8Array([...sig.subarray(0, 32), ...flipped, sig[64]! ^ 1]))
-}
+// The same note's ck1 spelled differently: the 65-byte ECDSA shape a
+// heartwood still issues for a key this wallet signs as Schnorr.
+const otherSpelling = (note: PartTwoNote): string => legacyEcdsaCk1(note.sk)
 
 const statusAtMint = async (theMint: {moneyer: Moneyer}, k1: string): Promise<unknown> =>
   ((await (await fetch(`${theMint.moneyer.url}/w?k1=${k1}`)).json()) as {reason?: unknown}).reason
@@ -121,7 +117,7 @@ describe('taking a Part 2 note offline', () => {
     await pinMint(theMint, wallet)
     const note = await partTwoNote(theMint, 21_000)
     await wallet.receiveOffline(note.url)
-    await expect(wallet.receiveOffline(note.url.replace(note.ck1, malleated(note)))).rejects.toThrow(
+    await expect(wallet.receiveOffline(note.url.replace(note.ck1, otherSpelling(note)))).rejects.toThrow(
       WalletUsageError
     )
     expect(wallet.balanceMsat()).toBe(5_000 + 21_000)

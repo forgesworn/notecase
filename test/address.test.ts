@@ -1,10 +1,11 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
 import {finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type Event} from 'nostr-tools'
-import {bytesToHex} from '@noble/hashes/utils.js'
+import {schnorr} from '@noble/curves/secp256k1.js'
+import {bytesToHex, hexToBytes} from '@noble/hashes/utils.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {utf8ToBytes} from '@noble/hashes/utils.js'
-import {noteK1} from '../src/lnurlcash.js'
+import {decodeCx1, deriveNotePubkey, noteK1} from '../src/lnurlcash.js'
 import {WalletUsageError} from '../src/wallet.ts'
 import {freshK1, makeWallet} from './helpers.ts'
 
@@ -190,10 +191,16 @@ describe('claiming a lightning address', () => {
         method: 'POST',
         username: 'donkey',
         cx1: wallet.addressCx1(hostOf(mint)),
-        sig: expect.stringMatching(/^[0-9a-f]{130}$/),
+        sig: expect.stringMatching(/^[0-9a-f]{128}$/),
         npub: wallet.nostrIdentity()!.npub
       }
     ])
+    // What the reference mint checks: a BIP-340 signature over
+    // sha256("LNURLcash:register:<name>") by pk_0 of the submitted cx1.
+    const branch = decodeCx1(reference.seen[0]!.cx1!)!
+    const pk0 = deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, 0)
+    const digest = sha256(utf8ToBytes('LNURLcash:register:donkey'))
+    expect(schnorr.verify(hexToBytes(reference.seen[0]!.sig!), digest, pk0)).toBe(true)
     expect(wallet.lightningAddress()).toBe(`donkey@${hostOf(mint)}`)
   })
 

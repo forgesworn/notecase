@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.22.0 - 2026-09-16
+
+**Deploy moneyer 0.16.0 (or any mint on `@lnurlcash/kit` >= 0.18.1) first.**
+This version signs note ownership as a Schnorr `ck1` over
+`sha256("LNURLcash")`. A mint still on kit 0.14 does not recognise that
+shape and answers "Unknown note." for it.
+
+- Move to `@lnurlcash/kit` 0.18.1. Ownership proofs and address proofs now
+  sign a sha256 digest, which the reference mint requires for
+  register/unregister and checks first for spending. Notes already held as
+  the older 65-byte ECDSA `ck1` (including every note a heartwood exports)
+  or the raw-message Schnorr `ck1` still read, look up and spend.
+- Fix `noteIdOf` for the kit's new `recoverNoteOwnershipPubkey`, which takes
+  the `ck1` string and returns `{pubkeyXOnly, legacy}`. Without this every
+  Part 2 note id broke.
+- Recovery's probe no longer throws on a probe note with a melt in flight:
+  the kit now raises `PendingNoteError` for it, not `ServiceError`.
+- The address branch is unchanged, still under `m/139'/1'`, matching
+  heartwood firmware and the names already registered to it. Moving to the
+  spec's literal `m/139'/d1..d4` needs a migration that keeps scanning the
+  old branch, so it is deliberately not part of this release.
+
 ## 0.21.0 - 2026-09-15
 
 - Move the protocol boundary from the archived unscoped package to
