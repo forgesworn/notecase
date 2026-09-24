@@ -1,11 +1,11 @@
 # notecase
 
-LNURLcash (LUD-25) wallet for Node 22+: receive, hold, split, merge, send
-and melt Lightning bearer notes. CLI plus a reusable engine. ESM-only. MIT.
+> LNURLcash (LUD-25) wallet for Node 22+: receive, hold, split, merge, send
+> and melt Lightning bearer notes. CLI plus a reusable engine. ESM-only. MIT.
 
-Install: not yet on npm - build from source (see README)
+Install: `npm install @forgesworn/notecase`
 Companion mint: @forgesworn/moneyer
-Protocol client it builds on: @lnurlcash/kit 0.14
+Protocol client it builds on: @lnurlcash/kit
 Draft spec: https://github.com/lnurl/luds/pull/301
 
 ## The rules the engine enforces (and any wallet MUST)
@@ -111,7 +111,12 @@ newer updatedAt wins; the mint, not the relay, decides what is spendable.
 ## Library API
 
 openWallet({pin?, home?}) / initWallet(...) -> {data, save, encrypted, storeKey}
+  - openWallet throws WrongPinError, NoWalletError or WalletExistsError;
+    walletHome() resolves the store path (NOTECASE_HOME override included)
 new Wallet(data, save, {fetch?, timeoutMs?}) ->
+  - the engine's own errors: InsufficientFundsError, PinMismatchError,
+    WalletUsageError, KeyRotationError, BadSignatureError
+  - DEFAULT_LADDER and DEFAULT_LADDER_COPIES are setLadder's fallback
   receive(input, {acceptBadSignature?}), send(msat, host?, noteIds?), prepareExact(amountMsat),
   melt(pr, target), startMint(grossMsat), claimMint(pending, preimage),
   awaitMint(pending), reconcile(), checkNotes({apply?, mintHost?}) -> CheckReport,
@@ -166,6 +171,14 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   pullNotes(transport) -> NoteSyncResult, pushNotes(transport), syncNotes(transport)
 initWallet({pin?, home?, mnemonic?}) -> {..., mnemonic} returned ONCE
 newMnemonic() / seedFromMnemonic(words) - BIP39, English, no passphrase
+  - normaliseMnemonic(words) trims/lowercases/collapses whitespace; both
+    throw BadMnemonicError on anything that is not twelve valid words
+exportBackup(data, passphrase) / importBackup(contents, passphrase) ->
+  WalletData - a passphrase-encrypted BackupEnvelope; importBackup throws
+  BackupError on a wrong passphrase or corrupt envelope
+emptyWallet() - a fresh, seedless WalletData for tests and cold starts
+NwcPaymentUnprovenError - thrown by payWithNwc when the wallet cannot
+  verify the preimage against the invoice's payment hash
 new NwcService({wallet, transport, persist, log?}) - NIP-47 service runtime,
   .serve(connection) / .stop(id) / .close(); wallet is an NwcServiceWallet
   (alias/balanceMsat/makeInvoice/payInvoice/lookupInvoice), so the runtime
