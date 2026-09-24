@@ -559,9 +559,14 @@ two are live secrets.
 As a library, the same engine drives other frontends:
 
 ```ts
-import {Wallet, openWallet, createWalletFetch} from '@forgesworn/notecase'
+import {Wallet, openWallet, createWalletFetch, payWithNwc} from '@forgesworn/notecase'
 const store = await openWallet({pin})
 const wallet = new Wallet(store.data, store.save, {fetch: createWalletFetch()})
+
+// Mint a note: quote, pay the invoice from any Lightning wallet, then claim.
+const {pending} = await wallet.startMint(21_000) // msat paid; the note holds this less the mint fee
+await payWithNwc(nwcUri, pending.pr)
+const minted = await wallet.awaitMint(pending) // {note, warnings}, or null on timeout
 ```
 
 ## The web wallet

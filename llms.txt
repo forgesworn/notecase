@@ -117,9 +117,16 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   - the engine's own errors: InsufficientFundsError, PinMismatchError,
     WalletUsageError, KeyRotationError, BadSignatureError
   - DEFAULT_LADDER and DEFAULT_LADDER_COPIES are setLadder's fallback
-  receive(input, {acceptBadSignature?}), send(msat, host?, noteIds?), prepareExact(amountMsat),
-  melt(pr, target), startMint(grossMsat), claimMint(pending, preimage),
-  awaitMint(pending), reconcile(), checkNotes({apply?, mintHost?}) -> CheckReport,
+  receive(input, {acceptBadSignature?}) -> ReceiveResult {note, warnings},
+  send(msat, host?, noteIds?) -> NoteRecord, prepareExact(amountMsat),
+  melt(pr, target), startMint(grossMsat, host?) -> {pending, fee},
+  awaitMint(pending, {timeoutMs?, intervalMs?}) -> ReceiveResult | null (null on timeout),
+  claimMint(pending) -> ReceiveResult
+  - minting: startMint, pay pending.pr from any Lightning wallet (payWithNwc
+    below does it over NWC), then awaitMint(pending). The note's secret was
+    fixed at quote time, so no preimage is needed; claimMint's optional
+    preimage argument is only for invoices quoted by older releases
+  reconcile(), checkNotes({apply?, mintHost?}) -> CheckReport,
   balanceMsat(), unrotatedMsat(), verifyNoteOffline(input), addMint(input),
   ladderFor(host), setLadder(host, sats[], copies), ladderPlan(host) -> LadderPlan,
   prepareExactFrom(msat, noteIds) - caller-chosen selection, refused if it cannot work,
@@ -198,6 +205,6 @@ depositToVault(wallet, client, note) - new_secret on the device -> the mint
   transport for both framings (newline JSON, and heartwood's HW binary frame).
 createWalletFetch({allowPrivate?, proxy?}) - DNS-pinned fetch, loopback
   passthrough; with a socks5:// proxy it tunnels instead and resolves remotely
-payWithNwc(uri, pr) / invoiceFromNwc(uri, amountMsat, desc) / nwcStatus(uri)
+payWithNwc(uri, pr) -> {preimageHex, feesPaidMsat} / invoiceFromNwc(uri, amountMsat, desc) / nwcStatus(uri)
 
 All amounts are integer milli-satoshis in the engine; the CLI speaks sats.
