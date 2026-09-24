@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.23.2 - 2026-09-24
+
+Documentation only; no code changes.
+
+- `llms.txt` gives the signatures of `sendOffline` and `receiveOffline` and
+  the `OfflineSelection` and `OfflineHandover` shapes, including one note URL
+  per note. `sendOffline` returns a Promise although it makes no network
+  call.
+
 ## 0.23.1 - 2026-09-24
 
 Documentation only; no code changes.
