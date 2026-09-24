@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.23.1 - 2026-09-24
+
+Documentation only; no code changes.
+
+- `llms.txt` documents the mint flow (`startMint`, `awaitMint`, `claimMint`)
+  and the return shapes of `receive`, `send` and `payWithNwc`, checked
+  against the current source.
+- The README mint example waits with `awaitMint`. `grossMsat` is the amount
+  paid; the note holds it less the mint fee.
+- package.json gains search keywords.
+
 ## 0.23.0 - 2026-09-16
 
 - Hand out the spec's address branch, `m/139'/d1..d4` with the hashing key
