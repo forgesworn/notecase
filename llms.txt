@@ -131,7 +131,11 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   ladderFor(host), setLadder(host, sats[], copies), ladderPlan(host) -> LadderPlan,
   prepareExactFrom(msat, noteIds) - caller-chosen selection, refused if it cannot work,
   prepareOffline(host), planOfflineSend(msat, host?, noteIds?) -> OfflineSelection,
-  sendOffline(msat, host?, {acceptOverpay?, noteIds?}), receiveOffline(input),
+  sendOffline(msat, host?, {acceptOverpay?, noteIds?, stripSignature?}) -> OfflineHandover,
+  receiveOffline(input) -> ReceiveResult,
+  - OfflineSelection = {mintHost, notes, totalMsat, overpayMsat, capped};
+    OfflineHandover adds urls: string[], one note URL per note. sendOffline
+    returns a Promise although it makes no network call
   - noteIds offline is the hand-over itself, not a pool: short pays nothing,
     over needs acceptOverpay. sendToNostr(t, msat, to, host?, {noteIds?, memo?})
   namePriceMsat(host?), registerName({name, mintHost?}) -> {address, paidMsat, toKeys},
