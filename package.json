@@ -4,6 +4,22 @@
   "description": "An LNURLcash (LUD-25) wallet - a case for Lightning bearer notes. CLI-first, PIN-locked store, crash-safe mutation staging, NWC-assisted minting and melting.",
   "author": "TheCryptoDonkey",
   "license": "MIT",
+  "keywords": [
+    "lnurlcash",
+    "lud-25",
+    "bearer-note",
+    "lightning",
+    "lightning-network",
+    "bitcoin",
+    "wallet",
+    "cli",
+    "nwc",
+    "nip-47",
+    "offline-payments",
+    "ecash",
+    "cli-wallet",
+    "self-custody"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/forgesworn/notecase.git"
