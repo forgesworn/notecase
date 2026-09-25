@@ -67,10 +67,13 @@ together: neither works fully with the other's older release.
   new signatures, byte for byte). A heartwood's proof must be too: firmware
   from before purposes signs with its unpurposed index 0, and Notecase
   refuses to send that.
-- `heartwood address scan` still claims on the old ladder, because the
-  device derives the key from the index itself. What a purpose-following
-  mint pays a heartwood's name waits there until firmware takes a purpose;
-  `heartwood recover` from the nsec reaches it meanwhile.
+- `heartwood address scan` walks purpose 2 and the old ladder, and the
+  device finds each claimed key on either from the `p` the claim names
+  (heartwood firmware with purposes). Older firmware knows only the old
+  ladder and refuses a purpose-2 key; the scan reports such a note as
+  `waiting` rather than failing, since it is safe at the mint until the
+  firmware is updated, and `heartwood recover` from the nsec reaches it
+  meanwhile.
 - A certificate is `c` (and `c2`), not `sig`/`sig2`: read from a mint's
   answer and a note URL under either name, written as `c` on every note
   handed out and every key-wrap URL. A mint answering only `c` has its answer

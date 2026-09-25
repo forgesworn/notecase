@@ -1335,6 +1335,12 @@ const main = async (): Promise<void> => {
             console.log(`The device kept ${sats(c.amountMsat)} paid to its key #${c.index} (${c.id}).`)
           }
           console.log(`Checked ${result.scanned} keys; the device kept ${result.claimed.length} note${result.claimed.length === 1 ? '' : 's'}.`)
+          if (result.waiting.length) {
+            const total = result.waiting.reduce((sum, w) => sum + w.amountMsat, 0)
+            console.log(
+              `${result.waiting.length} more (${sats(total)}) were paid on LUD-25's Lightning Address purpose, which this device's firmware cannot claim yet. They are safe at the mint: update the firmware and scan again.`
+            )
+          }
         } else if (sub === 'recover') {
           // A heartwood that is gone. Its branch comes back from the master's
           // nsec or phrase, prompted for and never taken on the command line.

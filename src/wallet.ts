@@ -3092,11 +3092,22 @@ export class Wallet {
   // payment whether or not its wrap lands, so the note is there either way,
   // on the key it was paid to. This machine only works out where to look,
   // from the watch-only cx1; the device derives each key and checks it.
+  //
+  // A mint pays a name on the Lightning Address purpose, or on the single
+  // ladder before purposes, so both are walked. The claim names the key
+  // (`p`) and the device finds it on either ladder. Firmware from before
+  // purposes knows only the old one and refuses a purpose-2 key; such a
+  // note is reported as `waiting`, safe at the mint until the device is
+  // updated, and the walk goes on.
   async heartwoodScanAddress(
     transport: NostrTransport,
     host?: string,
     options: {gap?: number} = {}
-  ): Promise<{claimed: {id: string; index: number; amountMsat: number}[]; scanned: number}> {
+  ): Promise<{
+    claimed: {id: string; index: number; amountMsat: number}[]
+    waiting: {index: number; amountMsat: number}[]
+    scanned: number
+  }> {
     const entry = this.mintEntry(host)
     let baseUrl = entry.baseUrl
     if (!baseUrl) {
@@ -3115,49 +3126,60 @@ export class Wallet {
     const noteHost = baseUrl.replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '')
     const gap = options.gap ?? 20
     const claimed: {id: string; index: number; amountMsat: number}[] = []
-    let quiet = 0
-    let index = 0
-    // The device derives the key it claims from the index alone, on the
-    // ladder from before purposes. What a mint has since paid on the
-    // Lightning Address purpose waits there for firmware that takes one.
-    while (quiet < gap) {
-      const at = index
-      index += 1
-      const cp1 = encodeCp1(deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, null, at))
-      let info: Awaited<ReturnType<typeof fetchNoteInfoByHash>>
-      try {
-        info = await fetchNoteInfoByPubkey(baseUrl, cp1, this.opts)
-      } catch (err) {
-        if (err instanceof NoteUnknownError) {
-          quiet += 1
-          continue
+    const waiting: {index: number; amountMsat: number}[] = []
+    let scanned = 0
+    for (const purpose of ADDRESS_PURPOSES) {
+      let quiet = 0
+      let index = 0
+      while (quiet < gap) {
+        const at = index
+        index += 1
+        const cp1 = encodeCp1(deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, purpose, at))
+        let info: Awaited<ReturnType<typeof fetchNoteInfoByHash>>
+        try {
+          info = await fetchNoteInfoByPubkey(baseUrl, cp1, this.opts)
+        } catch (err) {
+          if (err instanceof NoteUnknownError) {
+            quiet += 1
+            continue
+          }
+          if (err instanceof NoteSpentError || err instanceof PendingNoteError) {
+            quiet = 0
+            continue
+          }
+          throw err
         }
-        if (err instanceof NoteSpentError || err instanceof PendingNoteError) {
-          quiet = 0
-          continue
+        quiet = 0
+        if (held.has(cp1)) continue
+        const sig = (info as {c?: unknown}).c ?? (info as {sig?: unknown}).sig
+        let kept: {id: string}
+        try {
+          kept = await client.claimKeyNote({
+            host: noteHost,
+            index: at,
+            amountMsat: info.maxWithdrawable,
+            p: cp1,
+            ...(typeof sig === 'string' ? {sig} : {})
+          })
+        } catch (err) {
+          if (purpose !== null && err instanceof HeartwoodError && /does not hold/.test(err.message)) {
+            waiting.push({index: at, amountMsat: info.maxWithdrawable})
+            continue
+          }
+          throw err
         }
-        throw err
+        claimed.push({id: kept.id, index: at, amountMsat: info.maxWithdrawable})
+        inventory.push({
+          id: kept.id,
+          state: 'confirmed',
+          amount_msat: info.maxWithdrawable,
+          host: noteHost,
+          label: '',
+          p: cp1,
+          index: at
+        })
       }
-      quiet = 0
-      if (held.has(cp1)) continue
-      const sig = (info as {c?: unknown}).c ?? (info as {sig?: unknown}).sig
-      const kept = await client.claimKeyNote({
-        host: noteHost,
-        index: at,
-        amountMsat: info.maxWithdrawable,
-        p: cp1,
-        ...(typeof sig === 'string' ? {sig} : {})
-      })
-      claimed.push({id: kept.id, index: at, amountMsat: info.maxWithdrawable})
-      inventory.push({
-        id: kept.id,
-        state: 'confirmed',
-        amount_msat: info.maxWithdrawable,
-        host: noteHost,
-        label: '',
-        p: cp1,
-        index: at
-      })
+      scanned += index
     }
     // A scan puts notes ON the device, so the reading taken before the walk
     // is already short by exactly these. Recorded again here, and persisted:
@@ -3165,7 +3187,7 @@ export class Wallet {
     // later.
     this.rememberHeartwoodHeld(inventory)
     await this.persist()
-    return {claimed, scanned: index}
+    return {claimed, waiting, scanned}
   }
 
   // Tell senders where the device's wraps go: its kind 10050, signed by

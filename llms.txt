@@ -192,7 +192,8 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     purpose-0 index-0 key, over the mint's own hostname; an update is signed by the branch
     currently recorded, then the new public cx1 becomes current locally. An optional npub also makes the name NIP-05. It sends no wrap, so
     address scan (also available in the web settings) finds payments
-  heartwoodNameToKeys(t, name, {toKeys?, mintHost?}), heartwoodUnregisterName(t, name, {mintHost?}), heartwoodScanAddress(t, host?, {gap?}),
+  heartwoodNameToKeys(t, name, {toKeys?, mintHost?}), heartwoodUnregisterName(t, name, {mintHost?}),
+  heartwoodScanAddress(t, host?, {gap?}) -> {claimed, waiting, scanned} (waiting: paid on purpose 2, refused by firmware from before purposes),
   collectFromHeartwood(t, onProgress?, {ids?}), recoverHeartwoodNotes(input, {expectedPubkey, mintHost?, passphrase?, gap?})
   heartwoodNotes(t), heartwoodNotesOrLastSeen(t) -> {live:true, notes} | {live:false, notes, at, reason},
   heartwoodHeld(), heartwoodInventory() -> {notes, at}
