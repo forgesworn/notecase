@@ -1,7 +1,7 @@
 // Notecase's integration boundary. Protocol behaviour comes from the
 // reference wallet package; deterministic recovery, payment requests and
 // per-wallet transport configuration remain application policy here.
-import {isCk1, isPreimage, noteK1, resolveLnurlInput} from '@lnurlcash/kit'
+import {decodeCs1WithAmount, isCk1, isPreimage, noteK1, resolveLnurlInput} from '@lnurlcash/kit'
 import {isCw1} from './spend.ts'
 export * from '@lnurlcash/kit'
 // Every note is a taproot output key now (LUD-25's unified verification).
@@ -22,6 +22,8 @@ export {
   checkSpendOffline,
   ck1OutputKey,
   decodeCw1,
+  deriveNotePubkey,
+  deriveNoteSecretKey,
   encodeCw1,
   isCw1,
   keyPathSighash,
@@ -37,6 +39,10 @@ export {
   verifyCk1,
   verifyNoteCertificate,
   verifyNoteCertificate as verifyNoteSignature,
+  NOTE_PURPOSE_WALLET,
+  NOTE_PURPOSE_CHANGE,
+  NOTE_PURPOSE_LIGHTNING_ADDRESS,
+  type NotePurpose,
   type AddressProofAction,
   type Cw1,
   type SpendCheck
@@ -55,6 +61,32 @@ export const resolveNoteInput = (value: string): string | null => {
 }
 
 export const isValidNoteInput = (value: string): boolean => resolveNoteInput(value) !== null
+
+// LUD-25 renamed a note URL's certificate from `sig` to `c`. Both are read,
+// the new name first, so a note from either kind of wallet keeps its
+// certificate here.
+export const noteSignature = (url: string): string | null => {
+  try {
+    const params = new URL(url).searchParams
+    return params.get('c') ?? params.get('sig')
+  } catch {
+    return null
+  }
+}
+
+export const noteDeclaredAmount = (url: string): number | null => {
+  try {
+    const raw = new URL(url).searchParams.get('amount')
+    if (raw !== null) {
+      const n = Number(raw)
+      return Number.isFinite(n) ? n : null
+    }
+    const certificate = noteSignature(url)
+    return certificate ? decodeCs1WithAmount(certificate)?.amountMsat ?? null : null
+  } catch {
+    return null
+  }
+}
 export * from './cash.js'
 export {deriveNoteRoot, deriveNoteSecret} from './legacy-secrets.js'
 export * from './payment-request.js'

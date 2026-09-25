@@ -16,3 +16,9 @@ export const taprootMoneyer = 'decodeSpend' in moneyer
 // The id moneyer files a bearer note under, for a test that credits one
 // straight into its store.
 export const moneyerBearerId = (k1: string): string => (taprootMoneyer ? bearerNoteIdOfPreimage(k1) : hashK1(k1))
+
+// A moneyer following LUD-25's derivation purposes pays a name on purpose 2.
+// Heartwood firmware claims a key note on the ladder from before purposes,
+// so under that moneyer a heartwood cannot yet collect what its names are
+// paid: the notes wait at the mint for firmware that takes a purpose.
+export const purposedMoneyer = 'NOTE_PURPOSE_LIGHTNING_ADDRESS' in moneyer

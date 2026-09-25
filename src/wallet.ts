@@ -22,6 +22,9 @@ import {
   cashNodeToCx1,
   decodeCx1,
   deriveNotePubkey,
+  NOTE_PURPOSE_WALLET,
+  NOTE_PURPOSE_LIGHTNING_ADDRESS,
+  type NotePurpose,
   encodeCk1,
   encodeCp1,
   encodeCx1,
@@ -184,6 +187,11 @@ export type CheckReport = {
 // How many notes at one mint are asked about at a time. Enough to make a
 // sweep of a full case quick, few enough that no mint sees a burst.
 const CHECK_CONCURRENCY = 4
+
+// The ladders a mint can have paid this wallet's names on: LUD-25's
+// Lightning Address purpose, then the single ladder from before purposes.
+// Purposes 0 and 1 are a wallet's own notes, which a name never receives.
+const ADDRESS_PURPOSES: readonly NotePurpose[] = [NOTE_PURPOSE_LIGHTNING_ADDRESS, null]
 
 // The offline cash drawer. LUD-25's whole offline story assumes the payer
 // can hand over the right amount without touching the mint, and a wallet
@@ -604,7 +612,8 @@ export class Wallet {
   }
 
   // The cx1 a mint has on file for `name`, as the name's own payRequest
-  // publishes it: LUD-25 has it carried as text/xpub, for internal transfers.
+  // publishes it: LUD-25 has it carried as text/cpub (text/xpub before), for
+  // internal transfers.
   // Null when it names none, or the mint cannot be asked.
   private async branchOnFile(discoveryUrl: string, name: string): Promise<string | null> {
     try {
@@ -678,7 +687,9 @@ export class Wallet {
         schnorr.verify(
           hexToBytes(proof.sig),
           addressProofDigest(action, spendDomainOf(server), name),
-          deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, 0)
+          // Firmware from before purposes signs with its unpurposed index 0,
+          // which no current mint accepts, so that proof stops here too.
+          deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, NOTE_PURPOSE_WALLET, 0)
         )
     } catch {
       valid = false
@@ -846,7 +857,7 @@ export class Wallet {
       const {pubkeyXOnly, chainCode} = cashNodeToCx1(node)
       return {
         cx1: encodeCx1(pubkeyXOnly, chainCode),
-        indexZeroSecretKey: deriveNoteSecretKey(node.privateKey, node.chainCode, 0)
+        indexZeroSecretKey: deriveNoteSecretKey(node.privateKey, node.chainCode, NOTE_PURPOSE_WALLET, 0)
       }
     })
   }
@@ -859,30 +870,36 @@ export class Wallet {
     return registrations.find(registration => registration.cx1 === this.data.settings.lightningAddressCx1) ?? null
   }
 
-  // The ck1 note for index `index` on a branch, and the cp1 it sits at. The
-  // ck1 signs the key-path sighash for the mint at `domain` (a note or mint
-  // URL, or its host), so it opens this note there and nowhere else. Zero
-  // aux_rand makes it deterministic: deriving it again gives the same URL.
+  // The ck1 note for index `index` of `purpose` on a branch, and the cp1 it
+  // sits at. The ck1 signs the key-path sighash for the mint at `domain` (a
+  // note or mint URL, or its host), so it opens this note there and nowhere
+  // else. Zero aux_rand makes it deterministic: deriving it again gives the
+  // same URL.
   private keyNoteOn(
     node: ReturnType<typeof deriveCashAddressNode>,
+    purpose: NotePurpose,
     index: number,
     domain: string
   ): {ck1: string; cp1: string} {
-    const {pubkeyXOnly, signature} = signNoteOwnership(deriveNoteSecretKey(node.privateKey, node.chainCode, index), domain)
+    const {pubkeyXOnly, signature} = signNoteOwnership(deriveNoteSecretKey(node.privateKey, node.chainCode, purpose, index), domain)
     return {ck1: encodeCk1(pubkeyXOnly, signature), cp1: encodeCp1(pubkeyXOnly)}
   }
 
   // A note paid to one of this wallet's keys arrives as a lookup with no
   // secret. Derive the key at the index the mint named, on each branch the
   // wallet could have been paid on, check it is the key the note sits at,
-  // and sign for it.
+  // and sign for it. A mint pays a name on the Lightning Address purpose;
+  // one from before purposes paid the single ladder, and its notes still sit
+  // there.
   private noteUrlForKey(lookupUrl: string, key: {cp1: string; index: number}): string {
     const host = serverOf(lookupUrl)
     const nodes = this.addressNodes(host)
     if (!nodes.length) {
       throw new WalletUsageError('This wallet has no recovery words and no Nostr key, so it holds no keys for a note paid to them.')
     }
-    const ck1 = nodes.map(node => this.keyNoteOn(node, key.index, lookupUrl)).find(note => note.cp1 === key.cp1)?.ck1
+    const ck1 = nodes
+      .flatMap(node => ADDRESS_PURPOSES.map(purpose => this.keyNoteOn(node, purpose, key.index, lookupUrl)))
+      .find(note => note.cp1 === key.cp1)?.ck1
     if (!ck1) throw new WalletUsageError(`A note at ${host} was paid to a key this wallet does not hold.`)
     const url = new URL(lookupUrl)
     url.searchParams.delete('p')
@@ -1912,7 +1929,12 @@ export class Wallet {
   noteUrlFor(note: NoteRecord, opts?: {stripSignature?: boolean}): string {
     const url = buildNoteUrl(note.baseUrl, note.k1, note.amountMsat)
     if (opts?.stripSignature || !note.signature) return url
-    return withNewK1(url, note.k1, note.amountMsat, note.signature)
+    // LUD-25 carries the certificate as `c`; the kit still writes `sig`. A
+    // wallet reading only `sig` checks such a note with the mint instead.
+    const signed = new URL(withNewK1(url, note.k1, note.amountMsat, note.signature))
+    signed.searchParams.delete('sig')
+    signed.searchParams.set('c', note.signature)
+    return signed.toString()
   }
 
   // ---- the offline cash drawer ----
@@ -2715,7 +2737,8 @@ export class Wallet {
   // every payment whether or not its wrap reaches a relay. A spent key
   // counts as used, so the gap is of keys never paid, and a refusal that is
   // not "unknown" stops the walk rather than reading as its end. Each branch
-  // the wallet could have been paid on is walked in turn.
+  // the wallet could have been paid on is walked in turn, on each ladder a
+  // name is paid on.
   async scanAddress(host?: string, options: {gap?: number} = {}): Promise<{received: ReceiveResult[]; scanned: number}> {
     const entry = this.mintEntry(host)
     const nodes = this.addressNodes(entry.host)
@@ -2726,9 +2749,11 @@ export class Wallet {
     const received: ReceiveResult[] = []
     let scanned = 0
     for (const node of nodes) {
-      const walked = await this.takeFromBranch(baseUrl, node, options.gap ?? 20)
-      received.push(...walked.received)
-      scanned += walked.scanned
+      for (const purpose of ADDRESS_PURPOSES) {
+        const walked = await this.takeFromBranch(baseUrl, node, purpose, options.gap ?? 20)
+        received.push(...walked.received)
+        scanned += walked.scanned
+      }
     }
     return {received, scanned}
   }
@@ -2746,13 +2771,14 @@ export class Wallet {
   private async takeFromBranch(
     baseUrl: string,
     node: ReturnType<typeof deriveCashAddressNode>,
+    purpose: NotePurpose,
     gap: number
   ): Promise<{received: ReceiveResult[]; scanned: number}> {
     const received: ReceiveResult[] = []
     let quiet = 0
     let index = 0
     while (quiet < gap) {
-      const {ck1, cp1} = this.keyNoteOn(node, index, baseUrl)
+      const {ck1, cp1} = this.keyNoteOn(node, purpose, index, baseUrl)
       index += 1
       let info: Awaited<ReturnType<typeof fetchNoteInfoByHash>>
       try {
@@ -2772,8 +2798,8 @@ export class Wallet {
       const id = noteId(ck1)
       if (this.data.notes.some(note => note.id === id && note.state !== 'spent' && note.state !== 'sent')) continue
       const url = new URL(buildNoteUrl(baseUrl, ck1, info.maxWithdrawable))
-      const sig = (info as {sig?: unknown}).sig
-      if (typeof sig === 'string') url.searchParams.set('sig', sig)
+      const certificate = (info as {c?: unknown}).c ?? (info as {sig?: unknown}).sig
+      if (typeof certificate === 'string') url.searchParams.set('c', certificate)
       received.push(await this.receive(url.toString()))
     }
     return {received, scanned: index}
@@ -2799,15 +2825,18 @@ export class Wallet {
     }
     try {
       const baseUrl = await this.withdrawBase(entry)
-      // Heartwood firmware still derives the old path, so both.
+      // Heartwood firmware still derives the old path, so both, and on
+      // each ladder a name is paid on.
       const received: ReceiveResult[] = []
       let scanned = 0
       for (const derive of [deriveNostrAddressNode, deriveLegacyNostrAddressNode]) {
         const node = derive(identity.secret, entry.host)
         try {
-          const walked = await this.takeFromBranch(baseUrl, node, options.gap ?? 20)
-          received.push(...walked.received)
-          scanned += walked.scanned
+          for (const purpose of ADDRESS_PURPOSES) {
+            const walked = await this.takeFromBranch(baseUrl, node, purpose, options.gap ?? 20)
+            received.push(...walked.received)
+            scanned += walked.scanned
+          }
         } finally {
           node.privateKey.fill(0)
         }
@@ -3088,10 +3117,13 @@ export class Wallet {
     const claimed: {id: string; index: number; amountMsat: number}[] = []
     let quiet = 0
     let index = 0
+    // The device derives the key it claims from the index alone, on the
+    // ladder from before purposes. What a mint has since paid on the
+    // Lightning Address purpose waits there for firmware that takes one.
     while (quiet < gap) {
       const at = index
       index += 1
-      const cp1 = encodeCp1(deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, at))
+      const cp1 = encodeCp1(deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, null, at))
       let info: Awaited<ReturnType<typeof fetchNoteInfoByHash>>
       try {
         info = await fetchNoteInfoByPubkey(baseUrl, cp1, this.opts)
@@ -3108,7 +3140,7 @@ export class Wallet {
       }
       quiet = 0
       if (held.has(cp1)) continue
-      const sig = (info as {sig?: unknown}).sig
+      const sig = (info as {c?: unknown}).c ?? (info as {sig?: unknown}).sig
       const kept = await client.claimKeyNote({
         host: noteHost,
         index: at,
@@ -3210,7 +3242,7 @@ export class Wallet {
       const url = new URL(buildNoteUrl(`lnurlw://${note.host}`, k1, note.amount_msat))
       // A key note's certificate is over its public key, which the ck1
       // released above recovers to, so it travels with it and is checked.
-      if (note.p && note.sig) url.searchParams.set('sig', note.sig)
+      if (note.p && note.sig) url.searchParams.set('c', note.sig)
       let result: ReceiveResult | null = null
       try {
         result = await this.receive(url.toString())

@@ -52,6 +52,35 @@ together, too: an older release sees each moved note twice.
 - The pinned `@lnurlcash/kit` predates all of this, so the primitives are
   in `src/spend.ts` and shadow the kit's older helpers at `src/lnurlcash.js`.
 
+Then LUD-25's derivation purposes and renames (lnurl/luds 1286380..50d740a).
+A mint that follows them (moneyer after 0.16) proves names with a different
+key and pays them on different keys, so this release and that mint go out
+together: neither works fully with the other's older release.
+
+- A branch's keys are derived per purpose: `tagged_hash("LNURLcash/derive",
+  P || chaincode || ser32(purpose) || ser32(i))`. A name's payments arrive
+  on purpose 2, the Lightning Address one; `address scan`, a key wrap and a
+  heartwood's nsec recovery look there and on the single ladder from before
+  purposes, where notes already paid still sit. Purposes 0 and 1 hold a
+  wallet's own notes, which a name never receives, so a scan leaves them.
+- The address proof is signed by the purpose-0 index-0 key (test vector 2's
+  new signatures, byte for byte). A heartwood's proof must be too: firmware
+  from before purposes signs with its unpurposed index 0, and Notecase
+  refuses to send that.
+- `heartwood address scan` still claims on the old ladder, because the
+  device derives the key from the index itself. What a purpose-following
+  mint pays a heartwood's name waits there until firmware takes a purpose;
+  `heartwood recover` from the nsec reaches it meanwhile.
+- A certificate is `c` (and `c2`), not `sig`/`sig2`: read from a mint's
+  answer and a note URL under either name, written as `c` on every note
+  handed out and every key-wrap URL. A mint answering only `c` has its answer
+  given the old names for the pinned kit, so its certificate is checked
+  rather than read as missing.
+- A name's branch is read off `text/cpub`, or `text/xpub` from an older mint.
+- Every output a bearer note names goes out as `p1`/`p2` (and a lookup as
+  `p`) alongside the kit's `h`/`h2`, with the same 64-hex value: the
+  reference mint no longer reads `h`/`h2`, and an older mint reads either.
+
 ## 0.23.2 - 2026-09-24
 
 Documentation only; no code changes.

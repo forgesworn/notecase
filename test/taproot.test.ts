@@ -11,7 +11,7 @@ import {
   noteIdOf,
   signNoteOwnership
 } from '../src/lnurlcash.js'
-import {NUMS_H} from '../src/spend.ts'
+import {NUMS_H, tapLeafHash, taprootTweak} from '../src/spend.ts'
 import {BadSignatureError, Wallet, WalletUsageError} from '../src/wallet.ts'
 import {emptyWallet, type WalletData} from '../src/types.ts'
 import {certify} from './helpers.ts'
@@ -24,9 +24,7 @@ import {certify} from './helpers.ts'
 
 const MINT_KEY = hexToBytes('a8358061952ee158b42ffe1607c00adda3e63098247f837f08a4ef9492b4f798')
 const MINT_PUBKEY = '035acdbd57663f858be6d61ec4bfcbc99492699010f1451e30a6550f26295e813d'
-const PK0 = 'aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634'
-const V3_CK1 =
-  'ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6g8wlplczy60g4e5wp3dyyz6xr07fpse9flp0fy50cg4a4w64av6eprdctjlan6cu9dt38re9nu08etk5w3dmknlhuxzwcm3ycjysw3c9dpmpy'
+const PK0 = '690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f'
 const V5 = {
   preimage: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
   h: '630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd',
@@ -96,18 +94,25 @@ const walletAt = (mint: ReturnType<typeof fakeMint>, seedHex?: string) => {
 }
 
 describe('a ck1 this wallet signs', () => {
-  it("is test vector 3's, byte for byte, when it finds its own note while scanning its branch", async () => {
+  it("signs for test vector 1's Lightning Address key when it finds its own note while scanning its branch", async () => {
     const mint = fakeMint()
-    mint.notes.set(PK0, 21_000)
-    // test vector 1's seed, whose branch at mint.example has pk_0 at index 0
+    // test vector 1's purpose-2 (Lightning Address) key at index 0, where a
+    // mint pays a name; the scan does not walk purpose 0, vector 3's key
+    const q = 'acff3482453b4671e410d2158fd93ab7d4c3e8c1b9554ce1190deb021fd2cd4c'
+    const sk = hexToBytes('845e8f836a4cf64e9c03dab9d20bda0d3032d6b5ee7c2fa3014ef9d8f501faa8')
+    mint.notes.set(q, 21_000)
     const {wallet} = walletAt(mint, '000102030405060708090a0b0c0d0e0f')
 
     const scan = await wallet.scanAddress('mint.example', {gap: 1})
     expect(scan.received.map(result => result.note.amountMsat)).toEqual([21_000])
-    // the note was looked up by its key and spent with the vector's ck1
+    // the note was looked up by its key and spent with a ck1 by the spec's
+    // sk for it, signed as vector 3 signs: over mint.example's sighash
+    const {pubkeyXOnly, signature} = signNoteOwnership(sk, 'mint.example')
+    expect(bytesToHex(pubkeyXOnly)).toBe(q)
+    const ck1 = encodeCk1(pubkeyXOnly, signature)
     const spent = mint.seen.find(url => url.pathname === '/cb')!
-    expect(spent.searchParams.getAll('k1')).toEqual([V3_CK1])
-    expect(mint.seen.some(url => url.pathname === '/w' && url.searchParams.get('k1') === V3_CK1)).toBe(false)
+    expect(spent.searchParams.getAll('k1')).toEqual([ck1])
+    expect(mint.seen.some(url => url.pathname === '/w' && url.searchParams.get('k1') === ck1)).toBe(false)
     expect(wallet.balanceMsat()).toBe(21_000)
   })
 
@@ -175,11 +180,12 @@ describe('a cw1 in hand', () => {
   // A leaf a key must sign for: only the mint's interpreter can judge it.
   const scripted = () => {
     const script = new Uint8Array([0x20, ...hexToBytes(PK0), 0xac])
+    const {parity} = taprootTweak(NUMS_H, tapLeafHash(script))!
     return encodeCw1({
       locktime: 0,
       sequence: 0xffffffff,
       script,
-      controlBlock: new Uint8Array([0xc0, ...NUMS_H]),
+      controlBlock: new Uint8Array([0xc0 | parity, ...NUMS_H]),
       witness: [new Uint8Array(64)]
     })
   }

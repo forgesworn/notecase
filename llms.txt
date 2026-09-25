@@ -181,13 +181,15 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   lightningAddress(), payNameToKeys(toKeys?, {name?, mintHost?}), unregisterName({name?, mintHost?}), addressCx1(host), scanAddress(host?, {gap?})
   - with a seed, registerName sends a cx1 (the spec's m/139'/d1..d4, as lnurl-wallet); a
     moneyer >=0.13 then pays the name to the wallet's keys, and the inbox opens the
-    index-only wrap (/w?p=<cp1>&sig=<amount-bearing-cs1>&i=) by deriving the key and rotating
+    index-only wrap (/w?p=<cp1>&c=<amount-bearing-cs1>&i=; sig= before c=) by deriving the
+    key at that index on LUD-25's Lightning Address purpose (2), or the ladder from before
+    purposes for a note paid under it, and rotating
   - moneyer's POST /names carries "sig" whenever it sets or clears a cx1: set is proven
-    by the branch on file (read off the name's payRequest text/xpub, else the one
+    by the branch on file (read off the name's payRequest text/cpub or text/xpub, else the one
     recorded here), or by the new branch when none is; clear by the branch on file
   - the reference lnurl-mint is detected with a reserved-name probe, then takes signed
     POST/DELETE /p/{username} requests. The signature proves control of the branch's
-    index-0 key, over the mint's own hostname; an update is signed by the branch
+    purpose-0 index-0 key, over the mint's own hostname; an update is signed by the branch
     currently recorded, then the new public cx1 becomes current locally. An optional npub also makes the name NIP-05. It sends no wrap, so
     address scan (also available in the web settings) finds payments
   heartwoodNameToKeys(t, name, {toKeys?, mintHost?}), heartwoodUnregisterName(t, name, {mintHost?}), heartwoodScanAddress(t, host?, {gap?}),
@@ -207,7 +209,8 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   - a heartwood derives its branch from the identity key that owns the name
     (HMAC-SHA256(key, "LNURLcash/nostr-seed") -> m/139'/1'/d1..d4 in firmware today;
     a words-less wallet hands out m/139'/d1..d4, as conformance's nostr-seed.json), hands over the
-    cx1 (heartwood_note_address), and signs its index-0 proof on a hold
+    cx1 (heartwood_note_address), and signs its purpose-0 index-0 proof on a hold (firmware
+    from before purposes signs with its unpurposed index 0, which Notecase refuses to send)
     (heartwood_note_address_proof {host, name, action} -> {ok, host, domain, name, action,
     cx1, sig}). Notecase refuses to send a proof whose cx1 is not the branch expected or
     whose sig does not verify against that cx1's pk_0 over the domain-bound digest.

@@ -14,6 +14,7 @@ import {
   deriveLegacyCashAddressNode,
   deriveCashRoot,
   deriveNotePubkey,
+  NOTE_PURPOSE_WALLET,
   deriveNoteSecretKey,
   encodeCk1,
   encodeCp1,
@@ -24,6 +25,7 @@ import {
 import {NIP46_KIND, type DeviceNote} from '../src/heartwood.ts'
 import type {NostrTransport} from '../src/nostr.ts'
 import {legacyEcdsaCk1, makeWallet} from './helpers.ts'
+import {purposedMoneyer} from './moneyer.ts'
 
 // A lightning address owned by a heartwood's own npub, paid to the device's
 // own keys (LUD-25 Part 2). The device derives its address branch from that
@@ -54,12 +56,13 @@ const fakeHeartwood = (relay: string) => {
   let proofMode: 'ok' | 'unknown' | 'wrongBranch' | 'wrongDomain' = 'ok'
   // The firmware's address_proof: the branch cash_address hands out for
   // `host` signs sha256("LNURLcash:<action>:<domain>:<name>") with its
-  // index-0 key, the domain being the host's bare lowercase hostname.
+  // purpose-0 index-0 key (firmware from before purposes signs with its
+  // unpurposed one, which no mint takes), the domain being the host's bare lowercase hostname.
   const proofFor = (host: string, name: string, action: string, domain = host.replace(/:\d+$/, '').toLowerCase()) => {
     const node = branchFor(host)
     const {pubkeyXOnly, chainCode} = cashNodeToCx1(node)
     const digest = sha256(utf8ToBytes(`LNURLcash:${action}:${domain}:${name}`))
-    const sig = schnorr.sign(digest, deriveNoteSecretKey(node.privateKey, node.chainCode, 0), new Uint8Array(32))
+    const sig = schnorr.sign(digest, deriveNoteSecretKey(node.privateKey, node.chainCode, NOTE_PURPOSE_WALLET, 0), new Uint8Array(32))
     return {cx1: encodeCx1(pubkeyXOnly, chainCode), sig: bytesToHex(sig), domain}
   }
 
@@ -96,11 +99,12 @@ const fakeHeartwood = (relay: string) => {
       }
       case 'heartwood_note_claim': {
         // The firmware's claim_key_note: derive the key at `index` for the
-        // endpoint's mint, refuse one that is not at `p`, keep it once.
+        // endpoint's mint, on the ladder from before purposes, refuse one
+        // that is not at `p`, keep it once.
         const host = String(fields.host)
         const node = branchFor(host.split('/')[0]!)
         const index = Number(fields.index)
-        const key = deriveNoteSecretKey(node.privateKey, node.chainCode, index)
+        const key = deriveNoteSecretKey(node.privateKey, node.chainCode, null, index)
         const p = encodeCp1(hexToBytes(getPublicKey(key)))
         if (fields.p !== undefined && fields.p !== p) return {error: 'bad_request'}
         const existing = notes.find(n => n.p === p)
@@ -316,7 +320,7 @@ const setUp = async (referenceRegistration = false) => {
 // What a mint checks: the branch's pk_0 over the domain-bound digest.
 const provenBy = (cx1: string, action: string, name: string, domain: string, sig: string): boolean => {
   const branch = decodeCx1(cx1)!
-  const pk0 = deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, 0)
+  const pk0 = deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, NOTE_PURPOSE_WALLET, 0)
   return schnorr.verify(hexToBytes(sig), sha256(utf8ToBytes(`LNURLcash:${action}:${domain}:${name}`)), pk0)
 }
 
@@ -399,7 +403,9 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     expect(theMint.moneyer.store.zapName('donkey')?.cx1 ?? null).toBeNull()
   })
 
-  it('finds a payment the device never saw a wrap for, has the device keep it, and collects it', async () => {
+  // Firmware claims on the ladder from before purposes, which only a mint
+  // from before them pays a name on (see purposedMoneyer).
+  it.skipIf(purposedMoneyer)('finds a payment the device never saw a wrap for, has the device keep it, and collects it', async () => {
     const {theMint, device, wallet} = await setUp()
     await wallet.heartwoodNameToKeys(device.transport, 'donkey')
     await pay(theMint, 'donkey', 21_000)
@@ -433,7 +439,7 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     expect(stats.outstandingNotes).toBe(1)
   })
 
-  it('collects only the notes named, and leaves the rest on the device', async () => {
+  it.skipIf(purposedMoneyer)('collects only the notes named, and leaves the rest on the device', async () => {
     const {theMint, device, wallet} = await setUp()
     await wallet.heartwoodNameToKeys(device.transport, 'donkey')
     await pay(theMint, 'donkey', 21_000)
@@ -447,6 +453,23 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     expect(result.collected.map(r => r.note.amountMsat)).toEqual([second!.amount_msat])
     expect(device.notes.map(n => n.state)).toEqual(['confirmed', 'spent'])
     expect(first!.state).toBe('confirmed')
+  })
+
+  it.runIf(purposedMoneyer)('cannot claim what a purposed mint pays its name, which waits at the mint for the nsec', async () => {
+    const {theMint, device, wallet} = await setUp()
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    await pay(theMint, 'donkey', 21_000)
+
+    const scan = await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})
+    expect(scan.claimed).toEqual([])
+    expect(device.notes).toEqual([])
+    const stats = (await (await fetch(`${theMint.moneyer.url}/stats`)).json()) as {outstandingNotes: number}
+    expect(stats.outstandingNotes).toBe(1)
+
+    const {wallet: rescuer} = makeWallet()
+    await rescuer.addMint(`mint@${theMint.host}`)
+    const result = await rescuer.recoverHeartwoodNotes(device.nsec, {expectedPubkey: device.pubkey, mintHost: theMint.host, gap: 3})
+    expect(result.received.map(r => r.note.amountMsat)).toEqual([21_000])
   })
 
   it("recovers a lost heartwood's notes from its nsec, into a wallet that never saw it", async () => {
@@ -465,8 +488,10 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     expect(result.mode).toBe('bunker')
     expect(result.received.map(r => r.note.amountMsat).sort((a, b) => a - b)).toEqual([5_000, 21_000])
     // the spec's branch first, where this firmware was never paid, then the
-    // old m/139'/1' one it still hands out
-    expect(result.scanned).toBe(3 + 2 + 3)
+    // old m/139'/1' one it still hands out, each on the Lightning Address
+    // purpose and on the ladder from before purposes: four gaps, and the two
+    // keys paid
+    expect(result.scanned).toBe(2 + 3 * 4)
     expect(rescuer.balanceMsat()).toBe(26_000)
     // taken, so a second recovery finds the keys spent and takes nothing
     expect((await rescuer.recoverHeartwoodNotes(device.nsec, opts)).received).toEqual([])

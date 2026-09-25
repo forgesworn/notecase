@@ -402,10 +402,61 @@ export const signNoteOwnership = (
 
 // ---- the address registration proof ----
 
+// ---- a cx1 branch's note keys ----
+//
+//   t    = tagged_hash("LNURLcash/derive", P || chaincode || ser32(purpose) || ser32(i)) mod n
+//   pk_i = x(lift_x(P) + t·G)
+//
+// `purpose` splits a branch into independent counters: 0 for a wallet's own
+// notes (and the address proof's index 0), 1 for split change, 2 for what a
+// Lightning Address or an internal transfer delivers. `null` is the single
+// ladder before purposes (luds 2e5be03): notes already paid to it stay there,
+// and heartwood firmware still derives it.
+export const NOTE_PURPOSE_WALLET = 0
+export const NOTE_PURPOSE_CHANGE = 1
+export const NOTE_PURPOSE_LIGHTNING_ADDRESS = 2
+export type NotePurpose = typeof NOTE_PURPOSE_WALLET | typeof NOTE_PURPOSE_CHANGE | typeof NOTE_PURPOSE_LIGHTNING_ADDRESS | null
+
+const ser32 = (n: number): Uint8Array => {
+  const bytes = new Uint8Array(4)
+  new DataView(bytes.buffer).setUint32(0, n, false)
+  return bytes
+}
+
+const noteTweak = (branchPubkeyXOnly: Uint8Array, chainCode: Uint8Array, purpose: NotePurpose, index: number): bigint => {
+  const counter = purpose === null ? [ser32(index)] : [ser32(purpose), ser32(index)]
+  return BigInt(`0x${bytesToHex(taggedHash('LNURLcash/derive', branchPubkeyXOnly, chainCode, ...counter))}`) % CURVE_ORDER
+}
+
+export const deriveNotePubkey = (
+  branchPubkeyXOnly: Uint8Array,
+  chainCode: Uint8Array,
+  purpose: NotePurpose,
+  index: number
+): Uint8Array => {
+  const p = liftX(branchPubkeyXOnly)
+  if (!p) throw new Error('The branch key is not on the curve.')
+  return schnorr.utils.pointToBytes(p.add(secp256k1.Point.BASE.multiply(noteTweak(branchPubkeyXOnly, chainCode, purpose, index))))
+}
+
+// The branch key is taken at even y first, as lift_x takes P, or the secret
+// would not match the key deriveNotePubkey gives.
+export const deriveNoteSecretKey = (
+  branchPrivateKey: Uint8Array,
+  chainCode: Uint8Array,
+  purpose: NotePurpose,
+  index: number
+): Uint8Array => {
+  const raw = BigInt(`0x${bytesToHex(branchPrivateKey)}`)
+  const even = secp256k1.getPublicKey(branchPrivateKey, true)[0] === 2 ? raw : CURVE_ORDER - raw
+  const t = noteTweak(schnorr.getPublicKey(branchPrivateKey), chainCode, purpose, index)
+  return hexToBytes(((even + t) % CURVE_ORDER).toString(16).padStart(64, '0'))
+}
+
 export type AddressProofAction = 'register' | 'unregister'
 
 // LUD-25's proof that a cx1 branch agrees to a name pointing at it, or away
-// from it: its index-0 key signing sha256("LNURLcash:<action>:<domain>:<name>").
+// from it: its purpose-0 index-0 key signing sha256("LNURLcash:<action>:<domain>:<name>").
 // `domain` is the SERVICE's own hostname, so a proof one mint has seen cannot
 // be replayed at another. Zero aux_rand, so a retried request resends the
 // same proof rather than a fresh one that is equally valid.

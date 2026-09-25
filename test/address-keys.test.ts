@@ -147,8 +147,9 @@ describe('a name paid to this wallet\'s keys', () => {
     const scan = await wallet.scanAddress(theMint.host, {gap: 5})
     expect(scan.received.map(r => r.note.amountMsat).sort((a, b) => a - b)).toEqual([5_000, 21_000])
     // the words branch, then the Nostr key's and both old m/139'/1'
-    // branches, where nothing was paid
-    expect(scan.scanned).toBe(2 + 5 + 5 + 5 + 5)
+    // branches, each on the Lightning Address purpose and the ladder from
+    // before purposes: eight gaps, and the two keys paid
+    expect(scan.scanned).toBe(2 + 5 * 8)
     expect(wallet.balanceMsat()).toBe(26_000)
 
     // the wraps that arrive late find their notes already taken
@@ -239,7 +240,7 @@ describe('a name paid to this wallet\'s keys', () => {
 
     const scan = await wallet.scanAddress(theMint.host, {gap: 3})
     expect(scan.received).toEqual([])
-    expect(scan.scanned).toBe(1 + 3 + 3 + 3 + 3)
+    expect(scan.scanned).toBe(1 + 3 * 8)
     const stats = (await (await fetch(`${theMint.moneyer.url}/stats`)).json()) as {outstandingNotes: number}
     // the rotated note, and nothing left on the key
     expect(stats.outstandingNotes).toBe(1)

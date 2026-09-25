@@ -25,28 +25,28 @@ import {
   verifyNoteCertificate
 } from '../src/lnurlcash.js'
 import {bech32m} from '@scure/base'
-import {NUMS_H} from '../src/spend.ts'
+import {NUMS_H, taprootTweak} from '../src/spend.ts'
 import {certify, legacyEcdsaCk1, legacySchnorrCk1} from './helpers.ts'
 
-// LUD-25's own test vectors (lnurl/luds 25.md at 6e865b1), byte for byte.
+// LUD-25's own test vectors (lnurl/luds 25.md at 50d740a), byte for byte.
 // Every spend in them was accepted by Bitcoin Core's interpreter against the
 // canonical spend transaction, so matching them is matching the chain's rules.
 
-// Vector 1, i = 0: the key-path note vectors 3 and 4 spend and certify.
+// Vector 1, purpose 0, i = 0: the key-path note vectors 3 and 4 spend and certify.
 const V1 = {
-  sk0: '944a9631dbda27cf989e27df8be7317a5a9dfb517a6b71358d175f58dd2dc99f',
-  pk0: 'aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634',
-  cp1: 'cp14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6qh2fkky'
+  sk0: '3616b02290a133da73e758a54dbff1bf6439b4067a820cb51ca873fa4a13a96a',
+  pk0: '690ac33892c64aa53874b0066ab1332f0ef45cb7c0e017eae0828916f52aa99f',
+  cp1: 'cp1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0sxpcl6z'
 }
 
 const V3 = {
   domain: 'mint.example',
   prevout: 'd5ac2de3423432e37713bcb133cfea7938ff6b2f8ea4174dfcec84bea705d6b2',
   sigMsg:
-    '00020000000000000030b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfcddd2d8771df7fb07a13626816ef020a553559bdcd01734d1259655430f6b91faad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d0000000000',
-  sighash: 'b8933a42090297a1f80d7f1fc0023ec1aa2ab36a7df332520f0dacf07f617943',
-  sig: '83bbe1fe044d3d15cd1c18b484168c37f921864a9f85e9251f8457b576abd66b211b70b97fb3d63856ae271e4b3e3cf95da8e8b7769fefc309d8dc4989120e8e',
-  ck1: 'ck14tf6pcmvpqltp5ke9mqgvzthm3rdzry49uccxrnygwcl4gvewc6g8wlplczy60g4e5wp3dyyz6xr07fpse9flp0fy50cg4a4w64av6eprdctjlan6cu9dt38re9nu08etk5w3dmknlhuxzwcm3ycjysw3c9dpmpy'
+    '00020000000000000030b1cba17526057f8343b434d78c6e2daf43429c3a38e236d22cf5f5b78b9024af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc6ca88527eb01d83d9c7eec6d169b4813ee5567ac7b83a83b5da812fac542d09dad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e3e7077fd2f66d689e0cee6a7cf5b37bf2dca7c979af356d0a31cbc5c85605c7d0000000000',
+  sighash: 'e97bb6831a916ff83919046f50a39c18ab98bf43079cf68cd364d251f7de527f',
+  sig: 'fc3491f1c6bca73dcd76b38fc6b7a82aef0f1fa67212ceb7d7f64dbc41c8bfe77e0db6077624bf117badb65efe0445e382ac9f4cd582f7a5cc366c7aeb4580d4',
+  ck1: 'ck1dy9vxwyjce922wr5kqrx4vfn9u80gh9hcrsp06hqs2y3daf24x0lcdy378rtefeae4mt8r7xk75z4mc0r7n8yykwkltlvndug8ytlem7pkmqwa3yhughhtdktmlqg30rs2kf7nx4stm6tnpkd3awk3vq6smm20wz'
 }
 
 const ck1At = (sk: string, domain: string): string => {
@@ -58,9 +58,9 @@ const V4 = {
   mintKey: 'a8358061952ee158b42ffe1607c00adda3e63098247f837f08a4ef9492b4f798',
   mintPubkey: '035acdbd57663f858be6d61ec4bfcbc99492699010f1451e30a6550f26295e813d',
   cs1At1000:
-    'cs10n1gxnfct5zv42mr3wqnxe3vm5d2rxrhwarejumslph06t2upcd2vkrkc3sr99wjlfj94nrlvuzv64ayme420rz5l2622xwn3ed8qu0llqpeg9n5x',
+    'cs10n1xrfz2zj6jln6a6x7nupfdjl92r6v3rwzausqfwtnzqyu0hxjma85mhvhfszfw8gfm8ez50ls5ly6yjwv2fnnmsd6d3g8rq2c3xlfj5gqqstd9v',
   cs1At21m:
-    'cs210u1khrv8hg4zuy9qx7gsg9wqrhn6epeehx23wkqp7exwhlwdwy6wans083h7ckz2qkxw399v22ugkw49sz8tcn6p6e5w3tepdzv2junscsqwvvr03'
+    'cs210u1e589gd5s4e3vr7nsy7dad4qxwvmnnqpuxcduar9xxwuntk6ey34q3kmlyh4ldk5z5j6zanyt470f0nujzdrh5c5fzz74pgxjpy54nvcpd0rph6'
 }
 
 const V5 = {
@@ -233,7 +233,8 @@ describe('script-path spends a wallet cannot judge', () => {
   // the canonical transaction can say whether its witness opens it.
   const keyed = (script: Uint8Array) => {
     const leaf = script
-    const control = new Uint8Array([0xc0, ...NUMS_H])
+    const {parity} = taprootTweak(NUMS_H, tapLeafHash(leaf))!
+    const control = new Uint8Array([0xc0 | parity, ...NUMS_H])
     return encodeCw1({locktime: 0, sequence: 0xffffffff, script: leaf, controlBlock: control, witness: [new Uint8Array(64)]})
   }
 

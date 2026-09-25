@@ -340,7 +340,7 @@ points the name at a branch of keys, or takes it off one, it also carries
 that branch's proof, as below.
 
 The reference `lnurl-mint` has a different management route. A claim sends
-the wallet's `cx1` branch plus a signature from that branch's index-0 key
+the wallet's `cx1` branch plus a signature from that branch's purpose-0 index-0 key
 over the name and the mint's own hostname, proving the wallet controls the
 keys it is registering; a proof one mint has seen cannot be replayed at
 another (LUD-25 test vector 2). Notecase detects the
@@ -353,7 +353,7 @@ When changing branches, Notecase retains the current public `cx1` and uses
 that old branch for the one update proof; only after the mint confirms the
 change does the replacement branch become the registered one locally. On
 Moneyer it first reads the branch on file off the name's own payRequest
-(`text/xpub`), so a name still pointing at an older branch is moved with
+(`text/cpub`, or `text/xpub` before it), so a name still pointing at an older branch is moved with
 that branch's proof even where nothing about it was recorded here.
 
 On Moneyer, what arrives at the address is a bearer note sealed to that same
@@ -523,7 +523,7 @@ convention is the plainest one available, so other wallets can read the
 same tags:
 
 > **a single NDEF URI record holding the note URL**, signature included
-> (`lnurlw://mint.example/w?k1=…&amount=…&sig=…`)
+> (`lnurlw://mint.example/w?k1=…&c=…`)
 
 Nothing else on the tag, and nothing implied about it. A tag is worse than
 a clipboard for secrecy - anyone who taps it owns the sats - so the wallet
@@ -569,7 +569,7 @@ the device does not answer.
 A name whose owner is the device's npub can be paid to the device's own keys
 instead (LUD-25 Part 2). `heartwood address keys <name>` asks the device for
 the watch-only branch it derives from that identity key, and for the branch's
-index-0 proof that it agrees (`heartwood_note_address_proof`), on one hold
+purpose-0 index-0 proof that it agrees (`heartwood_note_address_proof`), on one hold
 behind a card naming the action, the name and the mint. Notecase checks the
 proof before sending it on: it has to come from the branch expected and verify
 over the mint's own domain, or nothing is sent. Moneyer also has the device
