@@ -100,6 +100,12 @@ wallet had not seen before.
   second attempt is refused - but until a sync runs, the losing device
   shows money it no longer has. Sync often, and treat a balance as the
   last thing a mint agreed to rather than an oracle.
+- A device still on a release from before notes were keyed by their Q,
+  sharing a seed and the note store with one after, sees each moved note
+  twice: once under its old id and once under its Q. Nothing is lost -
+  both records hold the same secret and the mint burns it once - but the
+  older device's balance overstates until it is upgraded. Upgrade every
+  device sharing a seed together.
 - Derivation counters are merged by taking the highest any device has
   published, which closes the collision but does not eliminate it: two
   devices minting between the same pair of syncs can still derive the same

@@ -16,9 +16,9 @@ import type {LnurlcashOptions} from './lnurlcash-network.js'
 // A wallet whose secrets are derived (see secrets.ts) can rebuild itself
 // from the seed and the mint alone: walk the indices, ask the SERVICE what
 // each derived secret is worth, and stop once a run of them is unknown.
-// The SERVICE is not told anything it does not already hold - it stores
-// every note under sha256(k1) and is simply being asked about its own
-// records, one note at a time.
+// The SERVICE is not told anything it does not already hold - it files
+// every note under the Q that sha256(k1) names and is simply being asked
+// about its own records, one note at a time.
 //
 // The walk asks by HASH (LUD-25, "Checking a note without exposing it").
 // Asking by secret is what the obvious implementation does and it is a bad

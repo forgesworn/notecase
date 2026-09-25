@@ -47,7 +47,7 @@ A bearer note is lost the moment its secret exists nowhere durable. So:
 - **Rotate immediately, always.** On receive and on claim, because the
   sender - or anyone who saw the mint invoice - still knows the old secret.
 - **Never print a k1** unless you asked to send. Balances, lists and logs
-  show note ids (hashes) only.
+  show note ids (each note's public key) only.
 - **A pin only moves when you move it.** A mint's signing key is pinned on
   first contact and a change is refused. Where the mint itself publishes
   the old key as retired on its discovery endpoint, the refusal becomes a
@@ -236,7 +236,7 @@ notecase heartwood inbox               # publishes the device's inbox relays (ki
 notecase heartwood trust <npub|nip05>  # the device stores notes from this sender without a hold (a mint's zap key)
 notecase heartwood pair [label]        # mints a bunker URI for another wallet, one hold; first pairing needs the cable
 notecase heartwood collect [<id>...]   # brings in what arrived at the device (or just the notes named)
-notecase heartwood address keys <name> # a name the DEVICE's key owns, paid to the device's own keys; one hold
+notecase heartwood address keys <name> # a name the DEVICE's key owns, paid to the device's own keys; a hold or two
 notecase heartwood address scan        # payments to those keys whose wrap never reached the device
 notecase heartwood recover             # a lost heartwood's notes, from its master's nsec or BIP-39 phrase
 notecase backup shares --threshold 2 --count 3
@@ -260,6 +260,38 @@ This costs no privacy. The mint made these notes for this wallet and sees
 each one the moment it is spent, so asking after them tells it nothing it
 does not already hold. A mint that does not answer has its notes left
 exactly as they are and is named in the report - never marked.
+
+### What a note is
+
+Every note is a taproot output key `Q` (LUD-25 as of lnurl/luds 6e865b1),
+and its id here is `hex(Q)`: what its mint files, burns and certifies it
+under. Three kinds of spend open one, and the wallet holds and hands over
+any of them:
+
+- **A bearer preimage**, 64 hex: the short form of a one-leaf hashlock,
+  `OP_SHA256 <h> OP_EQUAL` under BIP-341's NUMS key. Every note this wallet
+  makes is one. It still discloses only `h` when it mints or rotates into
+  one, and the mint builds `Q` from that.
+- **A `ck1`**: a key's BIP-340 signature over the canonical spend
+  transaction for one mint's hostname, so it opens its note at that mint and
+  nowhere else. The wallet signs these for notes paid to its own keys, with
+  an all-zero `aux_rand`, so one key at one mint always gives the same
+  `ck1`. Older `ck1`s, signed over a fixed message, are still read.
+- **A `cw1`**: a script-path spend. One whose leaf is a bearer hashlock is
+  checked here exactly like a preimage. Any other script needs the mint's
+  own interpreter, so the wallet passes it on verbatim and only takes such
+  a note while it can ask the mint.
+
+A mint's certificate (`cs1`) is over `hex(Q)`, for every note. One from a
+mint that has not moved yet is over a bearer note's `h` instead; that is
+accepted after `Q` is tried, and a certificate under neither is refused as
+it always was.
+
+A wallet file, the web wallet's store, a backup or the relay store written
+before this filed each bearer note under `sha256(k1)`. Every record carries
+its secret, so it moves onto `hex(Q)` exactly the first time it is read,
+along with everything that names it: the inputs a mutation replaced, a
+melt's note, the note that paid a request.
 
 ### Paying with no connection
 
@@ -303,11 +335,15 @@ web wallet it is a switch in the header, and on the CLI it is `--offline`.
 hands them out. The mint charges for it in its own notes, so the wallet
 cuts one out of your balance and the mint burns it; where the price is
 zero, nothing is cut at all. Moneyer binds the name to this wallet's Nostr
-key with a signed NIP-98 request, without an account.
+key with a signed NIP-98 request, without an account. When the request
+points the name at a branch of keys, or takes it off one, it also carries
+that branch's proof, as below.
 
 The reference `lnurl-mint` has a different management route. A claim sends
-the wallet's `cx1` branch plus a signature from that branch's index-0 key,
-proving the wallet controls the keys it is registering. Notecase detects the
+the wallet's `cx1` branch plus a signature from that branch's index-0 key
+over the name and the mint's own hostname, proving the wallet controls the
+keys it is registering; a proof one mint has seen cannot be replayed at
+another (LUD-25 test vector 2). Notecase detects the
 route with a reserved-name request that cannot write, then uses signed
 `POST /p/<name>` to register or update it. Its npub is included too, so the
 same name can resolve over NIP-05. `notecase address unregister [name]`
@@ -315,7 +351,10 @@ releases it with the action-separated `DELETE` proof.
 
 When changing branches, Notecase retains the current public `cx1` and uses
 that old branch for the one update proof; only after the mint confirms the
-change does the replacement branch become the registered one locally.
+change does the replacement branch become the registered one locally. On
+Moneyer it first reads the branch on file off the name's own payRequest
+(`text/xpub`), so a name still pointing at an older branch is moved with
+that branch's proof even where nothing about it was recorded here.
 
 On Moneyer, what arrives at the address is a bearer note sealed to that same
 key, so it is yours seconds after it is paid and the mint holds it for no
@@ -529,11 +568,15 @@ the device does not answer.
 
 A name whose owner is the device's npub can be paid to the device's own keys
 instead (LUD-25 Part 2). `heartwood address keys <name>` asks the device for
-the watch-only branch it derives from that identity key. Moneyer has the device
-sign the ownership request, on one hold. Current reference-mint registration
-requires a separate signature from the branch's index-0 key; Heartwood does not
-yet expose that operation, so Notecase refuses that registration instead of
-pretending a public `cx1` proves control. Once registered, the mint mints each
+the watch-only branch it derives from that identity key, and for the branch's
+index-0 proof that it agrees (`heartwood_note_address_proof`), on one hold
+behind a card naming the action, the name and the mint. Notecase checks the
+proof before sending it on: it has to come from the branch expected and verify
+over the mint's own domain, or nothing is sent. Moneyer also has the device
+sign the ownership request, on a second hold; the reference mint takes the
+proof alone. `heartwood address unregister <name>` releases a reference-mint
+name the same way. Firmware from before the method is told to update rather
+than failing obscurely. Once registered, the mint mints each
 payment to the device's next key and the wrap carries no secret at all, only
 where to look. Only the device can spend those notes - this wallet's words
 cannot - and the device's recovery phrase brings them back. `heartwood

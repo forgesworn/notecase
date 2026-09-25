@@ -1,6 +1,8 @@
 import * as kit from '@lnurlcash/kit'
+import {bytesToHex} from '@noble/hashes/utils.js'
 import {defaultRandomSecret, type RandomSecret} from './lnurlcash-policy.js'
 import {ProtocolError} from './lnurlcash-errors.js'
+import {bearerHashOfLeaf, bearerSpendOf, checkLeaf, decodeCw1, spendDomainOf, verifyCk1} from './spend.ts'
 
 // Compatibility at the Notecase boundary only. The reference kit now uses
 // process-wide hooks; Wallet still carries these settings so tests, Tor and
@@ -80,11 +82,101 @@ export const fetchMintAddress = async (
 
 export type WithdrawInfoExtensions = {payLink?: string}
 
+// A ck1 or a cw1 names its note by Q, so it is looked up by the note rather
+// than by the spend, as a preimage is looked up by its hash. The spend is
+// checked here first wherever this wallet can judge it, because the lookup
+// alone only says Q is outstanding, not that this spend opens it.
+const fetchSpendInfo = async (
+  url: string,
+  k1: string,
+  options: LnurlcashOptions
+): Promise<kit.WithdrawRequestInfo & WithdrawInfoExtensions> => {
+  const lookup = new URL(url)
+  lookup.searchParams.delete('k1')
+  lookup.searchParams.delete('amount')
+  lookup.searchParams.delete('sig')
+  if (kit.isCk1(k1)) {
+    // Signed over this mint's own sighash, or one of the deprecated fixed
+    // messages a mint still reads. A ck1 bound to another mint opens nothing
+    // here, and saying so now beats storing it as money.
+    const opened = verifyCk1(k1, url)
+    if (!opened) throw new ProtocolError(`This note's ck1 does not sign for it at ${spendDomainOf(url)}.`)
+    const info = await kit.fetchNoteInfoByPubkey(lookup.toString(), kit.encodeCp1(opened.outputKey))
+    return {...info, k1} as kit.WithdrawRequestInfo & WithdrawInfoExtensions
+  }
+  const cw1 = decodeCw1(k1)
+  if (!cw1) throw new ProtocolError('That k1 is not a spend of any note.')
+  const leafProblem = checkLeaf(cw1.script, cw1.controlBlock)
+  if (leafProblem) throw new ProtocolError(`This cw1 can never be spent: ${leafProblem}.`)
+  const bearer = bearerSpendOf(cw1)
+  if (bearer) {
+    // The bearer note its preimage names is asked after by h, which a mint
+    // from before notes were keyed by Q still files it under; a hashlock
+    // under any other tree has only its Q.
+    const info = bearer.canonical
+      ? await lookupByHash(lookup.toString(), bytesToHex(bearer.h), options)
+      : await kit.fetchNoteInfoByPubkey(lookup.toString(), kit.encodeCp1(cw1.outputKey))
+    return {...info, k1} as kit.WithdrawRequestInfo & WithdrawInfoExtensions
+  }
+  if (bearerHashOfLeaf(cw1.script)) throw new ProtocolError('This cw1 carries a witness that does not open its hashlock.')
+  // Any other script needs an interpreter this wallet does not carry, so the
+  // mint is asked to judge the spend itself: LUD-25 has it verify a spend in
+  // full before answering the GET. It sees nothing it would not see at the
+  // callback, which is where this spend is going next.
+  const raw = new URL(url)
+  raw.searchParams.delete('sig')
+  const body = await serviceJson(raw.toString(), options)
+  if (
+    body.tag !== 'withdrawRequest' ||
+    typeof body.callback !== 'string' ||
+    typeof body.maxWithdrawable !== 'number'
+  ) throw new ProtocolError('Not a withdrawRequest (unexpected response).')
+  if (typeof body.k1 !== 'string' || body.k1.toLowerCase() !== k1.toLowerCase()) {
+    throw new ProtocolError('Service echoed back a different k1 than queried.')
+  }
+  const mintPubkey = typeof body.mintPubkey === 'string' && kit.MINT_PUBKEY_PATTERN.test(body.mintPubkey)
+    ? body.mintPubkey.toLowerCase()
+    : undefined
+  if (!mintPubkey && options.requireMintPubkey !== false) {
+    throw new Error('SERVICE did not publish a valid persistent signing key (mintPubkey).')
+  }
+  return {
+    ...body,
+    ...(mintPubkey ? {mintPubkey} : {}),
+    k1
+  } as kit.WithdrawRequestInfo & WithdrawInfoExtensions
+}
+
+// A lookup by h, tolerating the mint with no signing key that receive()
+// deliberately accepts.
+const lookupByHash = async (
+  url: string,
+  hash: string,
+  options: LnurlcashOptions
+): Promise<kit.HashWithdrawRequestInfo & WithdrawInfoExtensions> => {
+  try {
+    return await kit.fetchNoteInfoByHash(url, hash) as kit.HashWithdrawRequestInfo & WithdrawInfoExtensions
+  } catch (error) {
+    if (options.requireMintPubkey !== false || !(error instanceof Error) || !/mintPubkey/.test(error.message)) throw error
+    const lookup = new URL(url)
+    lookup.searchParams.set('h', hash)
+    const body = await serviceJson(lookup.toString(), options)
+    if (
+      body.tag !== 'withdrawRequest' ||
+      typeof body.callback !== 'string' ||
+      typeof body.maxWithdrawable !== 'number'
+    ) throw error
+    return body as kit.HashWithdrawRequestInfo & WithdrawInfoExtensions
+  }
+}
+
 export const fetchNoteInfo = async (
   url: string,
   options: LnurlcashOptions = {}
 ): Promise<kit.WithdrawRequestInfo & WithdrawInfoExtensions> => {
   configure(options)
+  const queried = kit.noteK1(url)
+  if (queried && !kit.isPreimage(queried)) return fetchSpendInfo(url, queried, options)
   try {
     return await kit.fetchNoteInfo(url) as kit.WithdrawRequestInfo & WithdrawInfoExtensions
   } catch (error) {
@@ -165,9 +257,19 @@ export const fetchInvoiceVerification = async (url: string, options: LnurlcashOp
   return kit.fetchInvoiceVerification(url)
 }
 
-export const probeBurnedNote = async (url: string, options: LnurlcashOptions = {}) => {
-  configure(options)
-  return kit.probeBurnedNote(url)
+// The kit's probe, over this wallet's own lookup, so a ck1 signed for its
+// mint's sighash or a cw1 is asked after the same way a preimage is.
+export const probeBurnedNote = async (
+  url: string,
+  options: LnurlcashOptions = {}
+): Promise<'live' | 'gone' | 'unknown'> => {
+  try {
+    await fetchNoteInfo(url, options)
+    return 'live'
+  } catch (err) {
+    if (err instanceof kit.NoteSpentError || err instanceof kit.NoteUnknownError) return 'gone'
+    return 'unknown'
+  }
 }
 
 export const meltNote = async (

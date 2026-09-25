@@ -1,6 +1,7 @@
 import {bytesToHex, randomBytes, utf8ToBytes} from '@noble/hashes/utils.js'
-import {isAnyCs1, isCk1} from './lnurlcash.js'
+import {isAnyCs1, isCk1, isCw1} from './lnurlcash.js'
 import {sealWallet, unsealWallet} from './cryptobox.ts'
+import {migrateNoteIds} from './noteids.ts'
 import {MAX_HEARTWOOD_INVENTORY} from './types.ts'
 import type {WalletData} from './types.ts'
 
@@ -146,10 +147,12 @@ const isWalletData = (data: unknown): data is WalletData => {
   if (!Array.isArray(data.notes)) return false
   for (const note of data.notes) {
     if (!isRecord(note)) return false
+    // hex(Q), or sha256(k1) for a bearer note in a backup taken before notes
+    // were keyed by Q: both 64 hex, and the second is moved on import.
     if (typeof note.id !== 'string' || !HEX64.test(note.id)) return false
-    // A Part 2 note's k1 is a ck1 and its certificate is either the original
-    // cs1 form or the current amount-bearing cs1-family encoding.
-    if (typeof note.k1 !== 'string' || !(HEX64.test(note.k1) || isCk1(note.k1))) return false
+    // A key note's k1 is a ck1 and a script note's a cw1. A certificate is
+    // either the original cs1 form or the current amount-bearing encoding.
+    if (typeof note.k1 !== 'string' || !(HEX64.test(note.k1) || isCk1(note.k1) || isCw1(note.k1))) return false
     if (!isAmount(note.amountMsat)) return false
     if (!isHttpUrl(note.baseUrl)) return false
     // A note taken offline has no callback until it has met its mint: the
@@ -330,6 +333,9 @@ export const importBackup = async (contents: string, passphrase: string): Promis
     data.version = 2
     data.counters ??= {}
   }
+  // A backup taken before notes were keyed by their Q files its bearer notes
+  // under sha256(k1). Each record carries its k1, so the move is exact.
+  migrateNoteIds(data)
   // Every restored NIP-47 grant comes back revoked. The client secret that
   // spends through it is in this file, so whoever wrote the file may still
   // hold it - and a restore is exactly when somebody hands you one. They

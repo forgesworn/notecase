@@ -220,6 +220,36 @@ export class HeartwoodClient {
     return {cx1: res.cx1, pubkey: res.pubkey}
   }
 
+  // LUD-25's proof that the branch cashAddress hands out for `host` agrees
+  // to `name` being registered against it, or released from it: its index-0
+  // key over sha256("LNURLcash:<action>:<domain>:<name>"), the domain being
+  // the mint's bare hostname. It decides where a name's payments go, so the
+  // device holds it behind a card showing the action, the name and the
+  // domain. Firmware from before the method answers that it does not know
+  // it, which is worth saying in so many words: nothing is wrong except the
+  // version on the board.
+  async addressProof(
+    host: string,
+    name: string,
+    action: 'register' | 'unregister'
+  ): Promise<{host: string; domain: string; name: string; action: string; cx1: string; sig: string}> {
+    try {
+      const res = await this.note<{host: string; domain: string; name: string; action: string; cx1: string; sig: string}>(
+        'heartwood_note_address_proof',
+        {host, name, action},
+        true
+      )
+      return {host: res.host, domain: res.domain, name: res.name, action: res.action, cx1: res.cx1, sig: res.sig}
+    } catch (err) {
+      if (err instanceof HeartwoodError && /unknown( note)? method|unsupported method|not supported/i.test(err.message)) {
+        throw new HeartwoodError(
+          `This heartwood's firmware cannot sign a lightning-address proof: update heartwood to ${action === 'register' ? 'register' : 'release'} this name.`
+        )
+      }
+      throw err
+    }
+  }
+
   // Have the device keep a note a scan found on its branch. It derives the
   // key at `index` itself and refuses one that is not at `p`; nothing
   // secret crosses to this machine. No hold, as for an import.

@@ -1,8 +1,8 @@
-import {secp256k1} from '@noble/curves/secp256k1.js'
+import {schnorr, secp256k1} from '@noble/curves/secp256k1.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {bytesToHex, randomBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {bech32m} from '@scure/base'
-import type {LnurlcashOptions} from '../src/lnurlcash.js'
+import {encodeCk1, encodeCs1WithAmount, type LnurlcashOptions} from '../src/lnurlcash.js'
 import {Wallet} from '../src/wallet.ts'
 import {emptyWallet, type WalletData} from '../src/types.ts'
 
@@ -41,3 +41,19 @@ export const legacyEcdsaCk1 = (secretKey: Uint8Array): string => {
 }
 
 export const waitMs = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+// The ck1 every wallet signed before spends moved onto the canonical
+// transaction: Q || a BIP-340 signature over sha256("LNURLcash"). Bound to no
+// mint. Deprecated, never signed by this wallet any more, and still read by a
+// mint that follows the reference - so notes already handed out keep working.
+export const legacySchnorrCk1 = (secretKey: Uint8Array): string =>
+  encodeCk1(schnorr.getPublicKey(secretKey), schnorr.sign(sha256(utf8ToBytes('LNURLcash')), secretKey, new Uint8Array(32)))
+
+// A mint's cs1 certificate for the note filed under `noteId` (64 hex: its Q,
+// or the h an older mint certified a bearer note over), signed with `mintKey`
+// as a Lightning node's signmessage would, r || s || recovery id.
+export const certify = (mintKey: Uint8Array, amountMsat: number, noteId: string): string => {
+  const digest = sha256(sha256(utf8ToBytes(`Lightning Signed Message:LNURLcash:${amountMsat}:${noteId}`)))
+  const lead = secp256k1.sign(digest, mintKey, {format: 'recovered', prehash: false})
+  return encodeCs1WithAmount(amountMsat, new Uint8Array([...lead.subarray(1), lead[0]!]))
+}

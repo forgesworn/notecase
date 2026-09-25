@@ -3,6 +3,7 @@ import {utf8ToBytes} from '@noble/hashes/utils.js'
 import {Keystore, browserStorage, browserWebAuthn, type BiometricSetupOptions, type SetupBiometricResult} from 'keystore-kit'
 import {sealWallet, unsealWallet} from '../../src/cryptobox.ts'
 import {emptyWallet, type WalletData} from '../../src/types.ts'
+import {migrateNoteIds} from '../../src/noteids.ts'
 import {newMnemonic, seedFromMnemonic} from '../../src/seed.ts'
 
 // The browser wallet store: the same sealed AES-GCM blob the CLI writes,
@@ -31,13 +32,18 @@ export type BrowserStore = {
 
 export const walletExists = (): boolean => localStorage.getItem(WALLET_SLOT) !== null
 
-const storeFor = (storeKey: string, data: WalletData): BrowserStore => ({
-  data,
-  storeKey,
-  save: async () => {
-    localStorage.setItem(WALLET_SLOT, await sealWallet(data, storeKey))
+// A wallet written before notes were keyed by their Q is moved as it is
+// opened, and sealed in the new shape with whatever it next saves.
+const storeFor = (storeKey: string, data: WalletData): BrowserStore => {
+  migrateNoteIds(data)
+  return {
+    data,
+    storeKey,
+    save: async () => {
+      localStorage.setItem(WALLET_SLOT, await sealWallet(data, storeKey))
+    }
   }
-})
+}
 
 // A fresh wallet's data, already carrying the seed every note secret it
 // will ever make comes off. The words come back with it exactly once: the

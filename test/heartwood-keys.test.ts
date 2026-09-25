@@ -1,4 +1,5 @@
 import {createServer} from 'node:net'
+import {schnorr} from '@noble/curves/secp256k1.js'
 import {afterEach, describe, expect, it} from 'vitest'
 import {finalizeEvent, generateSecretKey, getPublicKey, matchFilter, nip19, type Event, type Filter} from 'nostr-tools'
 import {nip44} from 'nostr-tools'
@@ -9,8 +10,10 @@ import {sha256} from '@noble/hashes/sha2.js'
 import {bytesToHex, hexToBytes, randomBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {
   cashNodeToCx1,
+  decodeCx1,
   deriveLegacyCashAddressNode,
   deriveCashRoot,
+  deriveNotePubkey,
   deriveNoteSecretKey,
   encodeCk1,
   encodeCp1,
@@ -46,6 +49,19 @@ const fakeHeartwood = (relay: string) => {
   // Who the address answer says the branch belongs to: a link served as a
   // persona would name the persona, not the npub it was paired as.
   let answerAs = pubkey
+  // How it answers heartwood_note_address_proof: as the firmware does, as
+  // firmware from before the method does, or wrongly in one of two ways.
+  let proofMode: 'ok' | 'unknown' | 'wrongBranch' | 'wrongDomain' = 'ok'
+  // The firmware's address_proof: the branch cash_address hands out for
+  // `host` signs sha256("LNURLcash:<action>:<domain>:<name>") with its
+  // index-0 key, the domain being the host's bare lowercase hostname.
+  const proofFor = (host: string, name: string, action: string, domain = host.replace(/:\d+$/, '').toLowerCase()) => {
+    const node = branchFor(host)
+    const {pubkeyXOnly, chainCode} = cashNodeToCx1(node)
+    const digest = sha256(utf8ToBytes(`LNURLcash:${action}:${domain}:${name}`))
+    const sig = schnorr.sign(digest, deriveNoteSecretKey(node.privateKey, node.chainCode, 0), new Uint8Array(32))
+    return {cx1: encodeCx1(pubkeyXOnly, chainCode), sig: bytesToHex(sig), domain}
+  }
 
   const answer = (to: string, id: string, body: {result?: unknown; error?: string}): Event =>
     finalizeEvent(
@@ -64,6 +80,19 @@ const fakeHeartwood = (relay: string) => {
       case 'heartwood_note_address': {
         const {pubkeyXOnly, chainCode} = cashNodeToCx1(branchFor(String(fields.host)))
         return ok({host: fields.host, cx1: encodeCx1(pubkeyXOnly, chainCode), pubkey: answerAs})
+      }
+      case 'heartwood_note_address_proof': {
+        const host = String(fields.host)
+        const name = String(fields.name)
+        const action = String(fields.action)
+        if (proofMode === 'unknown') return {error: 'unknown note method'}
+        const signed =
+          proofMode === 'wrongBranch'
+            ? proofFor('other.example', name, action)
+            : proofMode === 'wrongDomain'
+              ? proofFor(host, name, action, 'other.example')
+              : proofFor(host, name, action)
+        return ok({host, domain: signed.domain, name, action, cx1: signed.cx1, sig: signed.sig})
       }
       case 'heartwood_note_claim': {
         // The firmware's claim_key_note: derive the key at `index` for the
@@ -163,6 +192,9 @@ const fakeHeartwood = (relay: string) => {
     answerAs(other: string) {
       answerAs = other
     },
+    proofMode(mode: typeof proofMode) {
+      proofMode = mode
+    },
     uri: `bunker://${pubkey}?relay=${encodeURIComponent(relay)}&secret=pairing`
   }
 }
@@ -252,43 +284,119 @@ const pay = async (theMint: Mint, name: string, amountMsat: number): Promise<voi
 const setUp = async (referenceRegistration = false) => {
   const theMint = await startMint()
   const device = fakeHeartwood('wss://device.test')
-  const registrations: {username: string; cx1: string}[] = []
+  const registrations: {method: string; username: string; cx1: string | null; sig: string; npub: string | null}[] = []
+  // What moneyer's POST /names was sent, as the NIP-98 request committed to it.
+  const bodies: Array<{name: string; cx1: string | null; sig?: string}> = []
   const fetchImpl: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
+    if (url.pathname === '/names' && init?.method === 'POST') bodies.push(JSON.parse(String(init.body)))
     if (referenceRegistration && url.pathname === '/p/_' && init?.method === 'POST') {
       return Response.json({status: 'ERROR', reason: 'Invalid or reserved username.'})
     }
+    const reference = url.pathname.match(/^\/p\/([^/]+)$/)
+    if (referenceRegistration && reference && (init?.method === 'POST' || init?.method === 'DELETE')) {
+      registrations.push({
+        method: init.method,
+        username: decodeURIComponent(reference[1]!),
+        cx1: url.searchParams.get('cx1'),
+        sig: url.searchParams.get('sig') ?? '',
+        npub: url.searchParams.get('npub')
+      })
+      return Response.json({status: 'OK'})
+    }
     return fetch(input, init)
   }
-  const {wallet} = makeWallet(referenceRegistration ? {fetch: fetchImpl} : {})
+  const {wallet} = makeWallet({fetch: fetchImpl})
   await wallet.addMint(`mint@${theMint.host}`)
   await wallet.linkHeartwood(device.transport, device.uri)
   if (!referenceRegistration) theMint.moneyer.store.putOperatorZapName('donkey', device.pubkey)
-  return {theMint, device, wallet, registrations}
+  return {theMint, device, wallet, registrations, bodies}
+}
+
+// What a mint checks: the branch's pk_0 over the domain-bound digest.
+const provenBy = (cx1: string, action: string, name: string, domain: string, sig: string): boolean => {
+  const branch = decodeCx1(cx1)!
+  const pk0 = deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, 0)
+  return schnorr.verify(hexToBytes(sig), sha256(utf8ToBytes(`LNURLcash:${action}:${domain}:${name}`)), pk0)
 }
 
 describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
-  it('does not register a reference-mint branch without the device ownership proof', async () => {
-    const {device, wallet, registrations} = await setUp(true)
-    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow(
-      'Heartwood cannot yet sign the index-0 proof'
-    )
-    expect(registrations).toEqual([])
-    expect(device.log).not.toContain('sign_event')
+  it('registers a reference-mint name on the device branch, proven on the device, and releases it the same way', async () => {
+    const {theMint, device, wallet, registrations} = await setUp(true)
+    const moved = await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    expect(moved).toEqual({address: `donkey@${theMint.host}`, toKeys: true})
+    const {pubkeyXOnly, chainCode} = cashNodeToCx1(device.branchFor(theMint.host))
+    const cx1 = encodeCx1(pubkeyXOnly, chainCode)
+    expect(registrations).toEqual([
+      {method: 'POST', username: 'donkey', cx1, sig: expect.stringMatching(/^[0-9a-f]{128}$/), npub: nip19.npubEncode(device.pubkey)}
+    ])
+    expect(provenBy(cx1, 'register', 'donkey', '127.0.0.1', registrations[0]!.sig)).toBe(true)
+    // one hold for the proof, and nothing else signed
+    expect(device.log).toEqual(['connect', 'heartwood_note_address', 'heartwood_note_address_proof'])
+
+    await expect(wallet.heartwoodUnregisterName(device.transport, 'donkey')).resolves.toEqual({address: `donkey@${theMint.host}`})
+    expect(registrations[1]).toMatchObject({method: 'DELETE', username: 'donkey', cx1: null})
+    expect(provenBy(cx1, 'unregister', 'donkey', '127.0.0.1', registrations[1]!.sig)).toBe(true)
+    expect(registrations[1]!.sig).not.toBe(registrations[0]!.sig)
   })
 
-  it('points the name at the branch the device derives, on a request the device signs', async () => {
+  it('points the name at the branch the device derives, on a proof and a request the device signs', async () => {
     const {theMint, device, wallet} = await setUp()
     const moved = await wallet.heartwoodNameToKeys(device.transport, 'donkey')
     expect(moved).toEqual({address: `donkey@${theMint.host}`, toKeys: true})
     const {pubkeyXOnly, chainCode} = cashNodeToCx1(device.branchFor(theMint.host))
-    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(encodeCx1(pubkeyXOnly, chainCode))
-    // The wallet's own key signed nothing: the device did.
-    expect(device.log).toEqual(['connect', 'heartwood_note_address', 'sign_event'])
+    const cx1 = encodeCx1(pubkeyXOnly, chainCode)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(cx1)
+    // The wallet's own key signed nothing: the device gave the proof, then
+    // signed the request that carries it.
+    expect(device.log).toEqual(['connect', 'heartwood_note_address', 'heartwood_note_address_proof', 'sign_event'])
 
     const back = await wallet.heartwoodNameToKeys(device.transport, 'donkey', {toKeys: false})
     expect(back.toKeys).toBe(false)
     expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBeNull()
+    // clearing is proven by the branch on file, which is the device's
+    expect(device.log.slice(4)).toEqual(['heartwood_note_address', 'heartwood_note_address_proof', 'sign_event'])
+  })
+
+  it('sends the proof in the body the NIP-98 request commits to', async () => {
+    const {theMint, device, wallet, bodies} = await setUp()
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    const {pubkeyXOnly, chainCode} = cashNodeToCx1(device.branchFor(theMint.host))
+    const cx1 = encodeCx1(pubkeyXOnly, chainCode)
+    expect(bodies[0]).toMatchObject({name: 'donkey', cx1})
+    expect(provenBy(cx1, 'register', 'donkey', '127.0.0.1', bodies[0]!.sig!)).toBe(true)
+  })
+
+  it('tells the owner to update heartwood when the firmware does not know the proof method', async () => {
+    const {theMint, device, wallet} = await setUp()
+    device.proofMode('unknown')
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow('update heartwood to register this name')
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey', {toKeys: false})).resolves.toMatchObject({toKeys: false})
+    // nothing was asked of the mint on the failed attempt
+    expect(device.log.filter(method => method === 'sign_event')).toHaveLength(1)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1 ?? null).toBeNull()
+  })
+
+  it('tells the owner to update heartwood before releasing a reference name, too', async () => {
+    const {device, wallet, registrations} = await setUp(true)
+    device.proofMode('unknown')
+    await expect(wallet.heartwoodUnregisterName(device.transport, 'donkey')).rejects.toThrow('update heartwood to release this name')
+    expect(registrations).toEqual([])
+  })
+
+  it('refuses a proof for another branch, and sends nothing', async () => {
+    const {device, wallet, registrations} = await setUp(true)
+    device.proofMode('wrongBranch')
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow('different branch')
+    expect(registrations).toEqual([])
+  })
+
+  it('refuses a proof that does not verify for this mint, and sends nothing', async () => {
+    const {theMint, device, wallet} = await setUp()
+    device.proofMode('wrongDomain')
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow('does not verify')
+    expect(device.log).not.toContain('sign_event')
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1 ?? null).toBeNull()
   })
 
   it('finds a payment the device never saw a wrap for, has the device keep it, and collects it', async () => {

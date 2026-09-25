@@ -1,5 +1,57 @@
 # Changelog
 
+## Unreleased
+
+**Upgrade the mints first.** This follows LUD-25 as of lnurl/luds 6e865b1,
+"unified taproot verification". A `ck1` this wallet signs is now bound to
+its mint's hostname, and a mint from before that change (moneyer 0.16 among
+them) cannot read it: a note paid to this wallet's keys is still found and
+counted, but the mint refuses the rotate, so it stays under its key until
+the mint moves. Upgrade every device sharing a seed and the note store
+together, too: an older release sees each moved note twice.
+
+- Every note is a taproot output key `Q`, and a note's id is now `hex(Q)`.
+  A key note's id was already its key and does not move; a bearer note's
+  moves from `sha256(k1)` to the `Q` its hashlock names. Wallet files, the
+  web wallet's store and backups are moved as they are read, with every
+  record that names a note (a mutation's inputs, a melt, a paid request,
+  the note store's bookkeeping). The move is exact, since each record
+  carries its secret, and running it again changes nothing. The note store
+  matches a relay record filed under an old id to its note and files it
+  under `Q` on the next push. A bearer note still discloses only `h`.
+  The short ids `list` prints, and a printed note's serial, come from the
+  id, so they change for bearer notes held from before.
+- A `ck1` signs the key-path sighash of LUD-25's canonical spend
+  transaction for the note's own mint, with an all-zero `aux_rand`
+  (test vector 3). The deprecated shapes are still read, and a `ck1` that
+  signs for neither this mint nor one of them is refused before anything
+  is stored.
+- A `cs1` certificate is checked over `hex(Q)` first, then, for a bearer
+  note from a mint that has not moved, over its `h`. One under neither is
+  refused as before.
+- A `cw1` is taken as a note's `k1`: received, held, checked and spent by
+  passing it on verbatim. A bearer hashlock's `cw1` is judged here like a
+  preimage (test vector 5), and is taken offline on its certificate. Any
+  other script can only be judged by the mint, so it is looked up by
+  handing the mint the spend itself, and never taken offline.
+- Offline receive and `verify` also check that the spend opens its note at
+  the note URL's domain, not only that the certificate is the mint's.
+- Address proofs sign `sha256("LNURLcash:register:<domain>:<name>")` (or
+  `:unregister:`), the domain being the mint's own hostname (test vector 2):
+  on the reference `/p/<name>`, and now also as `sig` in Moneyer's
+  `POST /names` whenever it sets or clears a `cx1`. The branch on file is
+  read off the name's own payRequest (`text/xpub`) where the mint publishes
+  it, so a name on an older branch is moved with that branch's proof.
+- A heartwood now gives the index-0 proof itself, through firmware's new
+  `heartwood_note_address_proof`, on a hold behind a card: `heartwood address
+  keys` and `custodial` send it to Moneyer and the reference mint, and the new
+  `heartwood address unregister` releases a reference-mint name with it. A
+  proof is checked before it is sent: it must come from the branch expected
+  and verify over the mint's own domain. Firmware without the method is told
+  to update heartwood, where this used to refuse outright.
+- The pinned `@lnurlcash/kit` predates all of this, so the primitives are
+  in `src/spend.ts` and shadow the kit's older helpers at `src/lnurlcash.js`.
+
 ## 0.23.2 - 2026-09-24
 
 Documentation only; no code changes.

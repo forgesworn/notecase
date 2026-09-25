@@ -7,6 +7,7 @@ import {Keystore, type KeystoreStorage} from 'keystore-kit'
 import {BadMnemonicError, newMnemonic, normaliseMnemonic, seedFromMnemonic} from './seed.ts'
 import {sealWallet, unsealWallet} from './cryptobox.ts'
 import {emptyWallet, type WalletData} from './types.ts'
+import {migrateNoteIds} from './noteids.ts'
 
 // The wallet file holds bearer secrets and (optionally) an NWC spending
 // URI: it is money at rest. Default posture is an AES-256-GCM blob whose
@@ -141,6 +142,7 @@ export const openWallet = async (options: {pin?: string; home?: string}): Promis
   const parsed = JSON.parse(contents) as {cipher?: string; data?: WalletData}
   if (parsed.cipher === 'none' && parsed.data) {
     const data = parsed.data
+    migrateNoteIds(data)
     return {
       data,
       encrypted: false,
@@ -154,6 +156,9 @@ export const openWallet = async (options: {pin?: string; home?: string}): Promis
   const storeKey = await keystore.unlockPIN(options.pin)
   if (storeKey === null) throw new WrongPinError('wrong PIN')
   const data = await unsealWallet(contents, storeKey)
+  // A wallet written before notes were keyed by their Q is moved on read,
+  // and saved in the new shape with whatever it next persists.
+  migrateNoteIds(data)
   return {
     data,
     encrypted: true,

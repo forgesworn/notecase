@@ -23,7 +23,7 @@ import {
 } from './persistence.ts'
 import {
   buildNoteUrl,
-  hashK1,
+  bearerNoteIdOfPreimage,
   isBolt11Invoice,
   isPaymentRequest,
   decodePaymentRequest,
@@ -31,7 +31,7 @@ import {
   resolveMintInput,
   resolveNoteInput,
   toBech32Lnurl,
-  verifyNoteSignature
+  verifyNoteCertificate
 } from '../../src/lnurlcash.js'
 import {
   Wallet,
@@ -1314,8 +1314,10 @@ const viewLocked = async (): Promise<void> => {
 const signedOk = (w: Wallet, note: NoteRecord): boolean => {
   if (!note.signature) return false
   const keys = [w.data.pubkeyPins[note.mintHost], ...w.pubkeyHistoryFor(note.mintHost)]
-  // a key the mint has since retired still proves where the note came from
-  return keys.some(key => Boolean(key) && verifyNoteSignature(note.k1, note.amountMsat, note.signature!, key!))
+  // a key the mint has since retired still proves where the note came from,
+  // and a mint from before notes were keyed by Q certified a bearer note
+  // over its h, which verifyNoteCertificate tries after the Q
+  return keys.some(key => Boolean(key) && verifyNoteCertificate(note.k1, note.amountMsat, note.signature!, key!))
 }
 
 // ---------- choosing several notes at once ----------
@@ -4350,7 +4352,7 @@ const viewProof = (): void => {
       })
     )
     const body = el('<div class="stack center"></div>')
-    const print = notePrint({id: hashK1(k1), amountMsat, mintHost: 'moneyer.dev'}, toBech32Lnurl(url).toUpperCase())
+    const print = notePrint({id: bearerNoteIdOfPreimage(k1), amountMsat, mintHost: 'moneyer.dev'}, toBech32Lnurl(url).toUpperCase())
     body.append(
       print,
       el(`<p class="warn">A proof print: the secret is a constant, the denomination absurd - this is never money. Scratch it anyway.</p>`)
