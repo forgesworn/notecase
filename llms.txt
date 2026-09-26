@@ -69,7 +69,7 @@ notecase nwc grants / revoke <name|id> / refill <name|id> [--budget <sats>] / se
 notecase backup export | shares [--threshold N --count M] | recover-key
 notecase sync [on|off|status]   # notes themselves on relays, several devices, one seed
 notecase heartwood link <bunker://...> | notes | collect [<id>...] | send <id> --to <npub> | trust <npub> | inbox | pair
-notecase heartwood address keys|custodial <name> | address scan   # a name the DEVICE's key owns, paid to the device's keys
+notecase heartwood address keys|custodial|unregister <name> | address scan   # a name the DEVICE's key owns, paid to the device's keys
 notecase heartwood recover [--npub <npub>] [--mint <host>]   # a lost heartwood's notes, from its nsec or BIP-39 phrase
 
 Amounts are sats (--msat for msat). PIN via prompt or $NOTECASE_PIN.
@@ -108,6 +108,45 @@ id>", merged by max. A note in a terminal state travels with an empty k1.
 Merge rules: spent is sticky locally and travels globally; otherwise the
 newer updatedAt wins; the mint, not the relay, decides what is spendable.
 
+## Notes and spends (LUD-25 as of lnurl/luds 6e865b1)
+
+Every note is a BIP-341 taproot output key Q. NoteRecord.id is hex(Q), what
+the mint files, burns and certifies it under; compare notes by id, never k1.
+A k1 is a spend of Q:
+  64 hex    bearer preimage: the leaf OP_SHA256 <h> OP_EQUAL (a8 20 <h> 87),
+            leaf version 0xc0, under BIP-341's NUMS internal key
+            50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0.
+            Q follows from h = sha256(k1). Every note this wallet makes is one; mint,
+            rotate, split and merge still disclose h (the short form)
+  ck1<Q||sig>  BIP-340 by Q over the key-path TapSighash of the canonical
+            spend tx whose prevout is tagged_hash("LNURLcash/mint", domain),
+            domain = the mint's lowercase hostname (no scheme, no port), zero
+            aux_rand: one key at one mint gives one ck1 (spec vector 3). Only
+            signed for notes paid to this wallet's own keys. The deprecated
+            shapes (Schnorr over sha256("LNURLcash") or the raw string, and the
+            65-byte recoverable ECDSA) are still read. A ck1 that signs for
+            neither this mint nor a deprecated message is refused before
+            anything is stored
+  cw1<...>  script-path spend (u32 locktime, u32 sequence, (u16 len, item)*
+            over script, control block, witness; big-endian). A bearer
+            hashlock's is judged locally like a preimage and looked up by h;
+            any other script is looked up by passing the cw1 itself to the
+            mint, which judges it, and cannot be taken offline
+cs1 certificates: recoverable ECDSA over sha256(sha256("Lightning Signed
+Message:LNURLcash:" + amount_msat + ":" + hex(Q))), for every note. A mint from
+before this certified a bearer note over h instead: verifyNoteCertificate
+tries Q, then h; a certificate under neither is refused (BadSignatureError).
+Offline receive/verify also checks the spend opens Q at the note URL's domain.
+Address proofs: BIP-340 by the branch's sk_0 over sha256("LNURLcash:register:"
++ domain + ":" + name) (or ":unregister:"), domain = the SERVICE's hostname
+(spec vector 2); sent as ?sig= on the reference /p/<name> and as "sig" in
+moneyer's POST /names body whenever it sets or clears a cx1.
+Stored ids move from sha256(k1) to hex(Q) on read (openWallet, the web store,
+importBackup, new Wallet), with replaces, melts[].noteId, requests[].paidBy
+and settings.noteSyncPushed. Deterministic and idempotent. The relay store
+matches a record filed under an old id to its note, and the next push files
+it under Q. The primitives live in src/spend.ts until the pinned kit has them.
+
 ## Library API
 
 openWallet({pin?, home?}) / initWallet(...) -> {data, save, encrypted, storeKey}
@@ -142,13 +181,19 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   lightningAddress(), payNameToKeys(toKeys?, {name?, mintHost?}), unregisterName({name?, mintHost?}), addressCx1(host), scanAddress(host?, {gap?})
   - with a seed, registerName sends a cx1 (the spec's m/139'/d1..d4, as lnurl-wallet); a
     moneyer >=0.13 then pays the name to the wallet's keys, and the inbox opens the
-    index-only wrap (/w?p=<cp1>&sig=<amount-bearing-cs1>&i=) by deriving the key and rotating
+    index-only wrap (/w?p=<cp1>&c=<amount-bearing-cs1>&i=; sig= before c=) by deriving the
+    key at that index on LUD-25's Lightning Address purpose (2), or the ladder from before
+    purposes for a note paid under it, and rotating
+  - moneyer's POST /names carries "sig" whenever it sets or clears a cx1: set is proven
+    by the branch on file (read off the name's payRequest text/cpub or text/xpub, else the one
+    recorded here), or by the new branch when none is; clear by the branch on file
   - the reference lnurl-mint is detected with a reserved-name probe, then takes signed
     POST/DELETE /p/{username} requests. The signature proves control of the branch's
-    index-0 key; an update is signed by the branch currently recorded, then the new
-    public cx1 becomes current locally. An optional npub also makes the name NIP-05. It sends no wrap, so
+    purpose-0 index-0 key, over the mint's own hostname; an update is signed by the branch
+    currently recorded, then the new public cx1 becomes current locally. An optional npub also makes the name NIP-05. It sends no wrap, so
     address scan (also available in the web settings) finds payments
-  heartwoodNameToKeys(t, name, {toKeys?, mintHost?}), heartwoodScanAddress(t, host?, {gap?}),
+  heartwoodNameToKeys(t, name, {toKeys?, mintHost?}), heartwoodUnregisterName(t, name, {mintHost?}),
+  heartwoodScanAddress(t, host?, {gap?}) -> {claimed, waiting, scanned} (waiting: paid on purpose 2, refused by firmware from before purposes),
   collectFromHeartwood(t, onProgress?, {ids?}), recoverHeartwoodNotes(input, {expectedPubkey, mintHost?, passphrase?, gap?})
   heartwoodNotes(t), heartwoodNotesOrLastSeen(t) -> {live:true, notes} | {live:false, notes, at, reason},
   heartwoodHeld(), heartwoodInventory() -> {notes, at}
@@ -165,9 +210,14 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   - a heartwood derives its branch from the identity key that owns the name
     (HMAC-SHA256(key, "LNURLcash/nostr-seed") -> m/139'/1'/d1..d4 in firmware today;
     a words-less wallet hands out m/139'/d1..d4, as conformance's nostr-seed.json), hands over the
-    cx1 (heartwood_note_address); it signs Moneyer's NIP-98 itself. Current reference
-    registration also needs an index-0 branch proof, which Heartwood does not yet expose,
-    so Notecase refuses that path instead of registering from cx1 alone. Only the device
+    cx1 (heartwood_note_address), and signs its purpose-0 index-0 proof on a hold (firmware
+    from before purposes signs with its unpurposed index 0, which Notecase refuses to send)
+    (heartwood_note_address_proof {host, name, action} -> {ok, host, domain, name, action,
+    cx1, sig}). Notecase refuses to send a proof whose cx1 is not the branch expected or
+    whose sig does not verify against that cx1's pk_0 over the domain-bound digest.
+    The device signs Moneyer's NIP-98 itself; the reference /p/<name> takes the proof alone,
+    and heartwoodUnregisterName(t, name, {mintHost?}) releases one there. Firmware that does
+    not know the method gets "update heartwood to register this name". Only the device
     can spend what arrives. A scan has the device claim a key (heartwood_note_claim)
   - with no recovery words the wallet's own branch comes from its Nostr key the same way
   identityCandidates(input, passphrase?) / identitySecretFor(input, npubHex) (src/identitysecret.ts):

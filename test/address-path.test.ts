@@ -52,7 +52,7 @@ describe('the address branch', () => {
     }
   })
 
-  it("matches lnurl-wallet's literal spec-path vector", () => {
+  it("matches lnurl-wallet's literal spec-path vector, on the ladder from before purposes", () => {
     const root = deriveCashRoot(
       mnemonicToSeedSync('dragon spell warfare girl patrol false erase surprise satisfy lucky curious ill')
     )
@@ -60,7 +60,7 @@ describe('the address branch', () => {
     expect(bytesToHex(node.privateKey)).toBe('ec94d2f4f89e8ea4f4335970e9a7781e30b4223eb405b070f9e3930afccbdc9b')
     expect(bytesToHex(node.chainCode)).toBe('62ba198d1cf6f086f85f867aff7f8d6845a65dd93152df219f1815d1f707bc99')
     const {pubkeyXOnly, chainCode} = cashNodeToCx1(node)
-    expect(bytesToHex(deriveNotePubkey(pubkeyXOnly, chainCode, 0))).toBe(
+    expect(bytesToHex(deriveNotePubkey(pubkeyXOnly, chainCode, null, 0))).toBe(
       '6fb7c0137fc17fccb337947b361580b7686219f2eeab9d47ed52a49191d5136c'
     )
   })

@@ -226,7 +226,7 @@ const zapFromDescription = (tags: string[][]): ZapDetail | null => {
 export type NoteRumor = {noteUrl: string; amountMsat: number; host: string; key?: KeyNote}
 export type KeyNote = {cp1: string; index: number}
 
-// `/w?p=<cp1>&sig=<amount-bearing-cs1>&i=<index>`, with no k1. Older senders
+// `/w?p=<cp1>&c=<amount-bearing-cs1>&i=<index>` (`sig` before `c`), with no k1. Older senders
 // may also duplicate `amount`; either form is a key note.
 const keyNoteOf = (content: string): {url: string; key: KeyNote} | null => {
   let url: URL

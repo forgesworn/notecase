@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
-import {deriveCashRoot, deriveCashSecret, deriveNoteRoot, deriveNoteSecret, hashK1} from '../src/lnurlcash.js'
+import {deriveCashRoot, deriveCashSecret, deriveNoteRoot, deriveNoteSecret, noteIdOf} from '../src/lnurlcash.js'
 import {hexToBytes} from '@noble/hashes/utils.js'
 import {Wallet, WalletUsageError} from '../src/wallet.ts'
 import {newMnemonic, seedFromMnemonic} from '../src/store.ts'
@@ -274,6 +274,6 @@ describe('notes made before the seed', () => {
     await fresh.wallet.addMint(`mint@${host}`)
     await fresh.wallet.restoreFromMint(host, {allowSecretDisclosure: true})
     expect(fresh.wallet.balanceMsat()).toBe(21_000)
-    expect(hashK1(fresh.wallet.liveNotes()[0]!.k1)).toBe(upgraded.liveNotes()[0]!.id)
+    expect(noteIdOf(fresh.wallet.liveNotes()[0]!.k1)).toBe(upgraded.liveNotes()[0]!.id)
   })
 })

@@ -2,8 +2,9 @@ import {hmac} from '@noble/hashes/hmac.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 
-// A note's id: the `h`/`h2` a WALLET discloses on a rotate, split or merge,
-// and the key a SERVICE stores the note under. Never the secret itself.
+// A bearer note's h: what a WALLET discloses on a mint, rotate, split or
+// merge (LUD-25's short form), from which the SERVICE builds the note's Q and
+// files it there. Never the secret itself.
 export const hashK1 = (k1: string): string => bytesToHex(sha256(hexToBytes(k1)))
 
 // LUD-25: for a rotate, split or merge, the WALLET - never the SERVICE -
@@ -30,7 +31,7 @@ export const isPreimage = (value: string): boolean =>
 //
 // LUD-25 says a note's k1 is WALLET-generated and says nothing whatever
 // about how, so a wallet that draws every secret from a CSPRNG has no way
-// back once its file is gone: the mint holds only sha256(k1) and cannot
+// back once its file is gone: the mint holds only a public Q and cannot
 // tell a stranger's guess from the rightful holder. Deriving the secrets
 // from a seed instead makes a wallet restorable from words alone, and -
 // because the scheme is written down here rather than invented per wallet -

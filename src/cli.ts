@@ -60,7 +60,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase nostr init | nostr show | nostr relays [set <url>...]
   notecase heartwood link <bunker://...> | heartwood notes | heartwood collect [<id>...]
   notecase heartwood send <id> --to <npub> | heartwood rename <id> <label> | heartwood unlink
-  notecase heartwood address keys <name> | address custodial <name> | address scan [--mint <host>]
+  notecase heartwood address keys <name> | address custodial <name> | address unregister <name> | address scan [--mint <host>]
   notecase heartwood recover [--npub <master npub>] [--mint <host>]   a lost heartwood's notes, from its nsec or phrase
   notecase backup export | backup shares [--threshold N --count M] | backup recover-key
   notecase backup nostr on|off|push|pull
@@ -1308,7 +1308,7 @@ const main = async (): Promise<void> => {
           // only the device can spend what arrives, and its recovery phrase
           // brings it back.
           if (!third) throw new WalletUsageError(`heartwood address ${arg} <name> [--mint <host>]`)
-          console.log('  the device will supply its watch-only branch; a mint that binds the name to its npub will also ask it to sign')
+          console.log('  the device will supply its watch-only branch and, on a hold, its proof for the change; a mint that binds the name to its npub will also ask it to sign the request')
           const moved = await wallet.heartwoodNameToKeys(transport, third, {
             toKeys: arg === 'keys',
             ...(values.mint ? {mintHost: values.mint} : {})
@@ -1318,6 +1318,15 @@ const main = async (): Promise<void> => {
               ? `${moved.address} now pays to the device's own keys. Payments already made are unchanged.`
               : `${moved.address} now pays as notes sealed to the device's npub.`
           )
+        } else if (sub === 'address' && arg === 'unregister') {
+          // A reference-mint name on the device's branch, released on the
+          // branch's own proof: one hold on the device.
+          if (!third) throw new WalletUsageError('heartwood address unregister <name> [--mint <host>]')
+          console.log('  hold the device button to sign the release')
+          const released = await wallet.heartwoodUnregisterName(transport, third, {
+            ...(values.mint ? {mintHost: values.mint} : {})
+          })
+          console.log(`${released.address} is unregistered and can now be claimed again.`)
         } else if (sub === 'address' && arg === 'scan') {
           // The fallback for a wrap the device never saw: the note waits at
           // the mint on the key it was paid to.
@@ -1326,6 +1335,12 @@ const main = async (): Promise<void> => {
             console.log(`The device kept ${sats(c.amountMsat)} paid to its key #${c.index} (${c.id}).`)
           }
           console.log(`Checked ${result.scanned} keys; the device kept ${result.claimed.length} note${result.claimed.length === 1 ? '' : 's'}.`)
+          if (result.waiting.length) {
+            const total = result.waiting.reduce((sum, w) => sum + w.amountMsat, 0)
+            console.log(
+              `${result.waiting.length} more (${sats(total)}) were paid on LUD-25's Lightning Address purpose, which this device's firmware cannot claim yet. They are safe at the mint: update the firmware and scan again.`
+            )
+          }
         } else if (sub === 'recover') {
           // A heartwood that is gone. Its branch comes back from the master's
           // nsec or phrase, prompted for and never taken on the command line.

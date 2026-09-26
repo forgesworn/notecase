@@ -92,7 +92,7 @@ describe('handing notes over offline', () => {
     expect(handed.notes.map(note => note.amountMsat).sort((a, b) => a - b)).toEqual([10_000, 20_000])
     expect(handed.notes.every(note => note.state === 'sent' && note.sentOffline === true)).toBe(true)
     expect(handed.urls).toHaveLength(2)
-    expect(handed.urls.every(url => url.includes('sig='))).toBe(true)
+    expect(handed.urls.every(url => new URL(url).searchParams.has('c') && !new URL(url).searchParams.has('sig'))).toBe(true)
     expect(wallet.balanceMsat()).toBe(50_000)
     // nothing was minted, burned or asked about
     expect(theMint.state.notes.size).toBe(before)
@@ -104,7 +104,7 @@ describe('handing notes over offline', () => {
     // asking the mint, which is exactly what the holder chose.
     const {theMint, wallet} = await stocked()
     const handed = await wallet.sendOffline(30_000, undefined, {stripSignature: true})
-    expect(handed.urls.every(url => !url.includes('sig='))).toBe(true)
+    expect(handed.urls.every(url => !new URL(url).searchParams.has('c') && !new URL(url).searchParams.has('sig'))).toBe(true)
     expect(handed.urls.every(url => url.includes('k1=') && url.includes('amount='))).toBe(true)
 
     const {wallet: recipient} = makeWallet()

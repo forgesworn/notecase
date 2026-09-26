@@ -22,7 +22,11 @@ export type NoteState = 'live' | 'staged' | 'ambiguous' | 'melting' | 'sent' | '
 export type NoteOrigin = 'mint' | 'receive' | 'rotate' | 'split' | 'change' | 'merge' | 'recovered'
 
 export type NoteRecord = {
+  // hex(Q), the note's taproot output key: what its mint files, burns and
+  // certifies it under. A record written before notes were keyed by Q
+  // carried sha256(k1) for a bearer note, and is moved on read (noteids.ts).
   id: string
+  // The spend: a bearer note's hex preimage, a ck1 or a cw1.
   k1: string
   amountMsat: number
   // The informational GET endpoint, no query - the note URL is
@@ -77,7 +81,9 @@ export type NoteRecord = {
 }
 
 export type PendingMint = {
-  // the invoice's payment hash, which is also the future note's id
+  // The invoice's payment hash. For a record from before named mints the
+  // preimage was the note's k1, so this is that note's h, and the note is
+  // filed under the Q it names (bearerNoteId).
   id: string
   mintHost: string
   baseUrl: string
@@ -295,10 +301,10 @@ export type WalletData = {
     // A lightning address claimed at a mint, as name@host. Payments to it
     // arrive as notes sealed to this wallet's Nostr key.
     lightningAddress?: string
-    // The branch currently registered for a reference-mint address. An
-    // update to another branch must be signed by this old branch's index-0
-    // key, so retaining the public cx1 selects the right local private node
-    // without storing any additional secret.
+    // The branch the recorded address currently pays, at a reference mint or
+    // a moneyer. An update to another branch must be signed by this old
+    // branch's index-0 key, so retaining the public cx1 selects the right
+    // local private node without storing any additional secret.
     lightningAddressCx1?: string
     // The hardware vault this wallet has met over the wire, by the identity
     // key it proved. Trust on first use: a different key later is either a

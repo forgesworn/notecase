@@ -1,11 +1,12 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createFakeBackend, createMoneyer, type FakeBackend, type Moneyer} from '@forgesworn/moneyer'
-import {encodeCk1, isCk1, noteIdOf, signNoteOwnership} from '../src/lnurlcash.js'
+import {ProtocolError, encodeCk1, isCk1, signNoteOwnership} from '../src/lnurlcash.js'
 import {secp256k1} from '@noble/curves/secp256k1.js'
 import {bytesToHex, hexToBytes, randomBytes} from '@noble/hashes/utils.js'
 import {exportBackup, importBackup} from '../src/backup.ts'
 import {BadSignatureError, WalletUsageError} from '../src/wallet.ts'
-import {freshK1, legacyEcdsaCk1, makeWallet} from './helpers.ts'
+import {freshK1, legacyEcdsaCk1, legacySchnorrCk1, makeWallet} from './helpers.ts'
+import {moneyerBearerId, taprootMoneyer} from './moneyer.ts'
 
 // LUD-25 Part 2: a note keyed by a public key and spent with its ck1. The
 // wallet takes one, checks its cs1 certificate, and rotates it into a secret
@@ -43,13 +44,29 @@ afterEach(async () => {
 
 type PartTwoNote = {id: string; ck1: string; sig: string; url: string; sk: Uint8Array}
 
+type Ck1Signer = (sk: Uint8Array, mintUrl: string) => string
+
+// Signed over the canonical spend transaction's sighash for this mint.
+const boundCk1: Ck1Signer = (sk, mintUrl) => {
+  const {pubkeyXOnly, signature} = signNoteOwnership(sk, mintUrl)
+  return encodeCk1(pubkeyXOnly, signature)
+}
+
+// The ck1 a holder hands over, in the newest shape the mint under test reads:
+// bound to its domain, or - for the pinned moneyer, which predates that - the
+// deprecated fixed-message shape a mint still reads either way.
+const newestCk1: Ck1Signer = taprootMoneyer ? boundCk1 : sk => legacySchnorrCk1(sk)
+
 // A Part 2 note on the mint, as a holder would hand it over: ck1, amount, cs1.
-const partTwoNote = async (theMint: {moneyer: Moneyer}, amountMsat: number): Promise<PartTwoNote> => {
+const partTwoNote = async (
+  theMint: {moneyer: Moneyer},
+  amountMsat: number,
+  sign: Ck1Signer = newestCk1
+): Promise<PartTwoNote> => {
   const sk = secp256k1.utils.randomSecretKey()
   const id = bytesToHex(secp256k1.getPublicKey(sk, true).slice(1))
   theMint.moneyer.store.creditNote(id, amountMsat)
-  const {pubkeyXOnly, signature} = signNoteOwnership(sk)
-  const ck1 = encodeCk1(pubkeyXOnly, signature)
+  const ck1 = sign(sk, theMint.moneyer.url)
   const info = (await (await fetch(`${theMint.moneyer.url}/w?k1=${ck1}`)).json()) as {sig: string}
   return {id, ck1, sig: info.sig, url: `${theMint.moneyer.url}/w?k1=${ck1}&amount=${amountMsat}&sig=${info.sig}`, sk}
 }
@@ -64,7 +81,7 @@ const statusAtMint = async (theMint: {moneyer: Moneyer}, k1: string): Promise<un
 // A Part 1 note, to pin the mint's key before anything is taken offline.
 const pinMint = async (theMint: {moneyer: Moneyer}, wallet: ReturnType<typeof makeWallet>['wallet']) => {
   const k1 = freshK1()
-  theMint.moneyer.store.creditNote(noteIdOf(k1)!, 5_000)
+  theMint.moneyer.store.creditNote(moneyerBearerId(k1), 5_000)
   await wallet.receive(`${theMint.moneyer.url}/w?k1=${k1}&amount=5000`)
 }
 
@@ -79,6 +96,34 @@ describe('taking a Part 2 note', () => {
     const [held] = wallet.liveNotes()
     expect(held!.k1).toMatch(/^[0-9a-f]{64}$/)
     expect(await statusAtMint(theMint, note.ck1)).toBe('Note already spent.')
+  })
+
+  it('still takes one whose ck1 signed the deprecated fixed message', async () => {
+    const theMint = await startMint()
+    const {wallet} = makeWallet()
+    const note = await partTwoNote(theMint, 30_000, sk => legacySchnorrCk1(sk))
+    await wallet.receive(note.url)
+    expect(wallet.balanceMsat()).toBe(30_000)
+    expect(await statusAtMint(theMint, note.ck1)).toBe('Note already spent.')
+  })
+
+  it.runIf(taprootMoneyer)('takes one whose ck1 is bound to this mint', async () => {
+    const theMint = await startMint()
+    const {wallet} = makeWallet()
+    const note = await partTwoNote(theMint, 30_000, boundCk1)
+    await wallet.receive(note.url)
+    expect(wallet.balanceMsat()).toBe(30_000)
+    expect(await statusAtMint(theMint, note.ck1)).toBe('Note already spent.')
+  })
+
+  it('refuses one whose ck1 is bound to another mint, before asking this one anything', async () => {
+    const theMint = await startMint()
+    const {wallet, data} = makeWallet()
+    const note = await partTwoNote(theMint, 30_000)
+    const elsewhere = boundCk1(note.sk, 'https://other.example')
+    await expect(wallet.receive(note.url.replace(note.ck1, elsewhere))).rejects.toThrow(ProtocolError)
+    expect(data.notes).toEqual([])
+    expect(await statusAtMint(theMint, note.ck1)).toBeUndefined()
   })
 
   it('refuses one whose certificate belongs to another note', async () => {

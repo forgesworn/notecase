@@ -415,8 +415,10 @@ describe('mint fees', () => {
     expect(sent.amountMsat).toBe(8_000)
     expect(wallet.balanceMsat()).toBe(12_000)
     // and the mint's own books agree
+    // the mock files a bearer note under its h, the way a mint did before
+    // every note was keyed by its Q
     const change = wallet.liveNotes()[0]!
-    expect(theMint.state.notes.get(change.id)?.amountMsat).toBe(12_000)
+    expect(theMint.state.notes.get(hashK1(change.k1))?.amountMsat).toBe(12_000)
   })
 
   it('gathers several notes with fee-aware change', async () => {

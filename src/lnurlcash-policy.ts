@@ -2,12 +2,7 @@ import {secp256k1} from '@noble/curves/secp256k1.js'
 import {hmac} from '@noble/hashes/hmac.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {bytesToHex, utf8ToBytes} from '@noble/hashes/utils.js'
-import {
-  hashK1,
-  isPreimage,
-  recoverNoteOwnershipPubkey,
-  type MintFee
-} from '@lnurlcash/kit'
+import {type MintFee} from '@lnurlcash/kit'
 import {
   deriveCashChild,
   deriveCashDomainNode,
@@ -29,14 +24,6 @@ export const mintFeeBand = (grossMsat: number, fee: MintFee): MintFeeBand => {
     minNetMsat: Math.max(0, grossMsat - roundedFee),
     maxNetMsat: Math.max(0, grossMsat - exactFee)
   }
-}
-
-export const noteIdOf = (k1: string): string | null => {
-  if (typeof k1 !== 'string') return null
-  const value = k1.trim().toLowerCase()
-  if (isPreimage(value)) return hashK1(value)
-  const owner = recoverNoteOwnershipPubkey(value)
-  return owner ? bytesToHex(owner.pubkeyXOnly) : null
 }
 
 // LUD-25 Part 2's address branch, the literal `m/139'/d1..d4` with the
