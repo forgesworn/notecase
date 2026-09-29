@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.1 - 2026-09-29
+
+Refreshes undici to clear an advisory (GHSA-3wwx-pv8p-q78v) that stopped 0.24.0 from publishing; 0.24.0 never reached npm, and its contents are below.
+
 ## 0.24.0 - 2026-09-29
 
 **Upgrade the mints first.** This follows LUD-25 as of lnurl/luds 6e865b1,
