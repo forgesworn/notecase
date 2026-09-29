@@ -1515,8 +1515,14 @@ export class Wallet {
       // refusal is ambiguous, and the staged secrets, which may be the
       // only copy of notes the mint really did mint, are kept until
       // reconcile asks what they are worth.
+      // A mint that follows LUD-25 says "already in use" for an output it
+      // already holds; the older ones said "already spent". Either way the
+      // inputs are asked about below before the index is skipped.
       const mayHaveLanded =
-        inputsWereLive && (err instanceof NoteSpentError || err instanceof NoteUnknownError)
+        inputsWereLive &&
+        (err instanceof NoteSpentError ||
+          err instanceof NoteUnknownError ||
+          (err instanceof ServiceRejectedError && /already in use/i.test(err.reason)))
 
       // Before treating that as unknowable, ask. A mint refuses a repeated
       // output hash with the same words it refuses a dead input, on purpose
