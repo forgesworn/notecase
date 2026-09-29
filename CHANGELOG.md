@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.24.0 - 2026-09-29
 
 **Upgrade the mints first.** This follows LUD-25 as of lnurl/luds 6e865b1,
 "unified taproot verification". A `ck1` this wallet signs is now bound to
@@ -10,6 +10,7 @@ counted, but the mint refuses the rotate, so it stays under its key until
 the mint moves. Upgrade every device sharing a seed and the note store
 together, too: an older release sees each moved note twice.
 
+- A mint that answers "already in use" to a mutation whose output it already holds (the reason LUD-25 fixes) now makes the wallet skip that index, as "already spent" always did.
 - Every note is a taproot output key `Q`, and a note's id is now `hex(Q)`.
   A key note's id was already its key and does not move; a bearer note's
   moves from `sha256(k1)` to the `Q` its hashlock names. Wallet files, the
