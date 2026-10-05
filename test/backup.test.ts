@@ -1,6 +1,9 @@
 import {describe, expect, it} from 'vitest'
 import {BackupError, exportBackup, importBackup} from '../src/backup.ts'
 import {emptyWallet} from '../src/types.ts'
+import {bech32m} from '@scure/base'
+import {hexToBytes} from '@noble/hashes/utils.js'
+import {legacyEcdsaCk1} from './helpers.ts'
 
 // The portable backup: sealed under its own passphrase, never under the
 // device PIN - a file must survive an offline brute force, a PIN pad only
@@ -49,6 +52,29 @@ describe('backup', () => {
       unrotated: true,
       createdAt: 2,
       updatedAt: 2
+    })
+    const file = await exportBackup(data, 'correct horse battery')
+    expect(await importBackup(file, 'correct horse battery')).toEqual(data)
+  })
+
+  // Kit 0.20 reads neither the 65-byte ECDSA ck1 nor a cs1 without its
+  // amount, but a wallet that took such a note is still owed it: its backup
+  // has to restore, and the note is spent by handing its k1 to its mint.
+  it('round-trips a held note in shapes the kit no longer reads', async () => {
+    const data = sample()
+    const fixedHrpCs1 = bech32m.encode('cs', bech32m.toWords(new Uint8Array(65).fill(7)), false)
+    data.notes.push({
+      id: 'e'.repeat(64),
+      k1: legacyEcdsaCk1(hexToBytes('33'.repeat(32))),
+      amountMsat: 8_000,
+      baseUrl: 'https://mint.example/w',
+      callback: 'https://mint.example/w/cb',
+      mintHost: 'mint.example',
+      signature: fixedHrpCs1,
+      state: 'live',
+      origin: 'receive',
+      createdAt: 3,
+      updatedAt: 3
     })
     const file = await exportBackup(data, 'correct horse battery')
     expect(await importBackup(file, 'correct horse battery')).toEqual(data)

@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
-import {AmbiguousMintError, PendingNoteError, ProtocolError, ServiceRejectedError, hashK1} from '../src/lnurlcash.js'
+import {AmbiguousMintError, PendingNoteError, ProtocolError, ServiceRejectedError, hashK1, noteRef} from '../src/lnurlcash.js'
 import {fakeBolt11} from '@forgesworn/moneyer'
 import {BadSignatureError, InsufficientFundsError, Wallet} from '../src/wallet.ts'
 import type {PendingMint, WalletData} from '../src/types.ts'
@@ -773,7 +773,7 @@ describe('checking notes against their mints', () => {
       if (
         held &&
         url.pathname === '/w' &&
-        (url.searchParams.get('k1') === held || url.searchParams.get('h') === hashK1(held))
+        (url.searchParams.get('k1') === held || url.searchParams.get('p') === noteRef(hashK1(held)))
       ) {
         return new Response(JSON.stringify({status: 'ERROR', reason: 'pending'}), {
           headers: {'content-type': 'application/json'}

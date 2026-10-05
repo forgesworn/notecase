@@ -1,5 +1,5 @@
 import {bytesToHex, randomBytes, utf8ToBytes} from '@noble/hashes/utils.js'
-import {isAnyCs1, isCk1, isCw1} from './lnurlcash.js'
+import {isCk1, isCs1WithAmount, isCw1} from './lnurlcash.js'
 import {sealWallet, unsealWallet} from './cryptobox.ts'
 import {migrateNoteIds} from './noteids.ts'
 import {MAX_HEARTWOOD_INVENTORY} from './types.ts'
@@ -26,6 +26,20 @@ const NOTE_STATES = new Set(['live', 'staged', 'ambiguous', 'melting', 'sent', '
 const NOTE_ORIGINS = new Set(['mint', 'receive', 'rotate', 'split', 'change', 'merge', 'recovered'])
 const PENDING_STATES = new Set(['awaiting', 'claimed', 'expired', 'abandoned'])
 const MELT_STATES = new Set(['in-flight', 'settled', 'returned'])
+
+// What a note already held may carry from before kit 0.20, which no longer
+// reads either: a 65-byte ECDSA ck1, and a fixed-HRP cs1 (or a bare hex
+// signature) with no amount in it. A wallet that took such a note is still
+// owed it, so its backup must restore. These check the shape only - bech32
+// characters behind the right prefix, at the right length - and vouch for
+// nothing: such a note is spent by handing its k1 to its mint, which judges
+// it, and such a certificate verifies nowhere in this wallet.
+const BECH32_DATA = '[02-9ac-hj-np-z]'
+const STORED_LEGACY_CK1 = new RegExp(`^ck1${BECH32_DATA}{110}$`)
+const STORED_LEGACY_CS1 = new RegExp(`^cs1${BECH32_DATA}{110}$`)
+const isStoredK1 = (k1: string): boolean => HEX64.test(k1) || isCk1(k1) || isCw1(k1) || STORED_LEGACY_CK1.test(k1)
+const isStoredCertificate = (value: string): boolean =>
+  HEX.test(value) || isCs1WithAmount(value) || STORED_LEGACY_CS1.test(value)
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -151,8 +165,8 @@ const isWalletData = (data: unknown): data is WalletData => {
     // were keyed by Q: both 64 hex, and the second is moved on import.
     if (typeof note.id !== 'string' || !HEX64.test(note.id)) return false
     // A key note's k1 is a ck1 and a script note's a cw1. A certificate is
-    // either the original cs1 form or the current amount-bearing encoding.
-    if (typeof note.k1 !== 'string' || !(HEX64.test(note.k1) || isCk1(note.k1) || isCw1(note.k1))) return false
+    // a cs1<amount>, or one of the older shapes a held note may still carry.
+    if (typeof note.k1 !== 'string' || !isStoredK1(note.k1)) return false
     if (!isAmount(note.amountMsat)) return false
     if (!isHttpUrl(note.baseUrl)) return false
     // A note taken offline has no callback until it has met its mint: the
@@ -164,7 +178,7 @@ const isWalletData = (data: unknown): data is WalletData => {
     if (typeof note.origin !== 'string' || !NOTE_ORIGINS.has(note.origin)) return false
     if (
       note.signature !== undefined &&
-      (typeof note.signature !== 'string' || !(HEX.test(note.signature) || isAnyCs1(note.signature)))
+      (typeof note.signature !== 'string' || !isStoredCertificate(note.signature))
     ) {
       return false
     }

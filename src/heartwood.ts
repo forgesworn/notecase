@@ -251,15 +251,29 @@ export class HeartwoodClient {
   }
 
   // Have the device keep a note a scan found on its branch. It derives the
-  // key at `index` itself and refuses one that is not at `p`; nothing
-  // secret crosses to this machine. No hold, as for an import.
-  async claimKeyNote(claim: {host: string; index: number; amountMsat: number; p: string; sig?: string}): Promise<{id: string; created: boolean}> {
+  // key at `index` of `purpose` itself and refuses one that is not at `p`;
+  // nothing secret crosses to this machine. No hold, as for an import.
+  //
+  // `purpose` is LUD-25's derivation purpose (2, the Lightning Address one,
+  // is what a mint pays a name on, and what the firmware assumes when none is
+  // named); left out, the device is asked as firmware from before purposes
+  // was, which derived the single ladder. `c` is the mint's certificate,
+  // LUD-25's name for what firmware before 0.18.0-beta.24 read as `sig`.
+  async claimKeyNote(claim: {
+    host: string
+    index: number
+    amountMsat: number
+    p: string
+    purpose?: number
+    c?: string
+  }): Promise<{id: string; created: boolean}> {
     const res = await this.note<{id: string; created: boolean}>('heartwood_note_claim', {
       host: claim.host,
       index: claim.index,
       amount_msat: claim.amountMsat,
       p: claim.p,
-      ...(claim.sig ? {sig: claim.sig} : {})
+      ...(claim.purpose !== undefined ? {purpose: claim.purpose} : {}),
+      ...(claim.c ? {c: claim.c} : {})
     })
     return {id: res.id, created: res.created}
   }

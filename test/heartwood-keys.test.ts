@@ -11,6 +11,7 @@ import {bytesToHex, hexToBytes, randomBytes, utf8ToBytes} from '@noble/hashes/ut
 import {
   cashNodeToCx1,
   decodeCx1,
+  deriveCashAddressNode,
   deriveLegacyCashAddressNode,
   deriveCashRoot,
   deriveNotePubkey,
@@ -21,20 +22,20 @@ import {
   encodeCk1,
   encodeCp1,
   encodeCx1,
-  isAnyCs1,
+  isCs1WithAmount,
   signNoteOwnership
 } from '../src/lnurlcash.js'
 import {NIP46_KIND, type DeviceNote} from '../src/heartwood.ts'
 import type {NostrTransport} from '../src/nostr.ts'
 import {legacyEcdsaCk1, makeWallet} from './helpers.ts'
-import {purposedMoneyer} from './moneyer.ts'
 
 // A lightning address owned by a heartwood's own npub, paid to the device's
 // own keys (LUD-25 Part 2). The device derives its address branch from that
 // identity key - seed = HMAC-SHA256(key, "LNURLcash/nostr-seed"), then
-// the old m/139'/1'/d1..d4 firmware still uses - which is what the fake below does, with
-// the kit, exactly as heartwood-esp32's cash_key.rs does in Rust against
-// vectors the kit produced. The mint is a real moneyer.
+// m/139'/d1..d4 since firmware 0.18.0-beta.24 and m/139'/1'/d1..d4 before -
+// which is what the fake below does, with the kit, as heartwood-esp32's
+// cash_key.rs does in Rust against lnurlcash-conformance's vectors. The mint
+// is a real moneyer.
 
 const NOSTR_SEED_LABEL = 'LNURLcash/nostr-seed'
 
@@ -43,11 +44,17 @@ type Held = DeviceNote & {k1: string}
 const fakeHeartwood = (relay: string) => {
   const secret = generateSecretKey()
   const pubkey = getPublicKey(secret)
-  const branchFor = (host: string) =>
-    deriveLegacyCashAddressNode(deriveCashRoot(hmac(sha256, secret, utf8ToBytes(NOSTR_SEED_LABEL))), host)
+  const root = () => deriveCashRoot(hmac(sha256, secret, utf8ToBytes(NOSTR_SEED_LABEL)))
+  const currentBranch = (host: string) => deriveCashAddressNode(root(), host)
+  const supersededBranch = (host: string) => deriveLegacyCashAddressNode(root(), host)
+  // The branch the device hands out: the spec's since beta.24, the
+  // superseded one before.
+  const branchFor = (host: string) => (firmware === 'purposes' ? currentBranch(host) : supersededBranch(host))
   const notes: Held[] = []
   const bound = new Set<string>()
   const log: string[] = []
+  // What each heartwood_note_claim was sent.
+  const claims: Record<string, unknown>[] = []
   const subs: {filter: Filter; onEvent: (e: Event) => void}[] = []
   let nextId = 1
   // Who the address answer says the branch belongs to: a link served as a
@@ -56,8 +63,12 @@ const fakeHeartwood = (relay: string) => {
   // How it answers heartwood_note_address_proof: as the firmware does, as
   // firmware from before the method does, or wrongly in one of two ways.
   let proofMode: 'ok' | 'unknown' | 'wrongBranch' | 'wrongDomain' = 'ok'
-  // Firmware with LUD-25's purposes finds a claimed key on purpose 2 or the
-  // ladder before purposes; older firmware only on the latter.
+  // 0.18.0-beta.24 ('purposes'): a claim names its purpose (2 when it does
+  // not), is found on the current branch or, given its `p`, the superseded
+  // one, carries its certificate as `c` (or `sig`), and a key note exports
+  // as a ck1 bound to its mint. Before it ('prePurpose'): the superseded
+  // branch only, the ladder before purposes only, `sig`, and the 65-byte
+  // ECDSA ck1.
   let firmware: 'purposes' | 'prePurpose' = 'purposes'
   // The firmware's address_proof: the branch cash_address hands out for
   // `host` signs sha256("LNURLcash:<action>:<domain>:<name>") with its
@@ -103,15 +114,15 @@ const fakeHeartwood = (relay: string) => {
         return ok({host, domain: signed.domain, name, action, cx1: signed.cx1, sig: signed.sig})
       }
       case 'heartwood_note_claim': {
-        // The firmware's claim_key_note: derive the key at `index` for the
-        // endpoint's mint, on purpose 2 then the ladder before purposes (or
-        // only the latter, before purposes), refuse one that is not at `p`,
-        // keep it once.
+        // The firmware's claim_key_note: derive the key at `index` of the
+        // claim's purpose for the endpoint's mint, refuse one that is not at
+        // `p`, keep it once.
         const host = String(fields.host)
-        const node = branchFor(host.split('/')[0]!)
+        const mintHost = host.split('/')[0]!
         const index = Number(fields.index)
-        const ladders: NotePurpose[] = firmware === 'purposes' ? [NOTE_PURPOSE_LIGHTNING_ADDRESS, null] : [null]
-        const keys = ladders.map(purpose => deriveNoteSecretKey(node.privateKey, node.chainCode, purpose, index))
+        const purpose: NotePurpose = firmware === 'purposes' ? ((fields.purpose as NotePurpose | undefined) ?? NOTE_PURPOSE_LIGHTNING_ADDRESS) : null
+        const nodes = firmware === 'purposes' ? [currentBranch(mintHost), supersededBranch(mintHost)] : [supersededBranch(mintHost)]
+        const keys = nodes.map(node => deriveNoteSecretKey(node.privateKey, node.chainCode, purpose, index))
         const key = fields.p === undefined ? keys[0]! : keys.find(k => encodeCp1(hexToBytes(getPublicKey(k))) === fields.p)
         if (!key) {
           return {result: JSON.stringify({ok: false, error: 'bad_request', message: 'that note is paid to a key this device does not hold'})}
@@ -120,17 +131,26 @@ const fakeHeartwood = (relay: string) => {
         const existing = notes.find(n => n.p === p)
         if (existing) return ok({id: existing.id, created: false, p})
         const id = String(nextId++).padStart(8, '0')
+        const certificate = firmware === 'purposes' ? (fields.c ?? fields.sig) : fields.sig
+        claims.push(fields)
         notes.push({
           id,
-          // what the firmware exports: the 65-byte ECDSA shape
-          k1: legacyEcdsaCk1(key),
+          // what the firmware exports: a ck1 bound to the note's mint, or
+          // before beta.24 the 65-byte ECDSA shape
+          k1:
+            firmware === 'purposes'
+              ? (() => {
+                  const signed = signNoteOwnership(key, mintHost)
+                  return encodeCk1(signed.pubkeyXOnly, signed.signature)
+                })()
+              : legacyEcdsaCk1(key),
           state: 'confirmed',
           amount_msat: Number(fields.amount_msat),
           host,
           label: '',
           p,
           index,
-          ...(typeof fields.sig === 'string' ? {sig: fields.sig} : {})
+          ...(typeof certificate === 'string' ? {sig: certificate} : {})
         })
         return ok({id, created: true, p})
       }
@@ -198,6 +218,7 @@ const fakeHeartwood = (relay: string) => {
     transport,
     notes,
     log,
+    claims,
     pubkey,
     // What the owner wrote down for this master: it is a bunker master, so
     // its nsec.
@@ -429,7 +450,10 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     expect(scan.scanned).toBe(1 + 3 + 3)
     const kept = device.notes[0]!
     expect(kept.host).toBe(`${theMint.host}/w`)
-    expect(isAnyCs1(kept.sig!)).toBe(true)
+    expect(isCs1WithAmount(kept.sig!)).toBe(true)
+    // the claim names its purpose and carries the certificate as LUD-25's c
+    expect(device.claims[0]).toMatchObject({purpose: NOTE_PURPOSE_LIGHTNING_ADDRESS, c: kept.sig})
+    expect(device.claims[0]).not.toHaveProperty('sig')
 
     // A scan puts a note ON the device, so the inventory it leaves behind
     // has to include it - by its index on the branch, never its ck1.
@@ -469,13 +493,12 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     expect(first!.state).toBe('confirmed')
   })
 
-  // Only a mint with purposes pays a name on purpose 2 (see purposedMoneyer).
-  it.runIf(purposedMoneyer)('reports what older firmware cannot claim as waiting at the mint, where the nsec reaches it', async () => {
+  it('reports what older firmware cannot claim as waiting at the mint, where the nsec reaches it', async () => {
     const {theMint, device, wallet} = await setUp()
+    device.firmware('prePurpose')
     await wallet.heartwoodNameToKeys(device.transport, 'donkey')
     await pay(theMint, 'donkey', 21_000)
 
-    device.firmware('prePurpose')
     const scan = await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})
     expect(scan.claimed).toEqual([])
     expect(scan.waiting).toEqual([{index: 0, amountMsat: 21_000}])
@@ -487,6 +510,36 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     await rescuer.addMint(`mint@${theMint.host}`)
     const result = await rescuer.recoverHeartwoodNotes(device.nsec, {expectedPubkey: device.pubkey, mintHost: theMint.host, gap: 3})
     expect(result.received.map(r => r.note.amountMsat)).toEqual([21_000])
+  })
+
+  // A name registered before 0.18.0-beta.24 still points at the superseded
+  // m/139'/1' branch, and moneyer pays it there on purpose 2. The updated
+  // device hands out its new branch, so the scan finds the name's cx1 at the
+  // mint; the device finds the key on the superseded branch from its `p`.
+  it('claims what a name still on the superseded branch is paid, once the firmware is updated', async () => {
+    const {theMint, device, wallet} = await setUp()
+    device.firmware('prePurpose')
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    const {pubkeyXOnly, chainCode} = cashNodeToCx1(device.branchFor(theMint.host))
+    const oldCx1 = encodeCx1(pubkeyXOnly, chainCode)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(oldCx1)
+    await pay(theMint, 'donkey', 21_000)
+
+    device.firmware('purposes')
+    // the device's own branch has moved, so without the name nothing is there
+    const blind = await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})
+    expect(blind.claimed).toEqual([])
+    expect(blind.waiting).toEqual([])
+
+    const scan = await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3, names: ['donkey']})
+    expect(scan.claimed).toEqual([{id: device.notes[0]!.id, index: 0, amountMsat: 21_000}])
+    expect(scan.waiting).toEqual([])
+    expect(device.claims.at(-1)).toMatchObject({purpose: NOTE_PURPOSE_LIGHTNING_ADDRESS, index: 0})
+
+    const collected = await wallet.collectFromHeartwood(device.transport)
+    expect(collected.failed).toEqual([])
+    expect(collected.collected.map(r => r.note.amountMsat)).toEqual([21_000])
+    expect(wallet.balanceMsat()).toBe(21_000)
   })
 
   it("recovers a lost heartwood's notes from its nsec, into a wallet that never saw it", async () => {
@@ -504,8 +557,8 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     const result = await rescuer.recoverHeartwoodNotes(device.nsec, opts)
     expect(result.mode).toBe('bunker')
     expect(result.received.map(r => r.note.amountMsat).sort((a, b) => a - b)).toEqual([5_000, 21_000])
-    // the spec's branch first, where this firmware was never paid, then the
-    // old m/139'/1' one it still hands out, each on the Lightning Address
+    // the spec's branch first, which this firmware hands out and was paid
+    // on, then the superseded m/139'/1' one, each on the Lightning Address
     // purpose and on the ladder from before purposes: four gaps, and the two
     // keys paid
     expect(result.scanned).toBe(2 + 3 * 4)

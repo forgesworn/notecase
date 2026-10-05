@@ -2,7 +2,7 @@ import {describe, expect, it} from 'vitest'
 import {bytesToHex, hexToBytes} from '@noble/hashes/utils.js'
 import {
   ProtocolError,
-  bearerNoteId,
+  bearerNoteIdOfHash,
   decodeCp1,
   decodeCw1,
   encodeCk1,
@@ -11,7 +11,7 @@ import {
   noteIdOf,
   signNoteOwnership
 } from '../src/lnurlcash.js'
-import {NUMS_H, tapLeafHash, taprootTweak} from '../src/spend.ts'
+import {NUMS_H, TAPLEAF_VERSION, tapLeafHash, taprootTweakPubkey} from '../src/lnurlcash.js'
 import {BadSignatureError, Wallet, WalletUsageError} from '../src/wallet.ts'
 import {emptyWallet, type WalletData} from '../src/types.ts'
 import {certify} from './helpers.ts'
@@ -29,6 +29,7 @@ const V5 = {
   preimage: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
   h: '630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd',
   q: 'd18b619687343df2fc7a47e1daf25260b909bb563fb4b4b11e59e2bd64880982',
+  cp1: 'cp16x9kr958xs7l9lr6glsa4ujjvzusnw6k876tfvg7t83t6eygpxpq6we0xc',
   cw1: 'cw1qqqqqq8lllll7qpr4qsxxrwd99nvgvmxjyf9gj9mkfd5laqj5jw8xtdjez4urwzcr0t3phv8qqsuq5yjnd6vrgzf2jmckjmqxh5h5hs83fdq728vjm2500lwnt8gqwkqqqsqqqgzqvzq2ps8pqys5zcvp58q7yq3zgf3g9gkzuvpjxsmrsw3u8c6x6a4c',
   // the spec's own certified note, in short form
   url: 'lnurlw://mint.example/w?k1=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&sig=cs10n1caxh3wxfa0g2zxj6lt90rlksv8dgemtavcj7dqymvfxa7683d268mawdsvygd0maru024z9ehtdv5fptumsr3t0v0vuv2x3e953557qq5c70z5'
@@ -41,14 +42,14 @@ const fakeMint = () => {
   const notes = new Map<string, number>()
   const seen: URL[] = []
   // A cp1, or a bearer note's h in its place.
-  const qOf = (value: string): string => (/^[0-9a-f]{64}$/i.test(value) ? bearerNoteId(value) : bytesToHex(decodeCp1(value)!))
+  const qOf = (value: string): string => (/^[0-9a-f]{64}$/i.test(value) ? bearerNoteIdOfHash(value) : bytesToHex(decodeCp1(value)!))
   const withdrawRequest = (q: string, extra: Record<string, unknown> = {}) => ({
     tag: 'withdrawRequest',
     callback: 'https://mint.example/cb',
     minWithdrawable: 1000,
     maxWithdrawable: notes.get(q)!,
     mintPubkey: MINT_PUBKEY,
-    sig: certify(MINT_KEY, notes.get(q)!, q),
+    c: certify(MINT_KEY, notes.get(q)!, q),
     ...extra
   })
   const fetchImpl: typeof globalThis.fetch = async input => {
@@ -73,7 +74,7 @@ const fakeMint = () => {
       for (const id of inputs) notes.delete(id)
       const out = qOf(output)
       notes.set(out, total)
-      return Response.json({status: 'OK', sig: certify(MINT_KEY, total, out)})
+      return Response.json({status: 'OK', c: certify(MINT_KEY, total, out)})
     }
     return Response.json({status: 'ERROR', reason: 'Not found.'}, {status: 404})
   }
@@ -151,20 +152,24 @@ describe("test vector 5's certified note, taken offline", () => {
     await expect(wallet.receiveOffline(V5.url.replace(V5.preimage, V5.cw1))).rejects.toThrow('already in the wallet')
   })
 
-  it("takes an older mint's certificate over h, and refuses one under neither id", async () => {
-    const {wallet} = pinned()
-    const overH = `lnurlw://mint.example/w?k1=${V5.preimage}&sig=${certify(MINT_KEY, 1000, V5.h)}`
-    expect(wallet.verifyNoteOffline(overH).valid).toBe(true)
-    const overNeither = `lnurlw://mint.example/w?k1=${V5.preimage}&sig=${certify(MINT_KEY, 1000, 'ab'.repeat(32))}`
+  it('refuses a certificate over its h, as LUD-25 and kit 0.20 do, or over anything but its Q', async () => {
+    const {wallet, data} = pinned()
+    const overH = `lnurlw://mint.example/w?k1=${V5.preimage}&c=${certify(MINT_KEY, 1000, V5.h)}`
+    expect(wallet.verifyNoteOffline(overH).valid).toBe(false)
+    await expect(wallet.receiveOffline(overH)).rejects.toThrow(BadSignatureError)
+    const overNeither = `lnurlw://mint.example/w?k1=${V5.preimage}&c=${certify(MINT_KEY, 1000, 'ab'.repeat(32))}`
     expect(wallet.verifyNoteOffline(overNeither).valid).toBe(false)
     await expect(wallet.receiveOffline(overNeither)).rejects.toThrow(BadSignatureError)
-    const {note} = await wallet.receiveOffline(overH)
+    expect(data.notes).toEqual([])
+    // over its Q, under either name for the certificate, it is taken
+    const overQ = `lnurlw://mint.example/w?k1=${V5.preimage}&sig=${certify(MINT_KEY, 1000, V5.q)}`
+    const {note} = await wallet.receiveOffline(overQ)
     expect(note.id).toBe(V5.q)
   })
 })
 
 describe('a cw1 in hand', () => {
-  it('is looked up by its h and spent verbatim, when it is a bearer note', async () => {
+  it('is looked up by its cp1 and spent verbatim, when it is a bearer note', async () => {
     const mint = fakeMint()
     mint.notes.set(V5.q, 21_000)
     const {wallet} = walletAt(mint)
@@ -172,7 +177,8 @@ describe('a cw1 in hand', () => {
     expect(note.amountMsat).toBe(21_000)
     expect(note.origin).toBe('rotate')
     const lookup = mint.seen.find(url => url.pathname === '/w')!
-    expect(lookup.searchParams.get('h')).toBe(V5.h)
+    expect(lookup.searchParams.get('p')).toBe(V5.cp1)
+    expect(lookup.searchParams.has('h')).toBe(false)
     expect(lookup.searchParams.has('k1')).toBe(false)
     expect(mint.seen.find(url => url.pathname === '/cb')!.searchParams.getAll('k1')).toEqual([V5.cw1])
   })
@@ -180,7 +186,7 @@ describe('a cw1 in hand', () => {
   // A leaf a key must sign for: only the mint's interpreter can judge it.
   const scripted = () => {
     const script = new Uint8Array([0x20, ...hexToBytes(PK0), 0xac])
-    const {parity} = taprootTweak(NUMS_H, tapLeafHash(script))!
+    const {parity} = taprootTweakPubkey(NUMS_H, tapLeafHash(script, TAPLEAF_VERSION))
     return encodeCw1({
       locktime: 0,
       sequence: 0xffffffff,

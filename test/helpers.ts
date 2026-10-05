@@ -50,7 +50,7 @@ export const legacySchnorrCk1 = (secretKey: Uint8Array): string =>
   encodeCk1(schnorr.getPublicKey(secretKey), schnorr.sign(sha256(utf8ToBytes('LNURLcash')), secretKey, new Uint8Array(32)))
 
 // A mint's cs1 certificate for the note filed under `noteId` (64 hex: its Q,
-// or the h an older mint certified a bearer note over), signed with `mintKey`
+// or anything else a test wants a certificate over), signed with `mintKey`
 // as a Lightning node's signmessage would, r || s || recovery id.
 export const certify = (mintKey: Uint8Array, amountMsat: number, noteId: string): string => {
   const digest = sha256(sha256(utf8ToBytes(`Lightning Signed Message:LNURLcash:${amountMsat}:${noteId}`)))

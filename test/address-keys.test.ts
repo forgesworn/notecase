@@ -10,6 +10,7 @@ import {
   deriveLegacyCashAddressNode,
   deriveNostrAddressNode,
   encodeCx1,
+  bearerNoteIdOfPreimage,
   isCk1
 } from '../src/lnurlcash.js'
 import {hexToBytes} from '@noble/hashes/utils.js'
@@ -17,7 +18,6 @@ import type {NostrTransport} from '../src/nostr.ts'
 import {newMnemonic, seedFromMnemonic} from '../src/store.ts'
 import {WalletUsageError} from '../src/wallet.ts'
 import {freshK1, makeWallet} from './helpers.ts'
-import {moneyerBearerId, taprootMoneyer} from './moneyer.ts'
 
 // A moneyer name with a cx1 is paid to this wallet's own keys. The gift wrap
 // says only where to look and at which index; the wallet derives the key,
@@ -129,10 +129,8 @@ describe('a name paid to this wallet\'s keys', () => {
     expect(got.skipped).toEqual([])
     expect(got.received).toHaveLength(1)
     expect(got.received[0]!.note.amountMsat).toBe(21_000)
-    // rotated onto a secret of its own at once: no ck1 is held. The wallet
-    // signs its ck1 over this mint's own sighash, which the pinned moneyer
-    // predates and cannot read, so there the note stays under its key.
-    expect(wallet.liveNotes().some(note => isCk1(note.k1))).toBe(!taprootMoneyer)
+    // rotated onto a secret of its own at once: no ck1 is held
+    expect(wallet.liveNotes().some(note => isCk1(note.k1))).toBe(false)
     expect(wallet.balanceMsat()).toBe(21_000)
   })
 
@@ -265,7 +263,7 @@ describe('a name paid to this wallet\'s keys', () => {
     const {wallet} = seededWallet()
     await wallet.addMint(`mint@${theMint.host}`)
     const k1 = freshK1()
-    theMint.moneyer.store.creditNote(moneyerBearerId(k1), 50_000)
+    theMint.moneyer.store.creditNote(bearerNoteIdOfPreimage(k1), 50_000)
     await wallet.receive(`${theMint.moneyer.url}/w?k1=${k1}&amount=50000`)
 
     const first = await wallet.registerName({name: 'alice'})

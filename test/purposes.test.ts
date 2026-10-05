@@ -7,10 +7,12 @@ import {
   deriveNotePubkey,
   deriveNoteSecretKey,
   noteDeclaredAmount,
+  noteRef,
   noteSignature,
+  rotateNoteWithHash,
+  splitNoteWithHash,
   type NotePurpose
 } from '../src/lnurlcash.js'
-import {withLegacyCertificateNames, withSpecOutputNames} from '../src/lnurlcash-network.js'
 import {schnorr} from '@noble/curves/secp256k1.js'
 
 // LUD-25 (lnurl/luds 50d740a): a branch's keys per purpose, test vectors 1
@@ -71,23 +73,41 @@ describe('the renames', () => {
     expect(noteDeclaredAmount(`lnurlw://mint.example/w?k1=00&c=${cs1}`)).toBe(1000)
   })
 
-  it('gives a mint answer that has only c and c2 the old names too, and leaves the rest', () => {
-    expect(withLegacyCertificateNames({status: 'OK', c: 'a', c2: 'b'})).toEqual({status: 'OK', c: 'a', c2: 'b', sig: 'a', sig2: 'b'})
-    expect(withLegacyCertificateNames({status: 'OK', c: 'a', sig: 'old'})).toEqual({status: 'OK', c: 'a', sig: 'old'})
-    expect(withLegacyCertificateNames([1])).toEqual([1])
+  // What the kit puts on the wire now, through this wallet's transport: an
+  // output named by its cp1 under p1/p2 (a bearer h travels as its note's
+  // cp1), and the certificate read from c/c2.
+  const answering = (body: unknown) => {
+    const seen: URL[] = []
+    const fetch = (async (url: string | URL) => {
+      seen.push(new URL(String(url)))
+      return new Response(JSON.stringify(body), {headers: {'content-type': 'application/json'}})
+    }) as typeof globalThis.fetch
+    return {seen, fetch}
+  }
+
+  it('names a bearer output by its cp1 under p1, and reads the certificate from c', async () => {
+    const h = 'aa'.repeat(32)
+    const {seen, fetch} = answering({status: 'OK', c: cs1})
+    const result = await rotateNoteWithHash('https://mint.example/cb', '01'.repeat(32), h, {fetch})
+    const params = seen[0]!.searchParams
+    expect(params.get('p1')).toBe(noteRef(h))
+    expect(params.get('p1')).toMatch(/^cp1/)
+    expect(params.has('h')).toBe(false)
+    expect(result.signature).toBe(cs1)
   })
 
-  it("names a bearer output p1/p2, and a lookup p, alongside the kit's h/h2", () => {
-    const h = 'aa'.repeat(32)
-    const h2 = 'bb'.repeat(32)
-    const mutation = new URL(withSpecOutputNames(`https://mint.example/cb?k1=01&amount=5&h=${h}&h2=${h2}`)).searchParams
-    expect([mutation.get('p1'), mutation.get('p2'), mutation.get('h'), mutation.get('h2')]).toEqual([h, h2, h, h2])
-    const lookup = new URL(withSpecOutputNames(`https://mint.example/w?h=${h}`)).searchParams
-    expect([lookup.get('p'), lookup.get('h')]).toEqual([h, h])
-    // a cp1 output is already p1, and an invoice request's comment names its note
-    const named = `https://mint.example/cb?k1=01&p1=cp1xyz`
-    expect(withSpecOutputNames(named)).toBe(named)
-    const invoice = `https://mint.example/pay?amount=1000&comment=${h}&h=${h}`
-    expect(withSpecOutputNames(invoice)).toBe(invoice)
+  it('names a split\'s two outputs p1 and p2, and reads c and c2', async () => {
+    const {seen, fetch} = answering({status: 'OK', c: cs1, c2: cs1})
+    const result = await splitNoteWithHash('https://mint.example/cb', ['01'.repeat(32)], 500, 'aa'.repeat(32), 'bb'.repeat(32), {fetch})
+    const params = seen[0]!.searchParams
+    expect([params.get('p1'), params.get('p2')]).toEqual([noteRef('aa'.repeat(32)), noteRef('bb'.repeat(32))])
+    expect(result).toEqual({signature: cs1, changeSignature: cs1})
+  })
+
+  it('no longer reads a certificate a mint sent only as sig', async () => {
+    const {fetch} = answering({status: 'OK', sig: cs1})
+    // a bearer output's certificate is optional to the kit, so this is not
+    // an error: there is simply no certificate
+    expect(await rotateNoteWithHash('https://mint.example/cb', '01'.repeat(32), 'aa'.repeat(32), {fetch})).toEqual({})
   })
 })
