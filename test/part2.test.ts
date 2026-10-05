@@ -135,6 +135,31 @@ describe('taking a Part 2 note', () => {
     expect(await statusAtMint(theMint, note.ck1)).toBe('Note already spent.')
   })
 
+  // The 65-byte ECDSA ck1 cannot even be asked after by its key any more.
+  // It is left alone, rather than reading as a mint that does not answer.
+  it('leaves a held 65-byte ck1 out of a check, without calling its mint unreachable', async () => {
+    const theMint = await startMint()
+    const {wallet, data} = makeWallet()
+    await pinMint(theMint, wallet)
+    const sk = hexToBytes('44'.repeat(32))
+    data.notes.push({
+      id: bytesToHex(secp256k1.getPublicKey(sk, true).slice(1)),
+      k1: legacyEcdsaCk1(sk),
+      amountMsat: 30_000,
+      baseUrl: `${theMint.moneyer.url}/w`,
+      callback: `${theMint.moneyer.url}/w/cb`,
+      mintHost: new URL(theMint.moneyer.url).host,
+      state: 'live',
+      origin: 'receive',
+      createdAt: 1,
+      updatedAt: 1
+    })
+    const report = await wallet.checkNotes({apply: true})
+    expect(report.unreachable).toEqual([])
+    expect(report.checked).toBe(1)
+    expect(wallet.balanceMsat()).toBe(5_000 + 30_000)
+  })
+
   it('takes one whose ck1 is bound to this mint', async () => {
     const theMint = await startMint()
     const {wallet} = makeWallet()

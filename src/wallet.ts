@@ -3294,6 +3294,18 @@ export class Wallet {
       // A key note's certificate is over its public key, which the ck1
       // released above recovers to, so it travels with it and is checked.
       if (note.p && note.sig) url.searchParams.set('c', note.sig)
+      // A spend this wallet cannot read is not a note it can take, and must
+      // never reach the WalletUsageError below that writes the device's copy
+      // off as already taken. Heartwood firmware before 0.18.0-beta.24
+      // exports a key note as the 65-byte ECDSA ck1, which kit 0.20 no
+      // longer reads; the note stays on the device for updated firmware.
+      if (!resolveNoteInput(url.toString())) {
+        failed.push({
+          id: note.id,
+          reason: 'the device released a spend this wallet cannot read (heartwood firmware before 0.18.0-beta.24 exports key notes in an old ck1 shape): update the firmware and collect again'
+        })
+        continue
+      }
       let result: ReceiveResult | null = null
       try {
         result = await this.receive(url.toString())
@@ -4227,6 +4239,11 @@ export class Wallet {
 
     const byHost = new Map<string, NoteRecord[]>()
     for (const note of this.checkableNotes(options.mintHost)) {
+      // A held spend the kit no longer reads (the 65-byte ECDSA ck1) cannot
+      // be asked after by its key, and asking would read as the whole mint
+      // not answering. It is left as it is: still spendable, by handing it
+      // to its mint, and nothing is concluded about it here.
+      if (noteIdOf(note.k1) === null) continue
       byHost.set(note.mintHost, [...(byHost.get(note.mintHost) ?? []), note])
     }
 

@@ -17,7 +17,12 @@ those primitives go. Tested against moneyer 0.17.
   one is refused before anything is stored. A note already held in one of
   those shapes is still looked up and spent (its mint judges the spend), a
   held note whose certificate no longer verifies shows as unsigned, and a
-  backup holding either still restores.
+  backup holding either still restores. A held 65-byte `ck1` is left out of
+  `check` rather than making its mint read as unreachable.
+- `heartwood collect` leaves a note on the device when the device releases
+  it in a shape this wallet cannot read (firmware before 0.18.0-beta.24
+  exports key notes as the 65-byte `ck1`), instead of writing it off there
+  as already taken. Update the firmware and collect again.
 - `heartwood address scan` names its claims' purpose and sends the
   certificate as `c`, as heartwood 0.18.0-beta.24 reads them. A key that
   firmware cannot derive (purpose 2 before beta.24, the pre-purpose ladder

@@ -39,7 +39,7 @@ import {legacyEcdsaCk1, makeWallet} from './helpers.ts'
 
 const NOSTR_SEED_LABEL = 'LNURLcash/nostr-seed'
 
-type Held = DeviceNote & {k1: string}
+type Held = DeviceNote & {key: Uint8Array}
 
 const fakeHeartwood = (relay: string) => {
   const secret = generateSecretKey()
@@ -135,15 +135,7 @@ const fakeHeartwood = (relay: string) => {
         claims.push(fields)
         notes.push({
           id,
-          // what the firmware exports: a ck1 bound to the note's mint, or
-          // before beta.24 the 65-byte ECDSA shape
-          k1:
-            firmware === 'purposes'
-              ? (() => {
-                  const signed = signNoteOwnership(key, mintHost)
-                  return encodeCk1(signed.pubkeyXOnly, signed.signature)
-                })()
-              : legacyEcdsaCk1(key),
+          key,
           state: 'confirmed',
           amount_msat: Number(fields.amount_msat),
           host,
@@ -155,11 +147,15 @@ const fakeHeartwood = (relay: string) => {
         return ok({id, created: true, p})
       }
       case 'heartwood_note_list':
-        return ok({total: notes.length, offset: 0, notes: notes.map(({k1: _k1, ...meta}) => meta)})
+        return ok({total: notes.length, offset: 0, notes: notes.map(({key: _key, ...meta}) => meta)})
       case 'heartwood_note_export': {
         const n = notes.find(note => note.id === fields.id)
         if (!n || n.state !== 'confirmed') return {error: 'invalid_state'}
-        return ok({k1: n.k1})
+        // a ck1 bound to the note's mint, or before beta.24 the 65-byte
+        // ECDSA shape
+        if (firmware === 'prePurpose') return ok({k1: legacyEcdsaCk1(n.key)})
+        const signed = signNoteOwnership(n.key, n.host.split('/')[0]!)
+        return ok({k1: encodeCk1(signed.pubkeyXOnly, signed.signature)})
       }
       case 'heartwood_note_spent': {
         const n = notes.find(note => note.id === fields.id)
@@ -461,7 +457,7 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
       {id: kept.id, amountMsat: 21_000, host: `${theMint.host}/w`, state: 'confirmed', index: 0}
     ])
     expect(wallet.heartwoodHeld()).toMatchObject({msat: 21_000, notes: 1})
-    expect(JSON.stringify(wallet.heartwoodInventory()!.notes)).not.toContain(kept.k1)
+    expect(JSON.stringify(wallet.heartwoodInventory()!.notes)).not.toContain(bytesToHex(kept.key))
 
     // A second scan finds it held and keeps nothing twice.
     expect((await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})).claimed).toEqual([])
@@ -539,6 +535,35 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     const collected = await wallet.collectFromHeartwood(device.transport)
     expect(collected.failed).toEqual([])
     expect(collected.collected.map(r => r.note.amountMsat)).toEqual([21_000])
+    expect(wallet.balanceMsat()).toBe(21_000)
+  })
+
+  // Firmware before beta.24 exports a key note as the 65-byte ECDSA ck1,
+  // which kit 0.20 no longer reads. Collecting must leave such a note on the
+  // device, not write it off as already taken, so updated firmware can
+  // release it in a shape this wallet reads.
+  it('leaves a note older firmware releases in an unreadable shape on the device, and collects it once updated', async () => {
+    const {theMint, device, wallet} = await setUp()
+    device.firmware('prePurpose')
+    // a note on the ladder from before purposes, which older firmware claims
+    const {pubkeyXOnly, chainCode} = cashNodeToCx1(device.branchFor(theMint.host))
+    const q = deriveNotePubkey(pubkeyXOnly, chainCode, null, 0)
+    theMint.moneyer.store.creditNote(bytesToHex(q), 21_000)
+    const scan = await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})
+    expect(scan.claimed.map(c => c.amountMsat)).toEqual([21_000])
+
+    const stuck = await wallet.collectFromHeartwood(device.transport)
+    expect(stuck.collected).toEqual([])
+    expect(stuck.failed).toEqual([{id: device.notes[0]!.id, reason: expect.stringContaining('update the firmware')}])
+    expect(device.notes[0]!.state).toBe('confirmed')
+    expect(device.log).not.toContain('heartwood_note_spent')
+    expect(wallet.balanceMsat()).toBe(0)
+
+    device.firmware('purposes')
+    const collected = await wallet.collectFromHeartwood(device.transport)
+    expect(collected.failed).toEqual([])
+    expect(collected.collected.map(r => r.note.amountMsat)).toEqual([21_000])
+    expect(device.notes[0]!.state).toBe('spent')
     expect(wallet.balanceMsat()).toBe(21_000)
   })
 
