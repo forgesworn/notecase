@@ -60,7 +60,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase nostr init | nostr show | nostr relays [set <url>...]
   notecase heartwood link <bunker://...> | heartwood notes | heartwood collect [<id>...]
   notecase heartwood send <id> --to <npub> | heartwood rename <id> <label> | heartwood unlink
-  notecase heartwood address keys <name> | address custodial <name> | address unregister <name> | address scan [--mint <host>]
+  notecase heartwood address keys <name> | address custodial <name> | address unregister <name> | address scan [name...] [--mint <host>]
   notecase heartwood recover [--npub <master npub>] [--mint <host>]   a lost heartwood's notes, from its nsec or phrase
   notecase backup export | backup shares [--threshold N --count M] | backup recover-key
   notecase backup nostr on|off|push|pull
@@ -1329,8 +1329,11 @@ const main = async (): Promise<void> => {
           console.log(`${released.address} is unregistered and can now be claimed again.`)
         } else if (sub === 'address' && arg === 'scan') {
           // The fallback for a wrap the device never saw: the note waits at
-          // the mint on the key it was paid to.
-          const result = await wallet.heartwoodScanAddress(transport, values.mint)
+          // the mint on the key it was paid to. Names given are looked up at
+          // the mint, so a name still on the branch older firmware handed
+          // out is walked there too.
+          const names = rest.slice(2)
+          const result = await wallet.heartwoodScanAddress(transport, values.mint, names.length ? {names} : {})
           for (const c of result.claimed) {
             console.log(`The device kept ${sats(c.amountMsat)} paid to its key #${c.index} (${c.id}).`)
           }
@@ -1338,7 +1341,7 @@ const main = async (): Promise<void> => {
           if (result.waiting.length) {
             const total = result.waiting.reduce((sum, w) => sum + w.amountMsat, 0)
             console.log(
-              `${result.waiting.length} more (${sats(total)}) were paid on LUD-25's Lightning Address purpose, which this device's firmware cannot claim yet. They are safe at the mint: update the firmware and scan again.`
+              `${result.waiting.length} more (${sats(total)}) were paid to keys this device's firmware cannot derive: LUD-25's Lightning Address purpose on firmware older than 0.18.0-beta.24, or the ladder from before purposes on firmware since. They are safe at the mint: update the firmware and scan again, or take them with \`heartwood recover\` and the device's nsec.`
             )
           }
         } else if (sub === 'recover') {
@@ -1378,7 +1381,7 @@ const main = async (): Promise<void> => {
           if (sent.relays.length) console.log(`  on: ${sent.relays.join(', ')}`)
           if (sent.failed.length) console.log(`  failed: ${sent.failed.join(', ')}`)
         } else {
-          console.log('heartwood link <bunker://...> | inbox | notes | collect [id...] | recover [--npub <npub>] | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | pair [label] | address keys|custodial <name> | address scan | unlink')
+          console.log('heartwood link <bunker://...> | inbox | notes | collect [id...] | recover [--npub <npub>] | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | pair [label] | address keys|custodial <name> | address scan [name...] | unlink')
         }
       } finally {
         transport.close()

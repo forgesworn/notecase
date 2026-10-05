@@ -1314,9 +1314,7 @@ const viewLocked = async (): Promise<void> => {
 const signedOk = (w: Wallet, note: NoteRecord): boolean => {
   if (!note.signature) return false
   const keys = [w.data.pubkeyPins[note.mintHost], ...w.pubkeyHistoryFor(note.mintHost)]
-  // a key the mint has since retired still proves where the note came from,
-  // and a mint from before notes were keyed by Q certified a bearer note
-  // over its h, which verifyNoteCertificate tries after the Q
+  // a key the mint has since retired still proves where the note came from
   return keys.some(key => Boolean(key) && verifyNoteCertificate(note.k1, note.amountMsat, note.signature!, key!))
 }
 

@@ -3,11 +3,12 @@ import {schnorr} from '@noble/curves/secp256k1.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {
+  addressProofDigest,
   bearerHashOf,
   bearerNote,
   bearerNoteIdOfPreimage,
-  certificateIdsOf,
   checkSpendOffline,
+  decodeCs1WithAmount,
   decodeCw1,
   encodeCk1,
   encodeCp1,
@@ -20,12 +21,14 @@ import {
   spendDomainOf,
   spendPrevout,
   spendSigMsg,
+  NUMS_H,
+  TAPLEAF_VERSION,
   tapLeafHash,
+  taprootTweakPubkey,
   verifyCk1,
   verifyNoteCertificate
 } from '../src/lnurlcash.js'
 import {bech32m} from '@scure/base'
-import {NUMS_H, taprootTweak} from '../src/spend.ts'
 import {certify, legacyEcdsaCk1, legacySchnorrCk1} from './helpers.ts'
 
 // LUD-25's own test vectors (lnurl/luds 25.md at 50d740a), byte for byte.
@@ -80,7 +83,7 @@ describe('test vector 5: a bearer note', () => {
   it('builds the hashlock leaf, its NUMS-keyed Q and its control block', () => {
     const note = bearerNote(hexToBytes(V5.h))
     expect(bytesToHex(note.leaf)).toBe(V5.leaf)
-    expect(bytesToHex(tapLeafHash(note.leaf))).toBe(V5.tapleafHash)
+    expect(bytesToHex(tapLeafHash(note.leaf, TAPLEAF_VERSION))).toBe(V5.tapleafHash)
     expect(bytesToHex(note.outputKey)).toBe(V5.q)
     expect(bytesToHex(note.controlBlock)).toBe(V5.control)
     expect(encodeCp1(note.outputKey)).toBe(V5.cp1)
@@ -118,13 +121,18 @@ describe('test vector 5: a bearer note', () => {
     }
   })
 
-  it("takes vector 4's certificate over Q, and an older mint's over h after it", () => {
-    expect(certificateIdsOf(V5.preimage)).toEqual([V5.q, V5.h])
+  it("takes vector 4's certificate over Q, and no longer one over its h", () => {
     expect(verifyNoteCertificate(V5.preimage, 1000, V5.cs1, V4.mintPubkey)).toBe(true)
     expect(verifyNoteCertificate(V5.cw1, 1000, V5.cs1, V4.mintPubkey)).toBe(true)
+    // kit 0.20 dropped certificates over a bearer note's h, as LUD-25 did
     const overH = certify(hexToBytes(V4.mintKey), 1000, V5.h)
-    expect(verifyNoteCertificate(V5.preimage, 1000, overH, V4.mintPubkey)).toBe(true)
-    expect(verifyNoteCertificate(V5.cw1, 1000, overH, V4.mintPubkey)).toBe(true)
+    expect(verifyNoteCertificate(V5.preimage, 1000, overH, V4.mintPubkey)).toBe(false)
+    expect(verifyNoteCertificate(V5.cw1, 1000, overH, V4.mintPubkey)).toBe(false)
+  })
+
+  it('takes a certificate only as a cs1 carrying its amount, never as bare hex', () => {
+    const bare = bytesToHex(decodeCs1WithAmount(V5.cs1)!.signature)
+    expect(verifyNoteCertificate(V5.preimage, 1000, bare, V4.mintPubkey)).toBe(false)
   })
 
   it('refuses a certificate under neither id, or for another amount, exactly as before', () => {
@@ -164,23 +172,29 @@ describe('test vector 3: a key-path spend bound to its mint', () => {
   it('opens its note at mint.example and nowhere else', () => {
     expect(noteIdOf(V3.ck1)).toBe(V1.pk0)
     expect(encodeCp1(verifyCk1(V3.ck1, 'https://mint.example/w')!.outputKey)).toBe(V1.cp1)
-    expect(verifyCk1(V3.ck1, V3.domain)!.legacy).toBe(false)
     expect(verifyCk1(V3.ck1, 'other.example')).toBeNull()
     expect(checkSpendOffline(V3.ck1, 'mint.example')).toEqual({ok: true, noteId: V1.pk0})
     expect(checkSpendOffline(V3.ck1, 'other.example')).toMatchObject({ok: false, onlineOnly: false})
   })
 
-  it('still reads the deprecated shapes, which open their Q at any mint', () => {
+  it('opens no note with the deprecated shapes kit 0.20 dropped', () => {
     const sk = hexToBytes(V1.sk0)
-    for (const old of [legacySchnorrCk1(sk), legacyEcdsaCk1(sk)]) {
+    // signed over the old fixed message, digested or raw: still a 96-byte
+    // ck1, so its Q is read (a held one can be asked after), but it signs
+    // for no mint
+    const raw = encodeCk1(hexToBytes(V1.pk0), schnorr.sign(utf8ToBytes('LNURLcash'), sk, new Uint8Array(32)))
+    for (const old of [legacySchnorrCk1(sk), raw]) {
       expect(noteIdOf(old)).toBe(V1.pk0)
       for (const domain of ['mint.example', 'other.example']) {
-        expect(verifyCk1(old, domain)).toEqual({outputKey: hexToBytes(V1.pk0), legacy: true})
+        expect(verifyCk1(old, domain)).toBeNull()
+        expect(checkSpendOffline(old, domain)).toMatchObject({ok: false, onlineOnly: false})
       }
     }
-    // the raw nine-byte message, from before that
-    const raw = encodeCk1(hexToBytes(V1.pk0), schnorr.sign(utf8ToBytes('LNURLcash'), sk, new Uint8Array(32)))
-    expect(verifyCk1(raw, 'mint.example')!.legacy).toBe(true)
+    // the 65-byte ECDSA ck1 is no ck1 at all any more
+    const ecdsa = legacyEcdsaCk1(sk)
+    expect(noteIdOf(ecdsa)).toBeNull()
+    expect(verifyCk1(ecdsa, 'mint.example')).toBeNull()
+    expect(checkSpendOffline(ecdsa, 'mint.example')).toMatchObject({ok: false, onlineOnly: false})
   })
 
   it('refuses a Q paired with a signature by another key', () => {
@@ -193,7 +207,6 @@ describe('test vector 3: a key-path spend bound to its mint', () => {
 
 describe('test vector 4: a certificate over a key note', () => {
   it('verifies at both amounts, and at no other', () => {
-    expect(certificateIdsOf(V3.ck1)).toEqual([V1.pk0])
     expect(verifyNoteCertificate(V3.ck1, 1000, V4.cs1At1000, V4.mintPubkey)).toBe(true)
     expect(verifyNoteCertificate(V3.ck1, 21_000_000, V4.cs1At21m, V4.mintPubkey)).toBe(true)
     expect(verifyNoteCertificate(V3.ck1, 1001, V4.cs1At1000, V4.mintPubkey)).toBe(false)
@@ -212,8 +225,13 @@ describe('test vector 2: the address registration proof', () => {
   it('signs register and unregister over the domain-bound digests', () => {
     expect(bytesToHex(signAddressProof(sk0, 'register', 'cash.example.com', 'alice'))).toBe(register)
     expect(bytesToHex(signAddressProof(sk0, 'unregister', 'cash.example.com', 'alice'))).toBe(unregister)
-    // the service's URL is reduced to its hostname, as it verifies
-    expect(bytesToHex(signAddressProof(sk0, 'register', 'https://cash.example.com:8443/.well-known/lnurlw/mint', 'alice'))).toBe(register)
+    // the kit signs the domain it is given; the wallet hands it the
+    // service's bare hostname, as the service verifies
+    const domain = spendDomainOf('https://cash.example.com:8443/.well-known/lnurlw/mint')
+    expect(bytesToHex(signAddressProof(sk0, 'register', domain, 'alice'))).toBe(register)
+    expect(bytesToHex(addressProofDigest('register', domain, 'alice'))).toBe(
+      bytesToHex(sha256(utf8ToBytes('LNURLcash:register:cash.example.com:alice')))
+    )
     expect(
       schnorr.verify(hexToBytes(register), sha256(utf8ToBytes('LNURLcash:register:cash.example.com:alice')), pk0)
     ).toBe(true)
@@ -233,7 +251,7 @@ describe('script-path spends a wallet cannot judge', () => {
   // the canonical transaction can say whether its witness opens it.
   const keyed = (script: Uint8Array) => {
     const leaf = script
-    const {parity} = taprootTweak(NUMS_H, tapLeafHash(leaf))!
+    const {parity} = taprootTweakPubkey(NUMS_H, tapLeafHash(leaf, TAPLEAF_VERSION))
     const control = new Uint8Array([0xc0 | parity, ...NUMS_H])
     return encodeCw1({locktime: 0, sequence: 0xffffffff, script: leaf, controlBlock: control, witness: [new Uint8Array(64)]})
   }
@@ -242,7 +260,6 @@ describe('script-path spends a wallet cannot judge', () => {
     const cw1 = keyed(new Uint8Array([0x20, ...hexToBytes(V1.pk0), 0xac]))
     const id = noteIdOf(cw1)
     expect(id).toMatch(/^[0-9a-f]{64}$/)
-    expect(certificateIdsOf(cw1)).toEqual([id])
     expect(checkSpendOffline(cw1, 'mint.example')).toMatchObject({ok: false, onlineOnly: true})
   })
 
@@ -255,6 +272,16 @@ describe('script-path spends a wallet cannot judge', () => {
     const wrong = encodeCw1({...decoded, witness: [new Uint8Array(32)]})
     expect(checkSpendOffline(wrong, 'mint.example')).toMatchObject({ok: false, onlineOnly: false})
     expect(bearerHashOf(wrong)).toBeNull()
+  })
+
+  it("refuses a cw1 whose control block's parity bit is not its Q's", () => {
+    const decoded = decodeCw1(V5.cw1)!
+    const flipped = new Uint8Array(decoded.controlBlock)
+    flipped[0] = flipped[0]! ^ 1
+    const {outputKey: _q, ...spend} = decoded
+    const wrong = encodeCw1({...spend, controlBlock: flipped})
+    expect(decodeCw1(wrong)).toBeNull()
+    expect(noteIdOf(wrong)).toBeNull()
   })
 
   it('refuses a cw1 whose length prefixes do not consume it, or that lacks a control block', () => {

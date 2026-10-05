@@ -8,7 +8,7 @@ import {
   type MoneyerConfig
 } from '@forgesworn/moneyer'
 import {bolt11PaymentHash} from 'farrier-kit/bolt11'
-import {fetchInvoiceVerification} from '../src/lnurlcash.js'
+import {fetchInvoiceVerification, isCp1} from '../src/lnurlcash.js'
 import {bytesToHex, randomBytes} from '@noble/hashes/utils.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {hexToBytes} from '@noble/hashes/utils.js'
@@ -127,8 +127,9 @@ describe('naming the note it is about to mint', () => {
     await wallet.wallet.startMint(21_000)
 
     expect(quotes.length).toBe(1)
+    // the note it is about to mint, named by its cp1 (LUD-25's default form)
     const comment = quotes[0]!.searchParams.get('comment')
-    expect(comment).toMatch(/^[0-9a-f]{64}$/)
+    expect(isCp1(comment!)).toBe(true)
   })
 })
 

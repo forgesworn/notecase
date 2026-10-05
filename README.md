@@ -237,7 +237,7 @@ notecase heartwood trust <npub|nip05>  # the device stores notes from this sende
 notecase heartwood pair [label]        # mints a bunker URI for another wallet, one hold; first pairing needs the cable
 notecase heartwood collect [<id>...]   # brings in what arrived at the device (or just the notes named)
 notecase heartwood address keys <name> # a name the DEVICE's key owns, paid to the device's own keys; a hold or two
-notecase heartwood address scan        # payments to those keys whose wrap never reached the device
+notecase heartwood address scan [name...] # payments to those keys whose wrap never reached the device
 notecase heartwood recover             # a lost heartwood's notes, from its master's nsec or BIP-39 phrase
 notecase backup shares --threshold 2 --count 3
 notecase sync on                       # keep the notes themselves on your relays
@@ -276,16 +276,17 @@ any of them:
   transaction for one mint's hostname, so it opens its note at that mint and
   nowhere else. The wallet signs these for notes paid to its own keys, with
   an all-zero `aux_rand`, so one key at one mint always gives the same
-  `ck1`. Older `ck1`s, signed over a fixed message, are still read.
+  `ck1`. Older `ck1`s (signed over a fixed message, or the 65-byte ECDSA
+  shape) are no longer taken in; one already held is still spent.
 - **A `cw1`**: a script-path spend. One whose leaf is a bearer hashlock is
   checked here exactly like a preimage. Any other script needs the mint's
   own interpreter, so the wallet passes it on verbatim and only takes such
   a note while it can ask the mint.
 
-A mint's certificate (`cs1`) is over `hex(Q)`, for every note. One from a
-mint that has not moved yet is over a bearer note's `h` instead; that is
-accepted after `Q` is tried, and a certificate under neither is refused as
-it always was.
+A mint's certificate (`cs1`) is over `hex(Q)`, for every note, and carries
+its amount in its prefix (`cs190n1...`). One over a bearer note's `h`, or in
+an older shape without an amount, no longer verifies: such a note is refused
+on receive, and one already held shows as unsigned.
 
 A wallet file, the web wallet's store, a backup or the relay store written
 before this filed each bearer note under `sha256(k1)`. Every record carries
@@ -581,7 +582,11 @@ payment to the device's next key and the wrap carries no secret at all, only
 where to look. Only the device can spend those notes - this wallet's words
 cannot - and the device's recovery phrase brings them back. `heartwood
 address scan` walks the branch for payments whose wrap never arrived and has
-the device keep them; `heartwood collect` takes them, as it takes wraps.
+the device keep them; `heartwood collect` takes them, as it takes wraps. A
+name registered before heartwood 0.18.0-beta.24 still points at the branch
+older firmware handed out (`m/139'/1'`), where the mint goes on paying it:
+name it (`heartwood address scan <name>`) and the scan walks the branch the
+mint has on file for it too, which the updated device can still claim from.
 
 If the heartwood itself is lost, `heartwood recover` rebuilds that branch
 from the master's nsec, or the BIP-39 phrase it was made from, prompted for

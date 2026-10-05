@@ -4,10 +4,11 @@ import {
   HashLookupUnsupportedError,
   NoteUnknownError,
   PendingNoteError,
+  ProtocolError,
   ServiceRejectedError,
   addressProofDigest,
   applyMintFee,
-  bearerNoteId,
+  bearerNoteIdOfHash,
   checkSpendOffline,
   mintFeeBand,
   buildNoteUrl,
@@ -494,8 +495,7 @@ export class Wallet {
 
   // Whether a signature on a note from this mint checks out against any key
   // the wallet knows the mint to have used, and which one it was. A mint
-  // certifies every note over its Q; one from before that certified a bearer
-  // note over its h, and verifyNoteCertificate tries that second.
+  // certifies every note over its Q, as a cs1<amount>.
   private verifyAgainstKnownKeys(
     host: string,
     k1: string,
@@ -1578,6 +1578,14 @@ export class Wallet {
     const k1 = noteK1(url)
     if (!k1) throw new WalletUsageError('That note URL carries no k1 - there is nothing to receive.')
 
+    // Whether this spend opens its note at this mint is judged before the
+    // mint is asked anything: a ck1 bound to another mint, or signed in a
+    // shape the kit no longer verifies (the 65-byte ECDSA ck1, or one over
+    // the old fixed message), is refused here rather than stored as money.
+    // A script only the mint can judge goes on to the mint.
+    const spend = checkSpendOffline(k1, url)
+    if (!spend.ok && !spend.onlineOnly) throw new ProtocolError(`This note cannot be taken: ${spend.reason}.`)
+
     const warnings: string[] = []
     const info = await fetchNoteInfo(url, this.opts)
     const baseUrl = (() => {
@@ -1935,12 +1943,8 @@ export class Wallet {
   noteUrlFor(note: NoteRecord, opts?: {stripSignature?: boolean}): string {
     const url = buildNoteUrl(note.baseUrl, note.k1, note.amountMsat)
     if (opts?.stripSignature || !note.signature) return url
-    // LUD-25 carries the certificate as `c`; the kit still writes `sig`. A
-    // wallet reading only `sig` checks such a note with the mint instead.
-    const signed = new URL(withNewK1(url, note.k1, note.amountMsat, note.signature))
-    signed.searchParams.delete('sig')
-    signed.searchParams.set('c', note.signature)
-    return signed.toString()
+    // LUD-25 carries the certificate as `c`, which is what the kit writes.
+    return withNewK1(url, note.k1, note.amountMsat, note.signature)
   }
 
   // ---- the offline cash drawer ----
@@ -2804,8 +2808,7 @@ export class Wallet {
       const id = noteId(ck1)
       if (this.data.notes.some(note => note.id === id && note.state !== 'spent' && note.state !== 'sent')) continue
       const url = new URL(buildNoteUrl(baseUrl, ck1, info.maxWithdrawable))
-      const certificate = (info as {c?: unknown}).c ?? (info as {sig?: unknown}).sig
-      if (typeof certificate === 'string') url.searchParams.set('c', certificate)
+      if (info.c) url.searchParams.set('c', info.c)
       received.push(await this.receive(url.toString()))
     }
     return {received, scanned: index}
@@ -3100,15 +3103,26 @@ export class Wallet {
   // from the watch-only cx1; the device derives each key and checks it.
   //
   // A mint pays a name on the Lightning Address purpose, or on the single
-  // ladder before purposes, so both are walked. The claim names the key
-  // (`p`) and the device finds it on either ladder. Firmware from before
-  // purposes knows only the old one and refuses a purpose-2 key; such a
-  // note is reported as `waiting`, safe at the mint until the device is
-  // updated, and the walk goes on.
+  // ladder before purposes, so both are walked, each with its own gap. The
+  // claim names the key (`p`) and its purpose, and the device derives it on
+  // its current branch or, for a name registered before LUD-25 50d740a, the
+  // superseded m/139'/1' one. A device that cannot derive the key refuses
+  // it: firmware from before purposes for a purpose-2 key, and firmware
+  // since (0.18.0-beta.24) for one on the old ladder, which it no longer
+  // derives. Such a note is reported as `waiting`, safe at the mint where the
+  // device's nsec reaches it (recoverHeartwoodNotes), and the walk goes on.
+  //
+  // The device hands out only its current branch, but a name registered
+  // before firmware 0.18.0-beta.24 still points at the superseded one, and a
+  // mint goes on paying it there (on purpose 2) until the name is moved. This
+  // machine cannot derive that branch, so `names` asks the mint for the cx1
+  // each name is registered with and walks that too; the device checks every
+  // key it is asked to keep, so a branch it does not hold yields nothing but
+  // `waiting`.
   async heartwoodScanAddress(
     transport: NostrTransport,
     host?: string,
-    options: {gap?: number} = {}
+    options: {gap?: number; names?: string[]} = {}
   ): Promise<{
     claimed: {id: string; index: number; amountMsat: number}[]
     waiting: {index: number; amountMsat: number}[]
@@ -3123,8 +3137,17 @@ export class Wallet {
       entry.baseUrl = baseUrl
     }
     const client = this.heartwoodClient(transport)
-    const branch = decodeCx1((await client.cashAddress(entry.host)).cx1)
-    if (!branch) throw new HeartwoodError('The device answered with something that is not a cx1.')
+    const current = (await client.cashAddress(entry.host)).cx1
+    if (!decodeCx1(current)) throw new HeartwoodError('The device answered with something that is not a cx1.')
+    const branches = [current]
+    if (options.names?.length) {
+      const discovery = await this.discoveryDocument(entry.host)
+      if (!discovery) throw new WalletUsageError(`${entry.host} does not publish where its names are.`)
+      for (const name of options.names) {
+        const onFile = await this.branchOnFile(discovery.url, name.trim().toLowerCase())
+        if (onFile && !branches.includes(onFile)) branches.push(onFile)
+      }
+    }
     const inventory = await client.listNotes()
     this.rememberHeartwoodHeld(inventory)
     const held = new Set(inventory.flatMap(note => (note.p ? [note.p] : [])))
@@ -3134,7 +3157,7 @@ export class Wallet {
     const claimed: {id: string; index: number; amountMsat: number}[] = []
     const waiting: {index: number; amountMsat: number}[] = []
     let scanned = 0
-    for (const purpose of ADDRESS_PURPOSES) {
+    for (const branch of branches.map(cx1 => decodeCx1(cx1)!)) for (const purpose of ADDRESS_PURPOSES) {
       let quiet = 0
       let index = 0
       while (quiet < gap) {
@@ -3157,7 +3180,6 @@ export class Wallet {
         }
         quiet = 0
         if (held.has(cp1)) continue
-        const sig = (info as {c?: unknown}).c ?? (info as {sig?: unknown}).sig
         let kept: {id: string}
         try {
           kept = await client.claimKeyNote({
@@ -3165,10 +3187,11 @@ export class Wallet {
             index: at,
             amountMsat: info.maxWithdrawable,
             p: cp1,
-            ...(typeof sig === 'string' ? {sig} : {})
+            ...(purpose !== null ? {purpose} : {}),
+            ...(info.c ? {c: info.c} : {})
           })
         } catch (err) {
-          if (purpose !== null && err instanceof HeartwoodError && /does not hold/.test(err.message)) {
+          if (err instanceof HeartwoodError && /does not hold/.test(err.message)) {
             waiting.push({index: at, amountMsat: info.maxWithdrawable})
             continue
           }
@@ -3271,6 +3294,18 @@ export class Wallet {
       // A key note's certificate is over its public key, which the ck1
       // released above recovers to, so it travels with it and is checked.
       if (note.p && note.sig) url.searchParams.set('c', note.sig)
+      // A spend this wallet cannot read is not a note it can take, and must
+      // never reach the WalletUsageError below that writes the device's copy
+      // off as already taken. Heartwood firmware before 0.18.0-beta.24
+      // exports a key note as the 65-byte ECDSA ck1, which kit 0.20 no
+      // longer reads; the note stays on the device for updated firmware.
+      if (!resolveNoteInput(url.toString())) {
+        failed.push({
+          id: note.id,
+          reason: 'the device released a spend this wallet cannot read (heartwood firmware before 0.18.0-beta.24 exports key notes in an old ck1 shape): update the firmware and collect again'
+        })
+        continue
+      }
       let result: ReceiveResult | null = null
       try {
         result = await this.receive(url.toString())
@@ -3837,7 +3872,7 @@ export class Wallet {
     // receive is re-driven from the persisted record.
     for (const pending of [...this.data.pendingMints]) {
       if (pending.state !== 'claimed' || !pending.preimageHex) continue
-      const claimedId = bearerNoteId(pending.id)
+      const claimedId = bearerNoteIdOfHash(pending.id)
       if (this.data.notes.some(note => note.id === claimedId)) {
         delete pending.preimageHex
         pending.updatedAt = now()
@@ -4204,6 +4239,11 @@ export class Wallet {
 
     const byHost = new Map<string, NoteRecord[]>()
     for (const note of this.checkableNotes(options.mintHost)) {
+      // A held spend the kit no longer reads (the 65-byte ECDSA ck1) cannot
+      // be asked after by its key, and asking would read as the whole mint
+      // not answering. It is left as it is: still spendable, by handing it
+      // to its mint, and nothing is concluded about it here.
+      if (noteIdOf(note.k1) === null) continue
       byHost.set(note.mintHost, [...(byHost.get(note.mintHost) ?? []), note])
     }
 

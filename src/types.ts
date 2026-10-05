@@ -83,7 +83,7 @@ export type NoteRecord = {
 export type PendingMint = {
   // The invoice's payment hash. For a record from before named mints the
   // preimage was the note's k1, so this is that note's h, and the note is
-  // filed under the Q it names (bearerNoteId).
+  // filed under the Q it names (bearerNoteIdOfHash).
   id: string
   mintHost: string
   baseUrl: string

@@ -4,47 +4,28 @@
 import {decodeCs1WithAmount, isCk1, isPreimage, noteK1, resolveLnurlInput} from '@lnurlcash/kit'
 import {isCw1} from './spend.ts'
 export * from '@lnurlcash/kit'
-// Every note is a taproot output key now (LUD-25's unified verification).
-// The pinned kit still ids a bearer note by its hash, signs a ck1 over a fixed
-// message and knows no cw1, so these names are this wallet's own and shadow
-// the kit's: a caller importing from here cannot reach the old behaviour.
+// Every note is a taproot output key (LUD-25's unified verification), and
+// the kit carries the primitives. These are this wallet's own and shadow the
+// kit's names where they share one: a cw1 has to commit to a Q to count
+// (isCw1, decodeCw1), and the derivation also reaches the ladder from before
+// purposes (deriveNotePubkey, deriveNoteSecretKey with purpose null).
 export {
-  TAPLEAF_VERSION,
-  NUMS_H,
   addressProofDigest,
-  bearerNote,
-  bearerNoteId,
-  bearerNoteIdOfPreimage,
   bearerHashOf,
+  bearerHashOfLeaf,
   bearerSpendOf,
-  certificateIdsOf,
   checkLeaf,
   checkSpendOffline,
-  ck1OutputKey,
   decodeCw1,
   deriveNotePubkey,
   deriveNoteSecretKey,
-  encodeCw1,
   isCw1,
-  keyPathSighash,
   legacyNoteIdOf,
   noteIdOf,
   outputKeyOf,
-  signAddressProof,
-  signNoteOwnership,
-  spendDomainOf,
-  spendPrevout,
-  spendSigMsg,
-  tapLeafHash,
   verifyCk1,
   verifyNoteCertificate,
-  verifyNoteCertificate as verifyNoteSignature,
-  NOTE_PURPOSE_WALLET,
-  NOTE_PURPOSE_CHANGE,
-  NOTE_PURPOSE_LIGHTNING_ADDRESS,
   type NotePurpose,
-  type AddressProofAction,
-  type Cw1,
   type SpendCheck
 } from './spend.ts'
 
@@ -63,8 +44,8 @@ export const resolveNoteInput = (value: string): string | null => {
 export const isValidNoteInput = (value: string): boolean => resolveNoteInput(value) !== null
 
 // LUD-25 renamed a note URL's certificate from `sig` to `c`. Both are read,
-// the new name first, so a note from either kind of wallet keeps its
-// certificate here.
+// the new name first: what either carries is checked as a cs1<amount> all
+// the same, so the older name only finds it.
 export const noteSignature = (url: string): string | null => {
   try {
     const params = new URL(url).searchParams
