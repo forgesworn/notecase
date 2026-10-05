@@ -48,15 +48,14 @@ llms.txt        machine-oriented index of the CLI and library API
 | `src/cli.ts` | CLI command wiring |
 | `src/nwc.ts`, `src/nwcservice.ts`, `src/nwcbridge.ts` | NWC (NIP-47) client and service runtime |
 | `src/vaultport.ts`, `src/vaultwire.ts` | the lnurl-vault wire protocol client |
-| `src/spend.ts` | LUD-25's taproot notes: note ids (`hex(Q)`), ck1/cw1 spends, cs1 over Q, address proofs. The pinned kit predates these; prefer the kit's own once it carries them |
+| `src/spend.ts` | LUD-25 wallet policy over the kit's primitives: note ids (`hex(Q)`, and the pre-Q ids for migration), offline spend checks, certificate checks over Q, and the pre-purpose key ladder the kit no longer derives |
 | `src/noteids.ts` | moving stored note ids from `sha256(k1)` onto `hex(Q)`, run wherever wallet data is read |
 | `THREAT-MODEL.md` | the safety invariants the engine enforces; read before touching `wallet.ts` |
 
 ## Common Pitfalls
 
 - Persist-before-disclose and definitive-vs-ambiguous rejection handling (see `THREAT-MODEL.md` and `llms.txt`) are safety invariants, not style choices: get them wrong and a crash can lose a note.
-- A note's id is `hex(Q)`, not `sha256(k1)`; the wire still carries a bearer note's `h`. Compare notes by id (`noteIdOf`), never by k1, and import signing and id helpers from `src/lnurlcash.js`, which shadows the kit's older ones.
-- A few integration tests describe the pinned moneyer and the taproot one differently; `test/moneyer.ts` says which is installed.
+- A note's id is `hex(Q)`, not `sha256(k1)`; on the wire a bearer note is named by its `cp1` (the kit builds it from `h`). Compare notes by id (`noteIdOf`), never by k1, and import helpers from `src/lnurlcash.js`, which shadows a few kit names (`isCw1`, `decodeCw1`, `deriveNotePubkey`/`deriveNoteSecretKey`) with stricter or wider wallet versions.
 - Some test files are excluded from `tsconfig.json`'s `include` (see its `exclude` list, e.g. `test/web.test.ts`); they belong to the web UI's own typecheck.
 - `npm run check` also runs `npm pack --dry-run`, so a broken `files` list in `package.json` fails CI even though nothing else touches it.
 

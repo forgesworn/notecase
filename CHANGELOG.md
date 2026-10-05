@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+Moves to `@lnurlcash/kit` 0.20.2, which carries LUD-25 as of lnurl/luds
+`50d740a`/`6e865b1` (derivation purposes, `m/139'/d1..d4`, unified taproot
+notes, `cs1<amount>` certificates) itself, so this wallet's own copies of
+those primitives go. Tested against moneyer 0.17.
+
+- On the wire, a bearer note is named by its note's `cp1` (`p`, `p1`/`p2`,
+  and the mint quote's `comment`) and certificates are read from `c`/`c2`,
+  as the kit does. The rewriting that sent `p`/`p1` beside `h` and gave a
+  mint's `c` the old `sig` name is gone.
+- Taken in no longer: a `ck1` signed over the old fixed `"LNURLcash"`
+  message, the 65-byte ECDSA `ck1`, and a certificate over a bearer note's
+  `h`, a fixed-HRP `cs1` or bare hex. The kit dropped them all. Receiving
+  one is refused before anything is stored. A note already held in one of
+  those shapes is still looked up and spent (its mint judges the spend), a
+  held note whose certificate no longer verifies shows as unsigned, and a
+  backup holding either still restores.
+- `heartwood address scan` names its claims' purpose and sends the
+  certificate as `c`, as heartwood 0.18.0-beta.24 reads them. A key that
+  firmware cannot derive (purpose 2 before beta.24, the pre-purpose ladder
+  since) is reported as waiting at the mint, never as an error.
+- `heartwood address scan <name>...` also walks the branch the mint has on
+  file for each name. A name registered before beta.24 still points at the
+  superseded `m/139'/1'` branch and is paid there; the updated device claims
+  from it, but only a scan told the name knows to look there.
+- `address scan` and `heartwood recover` still walk the superseded
+  `m/139'/1'` branches and the ladder from before purposes, each with its
+  own gap, so a payment made before the change is not stranded.
+
 ## 0.24.1 - 2026-09-29
 
 Refreshes undici to clear an advisory (GHSA-3wwx-pv8p-q78v) that stopped 0.24.0 from publishing; 0.24.0 never reached npm, and its contents are below.
