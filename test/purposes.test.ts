@@ -5,9 +5,9 @@ import {
   NOTE_PURPOSE_LIGHTNING_ADDRESS,
   NOTE_PURPOSE_WALLET,
   deriveNotePubkey,
+  decodeCs1WithAmount,
   deriveNoteSecretKey,
   noteDeclaredAmount,
-  noteRef,
   noteSignature,
   rotateNoteWithHash,
   splitNoteWithHash,
@@ -73,9 +73,10 @@ describe('the renames', () => {
     expect(noteDeclaredAmount(`lnurlw://mint.example/w?k1=00&c=${cs1}`)).toBe(1000)
   })
 
-  // What the kit puts on the wire now, through this wallet's transport: an
-  // output named by its cp1 under p1/p2 (a bearer h travels as its note's
-  // cp1), and the certificate read from c/c2.
+  // What goes on the wire for a bearer output: its 64-hex h under both of
+  // its names, p1 (LUD-25's) and h (what a mint from before the rename
+  // reads), so every generation finds it; a current mint requires the two
+  // to agree. The certificate is read from c/c2.
   const answering = (body: unknown) => {
     const seen: URL[] = []
     const fetch = (async (url: string | URL) => {
@@ -85,29 +86,36 @@ describe('the renames', () => {
     return {seen, fetch}
   }
 
-  it('names a bearer output by its cp1 under p1, and reads the certificate from c', async () => {
+  it('names a bearer output under p1 and h alike, and reads the certificate from c', async () => {
     const h = 'aa'.repeat(32)
     const {seen, fetch} = answering({status: 'OK', c: cs1})
     const result = await rotateNoteWithHash('https://mint.example/cb', '01'.repeat(32), h, {fetch})
     const params = seen[0]!.searchParams
-    expect(params.get('p1')).toBe(noteRef(h))
-    expect(params.get('p1')).toMatch(/^cp1/)
-    expect(params.has('h')).toBe(false)
+    expect(params.getAll('p1')).toEqual([h])
+    expect(params.getAll('h')).toEqual([h])
     expect(result.signature).toBe(cs1)
   })
 
-  it('names a split\'s two outputs p1 and p2, and reads c and c2', async () => {
+  it("names a split's two outputs under p1/h and p2/h2, and reads c and c2", async () => {
     const {seen, fetch} = answering({status: 'OK', c: cs1, c2: cs1})
     const result = await splitNoteWithHash('https://mint.example/cb', ['01'.repeat(32)], 500, 'aa'.repeat(32), 'bb'.repeat(32), {fetch})
     const params = seen[0]!.searchParams
-    expect([params.get('p1'), params.get('p2')]).toEqual([noteRef('aa'.repeat(32)), noteRef('bb'.repeat(32))])
+    expect([params.get('p1'), params.get('h')]).toEqual(['aa'.repeat(32), 'aa'.repeat(32)])
+    expect([params.get('p2'), params.get('h2')]).toEqual(['bb'.repeat(32), 'bb'.repeat(32)])
+    expect(params.get('amount')).toBe('500')
     expect(result).toEqual({signature: cs1, changeSignature: cs1})
   })
 
-  it('no longer reads a certificate a mint sent only as sig', async () => {
+  it('reads sig only in the shape a mint from before the rename sends it', async () => {
+    // a cs1<amount> under the old name is no mint's answer: nothing is read
     const {fetch} = answering({status: 'OK', sig: cs1})
-    // a bearer output's certificate is optional to the kit, so this is not
-    // an error: there is simply no certificate
     expect(await rotateNoteWithHash('https://mint.example/cb', '01'.repeat(32), 'aa'.repeat(32), {fetch})).toEqual({})
+    // 65 bytes of hex is what such a mint sends, and is kept for check to judge
+    const hex = bytesToHex(decodeCs1WithAmount(cs1)!.signature)
+    const old = answering({status: 'OK', sig: hex, sig2: hex})
+    expect(await rotateNoteWithHash('https://mint.example/cb', '01'.repeat(32), 'aa'.repeat(32), {fetch: old.fetch})).toEqual({signature: hex})
+    expect(
+      await splitNoteWithHash('https://mint.example/cb', ['01'.repeat(32)], 500, 'aa'.repeat(32), 'bb'.repeat(32), {fetch: old.fetch})
+    ).toEqual({signature: hex, changeSignature: hex})
   })
 })

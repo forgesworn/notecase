@@ -130,9 +130,33 @@ describe('test vector 5: a bearer note', () => {
     expect(verifyNoteCertificate(V5.cw1, 1000, overH, V4.mintPubkey)).toBe(false)
   })
 
-  it('takes a certificate only as a cs1 carrying its amount, never as bare hex', () => {
+  it('takes a certificate over Q only as a cs1 carrying its amount, never as bare hex', () => {
     const bare = bytesToHex(decodeCs1WithAmount(V5.cs1)!.signature)
     expect(verifyNoteCertificate(V5.preimage, 1000, bare, V4.mintPubkey)).toBe(false)
+  })
+
+  // A mint from before LUD-25's cs1<amount> still certifies only this way:
+  // 65 bytes over the bearer note's h, as hex or the fixed-HRP cs1. Such a
+  // mint is still in service, so its certificates are checked by the rule
+  // they were made under - for a bearer preimage, and nothing else.
+  it("takes an older mint's certificate over h, in either shape and either layout", () => {
+    const overH = decodeCs1WithAmount(certify(hexToBytes(V4.mintKey), 1000, V5.h))!.signature
+    const leading = new Uint8Array([overH[64]!, ...overH.subarray(0, 64)])
+    for (const signature of [overH, leading]) {
+      const hex = bytesToHex(signature)
+      const fixed = bech32m.encode('cs', bech32m.toWords(signature), false)
+      expect(verifyNoteCertificate(V5.preimage, 1000, hex, V4.mintPubkey)).toBe(true)
+      expect(verifyNoteCertificate(V5.preimage, 1000, fixed, V4.mintPubkey)).toBe(true)
+      // the amount is in the digest, so a different one does not verify
+      expect(verifyNoteCertificate(V5.preimage, 2000, hex, V4.mintPubkey)).toBe(false)
+      // no mint ever certified a cw1 this way
+      expect(verifyNoteCertificate(V5.cw1, 1000, hex, V4.mintPubkey)).toBe(false)
+    }
+    // nor is a signature over anything but this note's h taken
+    const overQ = bytesToHex(decodeCs1WithAmount(certify(hexToBytes(V4.mintKey), 1000, V5.q))!.signature)
+    expect(verifyNoteCertificate(V5.preimage, 1000, overQ, V4.mintPubkey)).toBe(false)
+    const stranger = bytesToHex(decodeCs1WithAmount(certify(hexToBytes('11'.repeat(32)), 1000, V5.h))!.signature)
+    expect(verifyNoteCertificate(V5.preimage, 1000, stranger, V4.mintPubkey)).toBe(false)
   })
 
   it('refuses a certificate under neither id, or for another amount, exactly as before', () => {

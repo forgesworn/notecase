@@ -67,6 +67,7 @@ import {
   mintAddressUrl,
   verifyNoteCertificate,
   withNewK1,
+  isLegacyCertificate,
   type LnurlcashOptions,
   type MintFee
 } from './lnurlcash.js'
@@ -123,6 +124,16 @@ import {migrateNoteIds, noteIdResolver} from './noteids.ts'
 
 export class InsufficientFundsError extends Error {}
 export class PinMismatchError extends Error {}
+// Whether a mint takes the name of the note a quote buys, so the payment
+// preimage never becomes the note. A current mint (and lnurl-mint) reads it
+// from a LUD-12 `comment` of 64 characters; a moneyer from before that
+// reads it only as `h`, and advertises `mintToHash` instead. The wallet
+// sends both either way (requestInvoice).
+const commentNamesQuotes = (pay: {commentAllowed?: number}): boolean =>
+  typeof pay.commentAllowed === 'number' && pay.commentAllowed >= 64
+const namesItsQuotes = (pay: {commentAllowed?: number; mintToHash?: boolean}): boolean =>
+  commentNamesQuotes(pay) || pay.mintToHash === true
+
 export class WalletUsageError extends Error {}
 
 // The id a mint files a note under: hex(Q), the note's taproot output key.
@@ -323,7 +334,7 @@ export class Wallet {
     if (!pay.withdrawLink) {
       throw new WalletUsageError('That service takes payments but does not mint LNURLcash notes.')
     }
-    if ((pay.commentAllowed ?? 0) < 64) {
+    if (!namesItsQuotes(pay)) {
       throw new WalletUsageError(
         'That mint does not accept the 64-character output commitment required to keep the payment preimage from becoming the note.'
       )
@@ -1944,6 +1955,16 @@ export class Wallet {
     const url = buildNoteUrl(note.baseUrl, note.k1, note.amountMsat)
     if (opts?.stripSignature || !note.signature) return url
     // LUD-25 carries the certificate as `c`, which is what the kit writes.
+    // One from a mint that predates it carries no amount and travels as
+    // `sig` beside `amount`, the names it was issued under: a reader of that
+    // generation finds it there, and a current one reads either name.
+    if (isLegacyCertificate(note.signature)) {
+      const legacy = new URL(url)
+      legacy.searchParams.delete('c')
+      legacy.searchParams.set('amount', String(note.amountMsat))
+      legacy.searchParams.set('sig', note.signature)
+      return legacy.toString()
+    }
     return withNewK1(url, note.k1, note.amountMsat, note.signature)
   }
 
@@ -3433,10 +3454,7 @@ export class Wallet {
     const entry = this.mintEntry(mintHost)
     const pay = await fetchPayRequest(entry.payUrl, this.opts)
     if (!pay.withdrawLink) throw new WalletUsageError(`${entry.host} no longer advertises minting.`)
-    if (
-      typeof pay.commentAllowed !== 'number' ||
-      pay.commentAllowed < 64
-    ) {
+    if (!namesItsQuotes(pay)) {
       throw new WalletUsageError(
         `${entry.host} cannot create current LUD-25 notes because it does not advertise commentAllowed: 64.`
       )
@@ -3477,6 +3495,14 @@ export class Wallet {
     )
     const decoded = tryDecodeBolt11(invoice.pr)
     if (!decoded) throw new WalletUsageError('The mint returned an invoice this wallet cannot decode.')
+    // A mint that binds a quote only by `h` says so on the quote itself.
+    // Without that, it may have ignored the name and keyed the note to the
+    // payment preimage, so the invoice is dropped unshown and unpaid.
+    if (!commentNamesQuotes(pay) && !invoice.mintToHash) {
+      throw new WalletUsageError(
+        `${entry.host} did not confirm that this invoice mints to the note this wallet named - nothing was paid.`
+      )
+    }
     const pending: PendingMint = {
       id: decoded.paymentHashHex,
       mintHost: entry.host,

@@ -1,6 +1,7 @@
 import {sha256} from '@noble/hashes/sha2.js'
 import {schnorr, secp256k1} from '@noble/curves/secp256k1.js'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
+import {bech32, bech32m} from '@scure/base'
 import {
   TAPLEAF_VERSION,
   bearerNote,
@@ -11,6 +12,8 @@ import {
   deriveNotePubkey as deriveKitNotePubkey,
   deriveNoteSecretKey as deriveKitNoteSecretKey,
   deriveScriptPathCommitment,
+  encodeCs1WithAmount,
+  isCs1WithAmount,
   recoverNoteOwnershipPubkey,
   spendDomainOf,
   verifyNoteSignatureForKey,
@@ -242,20 +245,72 @@ export const bearerHashOf = (k1: string): string | null => {
 
 // ---- offline verification ----
 
-// Does `certificate` (a cs1<amount>) certify this note at this amount under
-// `mintPubkey`? Every note is certified over hex(Q); the kit does the
-// recovery. A certificate over a bearer note's h, a plain-hex signature and
-// the fixed-HRP cs1 without an amount are all gone from the kit, and none of
-// them certifies a note here.
+// Does `certificate` certify this note at this amount under `mintPubkey`?
+//
+// LUD-25 certifies every note over hex(Q), as a cs1<amount>, and the kit
+// does the recovery. A mint from before that change certified a bearer note
+// over its h instead, as 65 bytes of hex (`sig`), or as the fixed-HRP cs1
+// with no amount in it - and such a mint still answers only in that shape,
+// so a note it issued, or rotated, carries nothing else. Those are checked
+// under the rule they were made under, for a bearer preimage only: the
+// digest is the same Lightning signed-message construction with h in place
+// of hex(Q), so the kit checks it once the signature is re-wrapped as a
+// cs1<amount>. Both byte layouts the old rule took (recovery id trailing, and
+// leading, as lnurl-mint once emitted it) are tried. It accepts nothing but a
+// real signature by this mint's key over this note's h and this amount.
+//
+// A cs1<amount> over h, or any older shape on a ck1 or a cw1, certifies
+// nothing here: no mint ever issued one.
 export const verifyNoteCertificate = (
   k1: string,
   amountMsat: number,
   certificate: string,
   mintPubkey: string
 ): boolean => {
-  const id = noteIdOf(k1)
-  return id !== null && verifyNoteSignatureForKey(id, amountMsat, certificate, mintPubkey)
+  const value = certificate.trim()
+  if (isCs1WithAmount(value)) {
+    const id = noteIdOf(k1)
+    return id !== null && verifyNoteSignatureForKey(id, amountMsat, value, mintPubkey)
+  }
+  const signature = legacyCertificateBytes(value)
+  const preimage = k1.trim().toLowerCase()
+  if (!signature || !HEX32.test(preimage)) return false
+  const h = bytesToHex(sha256(hexToBytes(preimage)))
+  for (const layout of [signature, new Uint8Array([...signature.subarray(1), signature[0]!])]) {
+    try {
+      if (verifyNoteSignatureForKey(h, amountMsat, encodeCs1WithAmount(amountMsat, layout), mintPubkey)) return true
+    } catch {
+      // not a certificate under this layout
+    }
+  }
+  return false
 }
+
+const LEGACY_HEX_CERTIFICATE = /^[0-9a-f]{130}$/i
+
+// The 65 signature bytes of a certificate in a shape from before LUD-25's
+// cs1<amount>: plain hex, or the fixed-HRP cs1 (bech32m, or bech32 from an
+// encoder that used it). Null for anything else, a cs1<amount> included.
+const legacyCertificateBytes = (value: string): Uint8Array | null => {
+  const trimmed = value.trim()
+  if (LEGACY_HEX_CERTIFICATE.test(trimmed)) return hexToBytes(trimmed.toLowerCase())
+  for (const codec of [bech32m, bech32]) {
+    try {
+      const decoded = codec.decode(trimmed.toLowerCase() as `${string}1${string}`, false)
+      if (decoded.prefix !== 'cs') continue
+      const bytes = codec.fromWords(decoded.words)
+      if (bytes.length === 65) return bytes
+    } catch {
+      // try the next variant
+    }
+  }
+  return null
+}
+
+// Whether a certificate is one of those older shapes. Such a certificate
+// travels as `sig` beside `amount`, the names it was issued under, since it
+// carries no amount of its own.
+export const isLegacyCertificate = (value: string): boolean => legacyCertificateBytes(value) !== null
 
 export type SpendCheck =
   | {ok: true; noteId: string}

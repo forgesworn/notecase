@@ -116,9 +116,15 @@ A k1 is a spend of Q:
   64 hex    bearer preimage: the leaf OP_SHA256 <h> OP_EQUAL (a8 20 <h> 87),
             leaf version 0xc0, under BIP-341's NUMS internal key
             50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0.
-            Q follows from h = sha256(k1). Every note this wallet makes is one; mint,
-            rotate, split and merge name it on the wire by its cp1 (p, p1/p2, and
-            the invoice comment), which the kit builds from h
+            Q follows from h = sha256(k1). Every note this wallet makes is one.
+            On the wire it goes in forms every mint generation reads: looked
+            up by its own ?k1=, a rotate/split/merge output named by its 64-hex
+            h under both p1 and h (p2 and h2), a mint quote named by h as both
+            comment and h, a melt as k1 and pr. A current mint reads either
+            name and requires them to agree; one from before LUD-25's renames
+            (lnurl-mint, moneyer < 0.12) reads k1 and h/h2, never p. A mint that
+            advertises mintToHash but no commentAllowed >= 64 must confirm
+            mintToHash on the quote, or the invoice is dropped unshown
   ck1<Q||sig>  BIP-340 by Q over the key-path TapSighash of the canonical
             spend tx whose prevout is tagged_hash("LNURLcash/mint", domain),
             domain = the mint's lowercase hostname (no scheme, no port), zero
@@ -137,9 +143,12 @@ A k1 is a spend of Q:
 cs1 certificates: recoverable ECDSA over sha256(sha256("Lightning Signed
 Message:LNURLcash:" + amount_msat + ":" + hex(Q))), for every note, as
 cs1<amount> (the BOLT11 amount suffix in the HRP), read from a note URL's c=
-(sig= before it) and a mint's c/c2. A certificate over a bearer note's h, a
-fixed-HRP cs1 and bare hex no longer verify (kit 0.20): receive refuses them
-(BadSignatureError) and a held note carrying one simply shows as unsigned.
+(sig= before it) and a mint's c/c2. A mint from before that still certifies
+a bearer note over its h instead, as 65 bytes of hex or the fixed-HRP cs1
+(a mutation's sig/sig2): for a 64-hex k1 those verify under that rule
+(either recovery-id layout), are kept as sent, and travel as sig= beside
+amount=. On a ck1 or cw1, or over anything but this note's h, they verify
+nowhere; a cs1<amount> over h verifies nowhere either.
 Offline receive/verify also checks the spend opens Q at the note URL's domain.
 Address proofs: BIP-340 by the branch's sk_0 over sha256("LNURLcash:register:"
 + domain + ":" + name) (or ":unregister:"), domain = the SERVICE's hostname

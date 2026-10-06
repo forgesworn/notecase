@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.25.1 - 2026-10-06
+
+Fixes 0.25.0 for notes held at mints that predate LUD-25's 29 September
+renames, the reference lnurl-mint and moneyer before 0.12 among them. Kit
+0.20 speaks only the new wire forms, which those mints do not read: 0.25.0
+could not look up, receive, check, rotate, split, merge, send or melt a
+bearer note there, nor mint at one. Those requests were refused before any
+note moved, with one exception: a mint that takes a quote's name only as a
+64-hex `comment` and keys any other comment to the payment preimage
+(moneyer 0.7 and 0.8 by default) minted a 0.25.0 quote, which named its
+note by `cp1`, to the preimage. That note never appears under the secret
+the wallet chose; it is taken by receiving `<mint>/w?k1=<payment
+preimage>`, which the paying wallet holds. Now tested against moneyer 0.17,
+moneyer 0.3.1 and lnurlcash-conformance 0.13.1's mock mint.
+
+- A bearer note goes on the wire in forms every mint generation reads, as
+  it did before 0.25.0. It is looked up by its own `?k1=` (a current mint
+  checks the spend in full); a rotate, split or merge names each output's
+  64-hex `h` under both `p1` and `h` (`p2` and `h2`); a mint quote names it
+  as both `comment` and `h`; a melt sends `k1` and `pr`. A current mint
+  reads either name and requires the two to agree. Key-path and
+  script-path notes exist only at current mints and are unchanged. A
+  restore at an older mint still needs the holder's leave to walk by
+  secret, since such a mint has no lookup that keeps the secret back.
+- A mint that binds a quote only by `h` (moneyer before LUD-25's comment)
+  can be added and minted at again. It must confirm `mintToHash` on the
+  quote itself, or the invoice is dropped before anyone is shown it.
+- An older mint's certificate is taken again, reversing that part of
+  0.25.0 for bearer notes: such a mint certifies only over a note's `h`,
+  as 65 bytes of hex or the fixed-HRP `cs1`, so 0.25.0 refused every
+  certified note from one once its key was pinned, and could never take one
+  offline. For a 64-hex `k1` those verify under the rule they were made
+  under, and only a real signature by the mint's key over that note's `h`
+  and amount passes. A rotate at such a mint keeps its `sig`/`sig2`, and a
+  note carrying one is sent as `sig=` beside `amount=`. On a `ck1` or `cw1`
+  they still verify nowhere.
+
 ## 0.25.0 - 2026-10-06
 
 Moves to `@lnurlcash/kit` 0.20.2, which carries LUD-25 as of lnurl/luds
@@ -1229,7 +1266,7 @@ until they are adopted onto the seed.
   LUD-21 verify *before* the source melts - nothing could learn the preimage
   there, and the preimage is the money.
 - Warnings now use the mint fee **band** rather than one reading of it.
-  LUD-25 says nothing about whether the fee rounds; dni's lnurl-mint
+  LUD-25 says nothing about whether the fee rounds; the reference lnurl-mint
   ceilings it to a whole sat and moneyer is msat-exact, so a single
   predicted number is wrong about one of the two live implementations. A
   40,000 msat transfer to a reference mint credits 38,000, and the wallet
