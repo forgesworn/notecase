@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.25.0 - 2026-10-06
 
 Moves to `@lnurlcash/kit` 0.20.2, which carries LUD-25 as of lnurl/luds
 `50d740a`/`6e865b1` (derivation purposes, `m/139'/d1..d4`, unified taproot
