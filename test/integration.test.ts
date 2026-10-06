@@ -8,7 +8,7 @@ import {
   type MoneyerConfig
 } from '@forgesworn/moneyer'
 import {bolt11PaymentHash} from 'farrier-kit/bolt11'
-import {fetchInvoiceVerification, isCp1} from '../src/lnurlcash.js'
+import {fetchInvoiceVerification, hashK1, isCp1} from '../src/lnurlcash.js'
 import {bytesToHex, randomBytes} from '@noble/hashes/utils.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {hexToBytes} from '@noble/hashes/utils.js'
@@ -91,6 +91,7 @@ describe('against a mint that requires comment protection', () => {
       if (url.pathname.includes('/.well-known/lnurlp/')) {
         const body = (await response.json()) as Record<string, unknown>
         delete body.commentAllowed
+        delete body.mintToHash
         return new Response(JSON.stringify(body), {
           status: response.status,
           headers: {'content-type': 'application/json'}
@@ -127,9 +128,35 @@ describe('naming the note it is about to mint', () => {
     await wallet.wallet.startMint(21_000)
 
     expect(quotes.length).toBe(1)
-    // the note it is about to mint, named by its cp1 (LUD-25's default form)
+    // the note it is about to mint, named by its 64-hex h: as `comment`, the
+    // one shape every mint generation that reads a comment takes, and as `h`,
+    // all an older moneyer reads
+    const pending = wallet.data.pendingMints[0]!
     const comment = quotes[0]!.searchParams.get('comment')
-    expect(isCp1(comment!)).toBe(true)
+    expect(comment).toBe(hashK1(pending.namedK1!))
+    expect(quotes[0]!.searchParams.get('h')).toBe(comment)
+  })
+
+  // A moneyer from before LUD-25's comment reads the name only as `h`, says
+  // so with mintToHash, and confirms it on every quote it binds. A quote
+  // that comes back without that confirmation may be keyed to the payment
+  // preimage, so it is dropped before anybody is shown the invoice.
+  it('drops a quote an h-only mint did not confirm it bound', async () => {
+    const {moneyer} = await startMint()
+    const fetchUnconfirmed: typeof fetch = async (input, init) => {
+      const response = await fetch(input as string, init)
+      const url = new URL(input.toString())
+      if (!url.pathname.includes('/.well-known/lnurlp/') && !url.pathname.endsWith('/p/cb')) return response
+      const body = (await response.json()) as Record<string, unknown>
+      delete body.commentAllowed
+      if (url.pathname.endsWith('/p/cb')) delete body.mintToHash
+      else body.mintToHash = true
+      return new Response(JSON.stringify(body), {status: response.status, headers: {'content-type': 'application/json'}})
+    }
+    const wallet = makeWallet({fetch: fetchUnconfirmed})
+    await wallet.wallet.addMint(`mint@${new URL(moneyer.url).host}`)
+    await expect(wallet.wallet.startMint(21_000)).rejects.toThrow(/did not confirm/)
+    expect(wallet.data.pendingMints).toEqual([])
   })
 })
 

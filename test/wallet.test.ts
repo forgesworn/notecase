@@ -55,7 +55,7 @@ describe('receiving', () => {
   })
 
   it('stores nothing when the mint echoes back a different k1', async () => {
-    const theMint = await start({hashLookup: 'echoesK1'})
+    const theMint = await start({echoWrongK1: true})
     const {wallet, data} = makeWallet()
     const note = fund(theMint, 21_000)
     await expect(wallet.receive(note.url)).rejects.toThrow(ProtocolError)

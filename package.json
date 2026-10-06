@@ -88,6 +88,8 @@
     "happy-dom": "^20.11.2",
     "jsqr": "^1.4.0",
     "lnurlcash-conformance": "0.15.0",
+    "lnurlcash-conformance-0-13": "npm:lnurlcash-conformance@0.13.1",
+    "moneyer-legacy": "npm:@forgesworn/moneyer@0.3.1",
     "nsec-tree": "^1.5.1",
     "typescript": "^5.7.0",
     "uqr": "^0.1.3",

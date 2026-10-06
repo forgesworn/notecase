@@ -20,6 +20,7 @@ export {
   deriveNotePubkey,
   deriveNoteSecretKey,
   isCw1,
+  isLegacyCertificate,
   legacyNoteIdOf,
   noteIdOf,
   outputKeyOf,

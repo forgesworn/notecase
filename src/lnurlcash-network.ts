@@ -2,7 +2,7 @@ import * as kit from '@lnurlcash/kit'
 import {bytesToHex} from '@noble/hashes/utils.js'
 import {defaultRandomSecret, type RandomSecret} from './lnurlcash-policy.js'
 import {ProtocolError} from './lnurlcash-errors.js'
-import {bearerHashOfLeaf, bearerSpendOf, checkLeaf, decodeCw1} from './spend.ts'
+import {bearerHashOfLeaf, bearerSpendOf, checkLeaf, decodeCw1, isLegacyCertificate} from './spend.ts'
 
 // Compatibility at the Notecase boundary only. The reference kit now uses
 // process-wide hooks; Wallet still carries these settings so tests, Tor and
@@ -31,6 +31,156 @@ const configure = (options: LnurlcashOptions = {}): void => {
     })
   )
   kit.configureSecretProvider(() => (options.randomSecret ?? defaultRandomSecret)())
+}
+
+// ---- every mint generation at once ----
+//
+// LUD-25 renamed its wire forms on 29 Sep 2026: a bearer note's lookup went
+// from `?k1=` (or `?h=`) to `?p=<cp1>`, a mutation's outputs from `h`/`h2` to
+// `p1`/`p2`, and a mint quote came to be named by `comment` alone. The kit
+// speaks only the new forms. Mints did not all move at once: dni's
+// lnurl-mint and moneyer before 0.12 read none of `p`, `p1` or `p2`. They
+// look a note up by `k1` (some by `h` as well), read only `h`/`h2` on the
+// callback, take a quote's name as a 64-hex `comment` or as `h` (the oldest
+// moneyer only as `h`), and certify with `sig` over h. A wallet that speaks
+// only the new forms cannot touch a note at any of them.
+//
+// So a bearer note goes on the wire in forms every generation reads, and
+// nothing here waits for a refusal to try another:
+//
+//   - lookup: the note's own `?k1=`, which every mint has always answered
+//     (a current one checks the spend in full);
+//   - rotate/split/merge: each output's 64-hex hash under both names,
+//     `p1` and `h` (`p2` and `h2`). An old mint reads `h` and ignores `p1`;
+//     a current one reads either and requires the two to agree;
+//   - mint quote: the hash as `comment` and again as `h`;
+//   - melt: `k1` and `pr` only, as it always was.
+//
+// The rule, should a form ever have to be retried in another shape: a
+// lookup changes nothing and may be asked again in any form, but a mutation
+// is retried in another shape only on an answer that proves the mint
+// refused it before touching any note (a validation refusal such as
+// "missing h"), never after a lost or ambiguous answer, which reconcile
+// owns. Nothing below needs that today.
+//
+// Key-path and script-path notes (ck1, cw1) exist only at current mints and
+// stay on the kit's own forms.
+
+const HEX64 = /^[0-9a-f]{64}$/i
+
+// One GET to a mint, read as an LNURL response through the kit's own
+// bounded, redirect-checked transport (and so this wallet's fetch, timeout
+// and offline switch). A refusal is classified into the kit's spent, unknown
+// and pending errors; an answer that never arrived is an AmbiguousMintError.
+const mintGet = async (url: URL): Promise<Record<string, unknown>> => {
+  let body: unknown
+  try {
+    body = await kit.lnurlFetch(url)
+  } catch (error) {
+    if (error instanceof kit.ServiceError && error.reason === 'pending') throw new kit.PendingNoteError()
+    if (error instanceof kit.AmbiguousMintError || !(error instanceof Error)) throw error
+    throw kit.classifyNoteError(error)
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new kit.AmbiguousMintError('Service returned an invalid response.')
+  }
+  return body as Record<string, unknown>
+}
+
+// A lookup by the note's own spend, `?k1=`, with whatever certificate or
+// amount the URL carried left behind. A mint that echoes a spend must echo
+// this one.
+const lookupBySpend = async (
+  url: string,
+  k1: string,
+  options: LnurlcashOptions
+): Promise<kit.WithdrawRequestInfo & WithdrawInfoExtensions> => {
+  const lookup = new URL(url)
+  lookup.searchParams.delete('amount')
+  lookup.searchParams.delete('sig')
+  lookup.searchParams.delete('c')
+  lookup.searchParams.set('k1', k1)
+  const body = await mintGet(lookup)
+  const max = body.maxWithdrawable
+  const min = body.minWithdrawable
+  if (
+    body.tag !== 'withdrawRequest' ||
+    typeof body.callback !== 'string' ||
+    typeof max !== 'number' ||
+    !Number.isFinite(max) ||
+    max < 0 ||
+    (min !== undefined && (typeof min !== 'number' || !Number.isFinite(min) || min < 0 || min > max))
+  ) throw new ProtocolError('Not a withdrawRequest (unexpected response).')
+  if (body.k1 !== undefined && (typeof body.k1 !== 'string' || body.k1.trim().toLowerCase() !== k1.toLowerCase())) {
+    throw new ProtocolError('Service echoed back a different k1 than queried.')
+  }
+  const {c: rawCertificate, mintPubkey: _rawMintPubkey, ...rest} = body
+  let mintPubkey: string | undefined
+  try {
+    mintPubkey = kit.parseMintKey(body).mintPubkey
+  } catch (error) {
+    // receive() deliberately accepts a mint with no signing key of its own.
+    if (options.requireMintPubkey !== false) throw error
+  }
+  const c = typeof rawCertificate === 'string' && kit.isCs1WithAmount(rawCertificate) ? rawCertificate.trim() : undefined
+  return {
+    ...rest,
+    ...(mintPubkey ? {mintPubkey} : {}),
+    ...(c ? {c} : {}),
+    k1
+  } as kit.WithdrawRequestInfo & WithdrawInfoExtensions
+}
+
+// What a mutation's answer certifies an output with: the current `c`
+// (`c2`) as a cs1<amount>, or, from a mint that predates it, its `sig`
+// (`sig2`) - 65 bytes over the output's h, as hex or the fixed-HRP cs1. The
+// older shape is kept as the mint sent it and judged later, by the rule it
+// was made under (verifyNoteCertificate); it is never read for a cp1 output,
+// which no such mint ever made.
+const outputCertificate = (
+  body: Record<string, unknown>,
+  current: 'c' | 'c2',
+  legacy: 'sig' | 'sig2'
+): string | undefined => {
+  const named = body[current]
+  if (typeof named === 'string' && kit.isCs1WithAmount(named)) return named.trim()
+  const old = body[legacy]
+  if (typeof old === 'string' && isLegacyCertificate(old)) return old.trim()
+  return undefined
+}
+
+// A rotate, split or merge into bearer outputs, every output named under
+// both of its names. Errors are classified as the kit classifies its own:
+// a refusal is definitive, anything short of a confirmed OK is ambiguous.
+const mutateToHashes = async (
+  callback: string,
+  k1s: string[],
+  outputs: {h: string; h2?: string; amountMsat?: number}
+): Promise<Record<string, unknown>> => {
+  if (k1s.length === 0 || k1s.some(k1 => k1.trim() === '')) {
+    throw new Error(
+      'This note has no secret in the browser. If it is marked "on device", reconnect the vault before refreshing or spending it.'
+    )
+  }
+  let url: URL
+  try {
+    url = new URL(callback)
+  } catch {
+    throw new Error('The service provided an invalid callback URL.')
+  }
+  for (const k1 of k1s) url.searchParams.append('k1', k1)
+  if (outputs.amountMsat !== undefined) url.searchParams.append('amount', String(outputs.amountMsat))
+  const h = outputs.h.trim().toLowerCase()
+  url.searchParams.append('p1', h)
+  url.searchParams.append('h', h)
+  if (outputs.h2 !== undefined) {
+    const h2 = outputs.h2.trim().toLowerCase()
+    url.searchParams.append('p2', h2)
+    url.searchParams.append('h2', h2)
+  }
+  const body = await mintGet(url)
+  if (body.status !== 'OK') throw new kit.AmbiguousMintError('Operation was not confirmed by the service.')
+  return body
 }
 
 const serviceJson = async (url: string, options: LnurlcashOptions): Promise<Record<string, unknown>> => {
@@ -174,40 +324,16 @@ const lookupByHash = async (
   }
 }
 
+// A ck1 or cw1 goes through fetchSpendInfo; a bearer preimage is asked
+// after by itself, `?k1=`, the lookup every mint generation answers.
 export const fetchNoteInfo = async (
   url: string,
   options: LnurlcashOptions = {}
 ): Promise<kit.WithdrawRequestInfo & WithdrawInfoExtensions> => {
   configure(options)
-  const queried = kit.noteK1(url)
-  if (queried && !kit.isPreimage(queried)) return fetchSpendInfo(url, queried, options)
-  try {
-    return await kit.fetchNoteInfo(url) as kit.WithdrawRequestInfo & WithdrawInfoExtensions
-  } catch (error) {
-    if (error instanceof Error && /returned k1 in a hash-only lookup response|unexpected response/.test(error.message)) {
-      throw new ProtocolError(error.message)
-    }
-    if (
-      options.requireMintPubkey !== false ||
-      !(error instanceof Error) ||
-      !/mintPubkey/.test(error.message)
-    ) throw error
-    const k1 = kit.noteK1(url)
-    if (!k1 || !kit.isPreimage(k1)) throw error
-    const lookup = new URL(url)
-    lookup.searchParams.delete('k1')
-    lookup.searchParams.delete('amount')
-    lookup.searchParams.delete('sig')
-    lookup.searchParams.delete('c')
-    lookup.searchParams.set('p', kit.noteRef(kit.hashK1(k1)))
-    const body = await serviceJson(lookup.toString(), options)
-    if (
-      body.tag !== 'withdrawRequest' ||
-      typeof body.callback !== 'string' ||
-      typeof body.maxWithdrawable !== 'number'
-    ) throw error
-    return {...body, k1} as kit.WithdrawRequestInfo & WithdrawInfoExtensions
-  }
+  const queried = kit.requireNoteK1(url)
+  if (!kit.isPreimage(queried)) return fetchSpendInfo(url, queried, options)
+  return lookupBySpend(url, queried.trim().toLowerCase(), options)
 }
 
 export type DisclosedWithdrawInfo = {
@@ -225,18 +351,11 @@ export const fetchNoteInfoDisclosingK1 = async (
   url: string,
   options: LnurlcashOptions = {}
 ): Promise<DisclosedWithdrawInfo> => {
+  configure(options)
   const k1 = kit.noteK1(url)
   if (!k1) throw new ProtocolError('That note URL carries no k1.')
-  const body = await serviceJson(url, options)
-  if (
-    body.tag !== 'withdrawRequest' ||
-    typeof body.callback !== 'string' ||
-    typeof body.maxWithdrawable !== 'number'
-  ) throw new ProtocolError('Not a withdrawRequest (unexpected response).')
-  if (typeof body.k1 !== 'string' || body.k1.toLowerCase() !== k1.toLowerCase()) {
-    throw new ProtocolError('Service echoed back a different k1 than queried.')
-  }
-  return {...body, tag: 'withdrawRequest', callback: body.callback, k1, maxWithdrawable: body.maxWithdrawable}
+  const info = await lookupBySpend(url, k1, {...options, requireMintPubkey: false})
+  return {...info, tag: 'withdrawRequest', callback: info.callback, k1, maxWithdrawable: info.maxWithdrawable}
 }
 
 export const fetchNoteInfoByHash = async (
@@ -294,6 +413,9 @@ export const meltNote = async (
 export type CompatibleHashedMutationResult = {signature?: string}
 export type CompatibleHashedSplitResult = {signature?: string; changeSignature?: string}
 
+// A bearer output (64-hex h) is named under both of its names, so every
+// mint generation reads it; a cp1 output, which only a current mint can
+// make, goes through the kit unchanged.
 export const rotateNoteWithHash = async (
   callback: string,
   k1: string,
@@ -301,6 +423,11 @@ export const rotateNoteWithHash = async (
   options: LnurlcashOptions = {}
 ): Promise<CompatibleHashedMutationResult> => {
   configure(options)
+  if (HEX64.test(hash.trim())) {
+    const body = await mutateToHashes(callback, [k1], {h: hash})
+    const signature = outputCertificate(body, 'c', 'sig')
+    return signature === undefined ? {} : {signature}
+  }
   try {
     return await kit.rotateNoteWithHash(callback, k1, hash)
   } catch (error) {
@@ -322,6 +449,15 @@ export const splitNoteWithHash = async (
   options: LnurlcashOptions = {}
 ): Promise<CompatibleHashedSplitResult> => {
   configure(options)
+  if (HEX64.test(hash.trim()) && HEX64.test(changeHash.trim())) {
+    const body = await mutateToHashes(callback, k1s, {h: hash, h2: changeHash, amountMsat})
+    const signature = outputCertificate(body, 'c', 'sig')
+    const changeSignature = outputCertificate(body, 'c2', 'sig2')
+    return {
+      ...(signature === undefined ? {} : {signature}),
+      ...(changeSignature === undefined ? {} : {changeSignature})
+    }
+  }
   try {
     return await kit.splitNoteWithHash(callback, k1s, amountMsat, hash, changeHash)
   } catch (error) {
@@ -341,6 +477,11 @@ export const mergeNotesWithHash = async (
   options: LnurlcashOptions = {}
 ): Promise<CompatibleHashedMutationResult> => {
   configure(options)
+  if (HEX64.test(hash.trim())) {
+    const body = await mutateToHashes(callback, k1s, {h: hash})
+    const signature = outputCertificate(body, 'c', 'sig')
+    return signature === undefined ? {} : {signature}
+  }
   try {
     return await kit.mergeNotesWithHash(callback, k1s, hash)
   } catch (error) {
@@ -353,6 +494,19 @@ export const mergeNotesWithHash = async (
   }
 }
 
+// A quote for a bearer note names it by its 64-hex h as `comment` (what a
+// current mint and lnurl-mint read, the latter in no other shape) and again
+// as `h` (all an older moneyer reads; without it, it would mint to the
+// payment preimage instead). A current mint takes both and requires them to
+// agree. The kit's short form sets `comment`; `h` rides on the callback it
+// is handed. A cp1 goes through the kit unchanged.
+const quote = async (callback: string, amountMsat: number, outputHash: string | undefined) => {
+  if (outputHash === undefined || !HEX64.test(outputHash.trim())) return kit.requestInvoice(callback, amountMsat, outputHash)
+  const named = new URL(callback)
+  named.searchParams.set('h', outputHash.trim().toLowerCase())
+  return kit.requestInvoiceShort(named.toString(), amountMsat, outputHash)
+}
+
 export const requestInvoice = async (
   callback: string,
   amountMsat: number,
@@ -360,8 +514,8 @@ export const requestInvoice = async (
 ) => {
   if (typeof options === 'string') {
     configure()
-    return kit.requestInvoice(callback, amountMsat, options)
+    return quote(callback, amountMsat, options)
   }
   configure(options)
-  return kit.requestInvoice(callback, amountMsat, options.h)
+  return quote(callback, amountMsat, options.h)
 }

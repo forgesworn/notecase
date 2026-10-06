@@ -78,6 +78,8 @@ export const mergeBatches = (
     const url = new URL(callback)
     if (carried) url.searchParams.append('k1', placeholder)
     for (const k1 of candidate) url.searchParams.append('k1', k1)
+    // The output goes out under both of its names (p1 and h), so both count.
+    url.searchParams.append('p1', placeholder)
     url.searchParams.append('h', placeholder)
     return url.href.length <= budget
   }
