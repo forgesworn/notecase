@@ -1,6 +1,6 @@
 # notecase
 
-An LNURLcash (LUD-25) wallet for Node 22+: receives, holds, splits, merges,
+An LNURLcash (LUD-25) wallet for Node 22.19+: receives, holds, splits, merges,
 sends and melts Lightning bearer notes whose secret IS the money. Ships a
 CLI (`notecase`) and a reusable engine (`Wallet`, `openWallet`, `initWallet`
 from `src/index.ts`). ESM-only. A companion web UI lives in `web/`.
@@ -35,7 +35,7 @@ llms.txt        machine-oriented index of the CLI and library API
 ## Conventions
 
 - British English in prose and commit messages.
-- ESM only, Node >= 22; `.ts` extensions are used in relative imports (`rewriteRelativeImportExtensions`).
+- ESM only, Node >= 22.19 (the highest `engines` among the dependencies: undici 8); `.ts` extensions are used in relative imports (`rewriteRelativeImportExtensions`).
 - Amounts are integer millisatoshis inside the engine; the CLI speaks sats.
 - Dependencies on other ForgeSworn packages (`@lnurlcash/kit`, `farrier-kit`, `@forgesworn/nwc-kit`, `keystore-kit`, `@forgesworn/shamir-words`) are treated as the protocol/crypto boundary: do not reimplement what they already do.
 
@@ -55,7 +55,7 @@ llms.txt        machine-oriented index of the CLI and library API
 ## Common Pitfalls
 
 - Persist-before-disclose and definitive-vs-ambiguous rejection handling (see `THREAT-MODEL.md` and `llms.txt`) are safety invariants, not style choices: get them wrong and a crash can lose a note.
-- A note's id is `hex(Q)`, not `sha256(k1)`; on the wire a bearer note goes in forms every mint generation reads (`?k1=` lookups, its 64-hex `h` under both `p1` and `h`, the quote's `comment` and `h`; see `src/lnurlcash-network.ts`), so older mints keep working. Compare notes by id (`noteIdOf`), never by k1, and import helpers from `src/lnurlcash.js`, which shadows a few kit names (`isCw1`, `decodeCw1`, `deriveNotePubkey`/`deriveNoteSecretKey`) with stricter or wider wallet versions.
+- A note's id is `hex(Q)`, not `sha256(k1)`; on the wire a bearer note goes in forms every mint generation reads (`?k1=` lookups, its 64-hex `h` under both `p1` and `h`, the quote's `comment` and `h`; see `src/lnurlcash-network.ts`), so older mints keep working. Compare notes by id (`noteIdOf` in `src/spend.ts`, internal and not exported from the package; a library user reads `NoteRecord.id`), never by k1, and import helpers from `src/lnurlcash.js`, which shadows a few kit names (`isCw1`, `decodeCw1`, `deriveNotePubkey`/`deriveNoteSecretKey`) with stricter or wider wallet versions.
 - Some test files are excluded from `tsconfig.json`'s `include` (see its `exclude` list, e.g. `test/web.test.ts`); they belong to the web UI's own typecheck.
 - `npm run check` also runs `npm pack --dry-run`, so a broken `files` list in `package.json` fails CI even though nothing else touches it.
 

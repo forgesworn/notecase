@@ -34,7 +34,7 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "bin": {
     "notecase": "dist/cli.js"

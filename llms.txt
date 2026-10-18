@@ -1,9 +1,14 @@
 # notecase
 
-> LNURLcash (LUD-25) wallet for Node 22+: receive, hold, split, merge, send
+> LNURLcash (LUD-25) wallet for Node 22.19+: receive, hold, split, merge, send
 > and melt Lightning bearer notes. CLI plus a reusable engine. ESM-only. MIT.
 
-Install: `npm install @forgesworn/notecase`
+Install, one form per use:
+  npm install -g @forgesworn/notecase   the `notecase` command (bin: dist/cli.js)
+  npm install @forgesworn/notecase      the library: one entry point, the package
+                                        name itself (see "Library API"); the CLI
+                                        is not importable
+Node floor: 22.19, the highest `engines` among the dependencies (undici 8).
 Companion mint: @forgesworn/moneyer
 Protocol client it builds on: @lnurlcash/kit
 Draft spec: https://github.com/lnurl/luds/pull/301
@@ -49,16 +54,40 @@ Draft spec: https://github.com/lnurl/luds/pull/301
 
 ## CLI
 
-notecase init [--insecure-plaintext] [--restore] | seed | restore | adopt
-notecase mints add <address|lnurl> / list / use <host>
-notecase mint <sats> [--manual] [--mint <host>]
-notecase receive <note> [--force] | send <sats> [--notes <id,..>] | melt <bolt11 [sats] | sats --to <addr> | sats --to-nwc> [--notes <id,..>]
+Every command below is wired in src/cli.ts; `notecase --help` prints the
+abridged list. [--mint <host>] anywhere means "at this mint", and when
+omitted it is the default mint: the first one added, or the one `mints use`
+chose. No default and no flag is an error.
+
+notecase init [--insecure-plaintext] [--restore] | seed | restore [--mint <host>] [--disclose-secrets] | adopt
+  - init --insecure-plaintext makes an UNENCRYPTED store (no PIN)
+notecase mints add <address|lnurl> [--label <name>] / list / use <host> / info [host]
+notecase mint <sats> [--mint <host>] [--manual] [--wait <seconds>]
+  - <sats> is the GROSS amount paid, as startMint(grossMsat): the mint's fee
+    comes off, so the note holds less. (The web wallet differs: it asks what
+    the note should hold and adds the fee.) Pays through the NWC connection
+    when one is set; --manual (or no connection) prints the invoice instead
+    and waits for it, 300 s unless --wait says otherwise
+notecase receive [<note>] [--force] [--offline] [--accept-key-rotation]
+  - --accept-key-rotation takes a mint's key change when the mint itself lists
+    the pinned key as retired (rule 6); without it that refusal stands
+notecase send <sats> [--mint <host>] [--notes <id,..>] [--strip-sig]
+notecase send <sats> --to <npub|nip05> [--notes <id,..>]
+notecase melt <bolt11> [<sats>] [--notes <id,..>] | melt <sats> --to <lightning-address> | melt <sats> --to-nwc
+notecase transfer <sats> --from <host> --to <host> [--wait <seconds>]
+  - mint at --to (gross <sats>), paid for by a melt at --from; two different
+    mints, both charge, and a --to with no LUD-21 verify is refused
 notecase check [--apply] [--resign] [--mint <host>]
-notecase ladder [set <sats,...>] [--copies n] | prepare [--apply]
-notecase send <sats> --offline [--overpay] [--notes <id,..>] | receive --offline
-notecase address [claim <name> --mint <host>] | address keys [<name>] | address custodial [<name>] | address scan
+notecase ladder [set <sats,...>] [--copies n] [--mint <host>] | prepare [--apply] [--mint <host>]
+notecase send <sats> --offline [--overpay] [--notes <id,..>] [--strip-sig] | receive --offline
+notecase address                                  # show the claimed name
+notecase address claim <name> [--mint <host>]     # --mint optional: the default mint
+notecase address unregister [<name>] [--mint <host>]
+notecase address keys [<name>] | custodial [<name>] | scan [--mint <host>]
+notecase inbox | reclaim [id]
+notecase request <sats> [--memo <text>] [--wait <seconds>] [--mint <host>] | requests [--all] | pay <lnurlcashreq1...>
 notecase balance | list [--all] | reconcile | verify <note>
-notecase nwc set <uri> / status / clear          # spend THROUGH another wallet
+notecase nwc set [<uri>] / status / clear       # spend THROUGH another wallet
 notecase nwc grant <name> [--methods a,b] [--budget <sats>] [--max <sats>]
 notecase nwc grants / revoke <name|id> / refill <name|id> [--budget <sats>] / serve
   - the service side: NIP-47 over THIS wallet. allowlist defaults to
@@ -66,11 +95,18 @@ notecase nwc grants / revoke <name|id> / refill <name|id> [--budget <sats>] / se
     opt-in and pay_invoice REQUIRES a budget. one request answered once
     (id persisted before the melt), per-connection service keys, 5 min
     request age cap. answers only while `nwc serve` runs.
-notecase backup export | shares [--threshold N --count M] | recover-key
+notecase nostr init | show | relays [set <url>...]
+notecase backup export [--file <path>] | shares [--threshold N --count M] | recover-key
+  - recover-key prompts for the word shares and PRINTS the store key they rebuild
+notecase backup nostr on|off|push|pull   # the mint list, under a key from the seed
 notecase sync [on|off|status]   # notes themselves on relays, several devices, one seed
-notecase heartwood link <bunker://...> | notes | collect [<id>...] | send <id> --to <npub> | trust <npub> | inbox | pair
-notecase heartwood address keys|custodial|unregister <name> | address scan [name...]   # a name the DEVICE's key owns, paid to the device's keys
+notecase heartwood link <bunker://...> | notes | collect [<id>...] | send <id> --to <npub> | rename <id> <label> | unlink
+notecase heartwood trust <npub|hex|nip05> | untrust <npub|hex|nip05> | trusted | inbox | pair [label]
+notecase heartwood address keys|custodial|unregister <name> | address scan [name...] [--mint <host>]   # a name the DEVICE's key owns, paid to the device's keys
 notecase heartwood recover [--npub <npub>] [--mint <host>]   # a lost heartwood's notes, from its nsec or BIP-39 phrase
+notecase device provision [--mint <host>] [--port <path>]   # set a mint up on a locker, over the cable
+notecase device ports|info|mints|forget [--port <path>] [--mint <host>]
+notecase device-node --force [--mint <host>]   # print a mint's note tree; prefer `device provision`
 
 Amounts are sats (--msat for msat). PIN via prompt or $NOTECASE_PIN.
 NOTECASE_HOME relocates the store; NOTECASE_ALLOW_PRIVATE=1 admits LAN mints;
@@ -163,6 +199,21 @@ only wallet policy (note ids, offline spend checks, the pre-purpose ladder).
 
 ## Library API
 
+One entry point. package.json `exports` maps only ".", and `files` ships dist/
+(not src/ or web/), so `import ... from '@forgesworn/notecase'` is all there is:
+a deep import such as '@forgesworn/notecase/dist/nwcservice.js' fails with
+ERR_PACKAGE_PATH_NOT_EXPORTED. The first part below is exported from that
+entry point. "Not exported" after it names source-tree items the CLI and the
+web UI use, which an installed package does not let you import.
+
+### Exported from '@forgesworn/notecase'
+
+Types: CheckReport, LadderPlan, OfflineHandover, OfflineSelection, ReceiveResult,
+ReconcileEvent, WalletData, NoteRecord, NoteState, NoteOrigin, MintEntry,
+PendingMint, MeltRecord, HeartwoodInventoryNote, WalletStore, BackupEnvelope,
+NwcOptions. A NoteRecord has id (hex(Q)), k1 (the secret: whoever has it owns
+the note), baseUrl, amountMsat, signature?, mintHost, state.
+
 openWallet({pin?, home?}) / initWallet(...) -> {data, save, encrypted, storeKey}
   - openWallet throws WrongPinError, NoWalletError or WalletExistsError;
     walletHome() resolves the store path (NOTECASE_HOME override included)
@@ -170,9 +221,26 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   - the engine's own errors: InsufficientFundsError, PinMismatchError,
     WalletUsageError, KeyRotationError, BadSignatureError
   - DEFAULT_LADDER and DEFAULT_LADDER_COPIES are setLadder's fallback
-  receive(input, {acceptBadSignature?}) -> ReceiveResult {note, warnings},
+  receive(input, {acceptBadSignature?, approveKeyRotation?}) -> ReceiveResult {note, warnings},
   send(msat, host?, noteIds?) -> NoteRecord, prepareExact(amountMsat),
-  melt(pr, target), startMint(grossMsat, host?) -> {pending, fee},
+  noteUrlFor(note, {stripSignature?}) -> string - the shareable note URL (the
+    lnurlw:// form with k1 and the mint's signature) that `notecase send`
+    prints; send() alone returns only the record. The bech32 `lnurl1...` line
+    the CLI prints under it is toBech32Lnurl(url) from @lnurlcash/kit, which
+    this package does not re-export. A NoteRecord's id is its hex(Q); compare
+    notes by that id, never by k1,
+  melt(pr, target, host?, {sendMsat?, noteIds?}) -> {melt: MeltRecord, ambiguous},
+  - melt's `target` is a free-form label, stored as MeltRecord.target and
+    echoed in reconcile events: nothing routes by it, and the invoice `pr` is
+    what gets paid. The CLI passes 'invoice', the Lightning Address given to
+    --to, or 'nwc'; transfer() passes `mint@<destination host>`. sendMsat is
+    required for an invoice naming no amount (whole sats) and refused for one
+    that names its own. ambiguous: true means the melt may be in flight, so
+    leave it to reconcile()
+  transfer(grossMsat, fromHost, toHost, {timeoutMs?, intervalMs?}) ->
+    {pending, melt, fee, result: ReceiveResult | null, ambiguous}  (startMint at
+    toHost, melt at fromHost, awaitMint),
+  startMint(grossMsat, host?) -> {pending, fee},
   awaitMint(pending, {timeoutMs?, intervalMs?}) -> ReceiveResult | null (null on timeout),
   claimMint(pending) -> ReceiveResult
   - minting: startMint, pay pending.pr from any Lightning wallet (payWithNwc
@@ -191,6 +259,17 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     returns a Promise although it makes no network call
   - noteIds offline is the hand-over itself, not a pool: short pays nothing,
     over needs acceptOverpay. sendToNostr(t, msat, to, host?, {noteIds?, memo?})
+    -> {note, recipientHex, relays, failed, inboxKnown, wrapId}
+  - `t` / `transport`, in sendToNostr, every heartwood* method, collectFromHeartwood,
+    receiveFromNostr, pullNotes, pushNotes and syncNotes, is a NostrTransport. The
+    type is declared in src/nostr.ts and is NOT exported, but any object of this
+    shape satisfies it (Event and Filter are nostr-tools types):
+      query(relays: string[], filter: Filter): Promise<Event[]>
+      subscribe(relays: string[], filter: Filter, onEvent: (event: Event) => void): {close(): void}
+      publish(relays: string[], event: Event): Promise<{ok: string[]; failed: string[]}>
+      close(): void
+    The CLI builds one from nostr-tools' SimplePool with poolTransport() (also
+    not exported); a library user writes the same thin wrapper
   namePriceMsat(host?), registerName({name, mintHost?}) -> {address, paidMsat, toKeys},
   lightningAddress(), payNameToKeys(toKeys?, {name?, mintHost?}), unregisterName({name?, mintHost?}), addressCx1(host), scanAddress(host?, {gap?})
   - with a seed, registerName sends a cx1 (the spec's m/139'/d1..d4, as lnurl-wallet); a
@@ -238,9 +317,9 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     {host, index, amount_msat, p, purpose, c}; the device finds p on its current or its
     superseded branch, and refuses a key it does not hold)
   - with no recovery words the wallet's own branch comes from its Nostr key the same way
-  identityCandidates(input, passphrase?) / identitySecretFor(input, npubHex) (src/identitysecret.ts):
-    a heartwood master's secret from an nsec (bunker or tree-nsec) or BIP-39 phrase
-    (tree-mnemonic, m/44'/1237'/727'/0'/0'); typed recovery words are not read yet
+  - recoverHeartwoodNotes reads a heartwood master's secret from an nsec or BIP-39 phrase
+    with the internal identityCandidates (see "Not exported"); typed recovery words are
+    not read yet
   hasSeed(), counterFor(host), restoreFromMint(host), restoreAll(),
   legacyNotes(), adoptLegacyNotes(),
   awaitMeltProof(melt, {timeoutMs?, intervalMs?}) -> MeltRecord | null (LUD-21 proof),
@@ -258,11 +337,40 @@ exportBackup(data, passphrase) / importBackup(contents, passphrase) ->
 emptyWallet() - a fresh, seedless WalletData for tests and cold starts
 NwcPaymentUnprovenError - thrown by payWithNwc when the wallet cannot
   verify the preimage against the invoice's payment hash
+createWalletFetch({allowPrivate?, proxy?}) - DNS-pinned fetch, loopback
+  passthrough; with a socks5:// proxy it tunnels instead and resolves remotely
+payWithNwc(uri, pr, {transport?}?) -> {preimageHex, feesPaidMsat: number | null} / invoiceFromNwc(uri, amountMsat, desc) / nwcStatus(uri)
+
+All amounts are integer milli-satoshis in the engine; the CLI speaks sats.
+
+### Not exported (source tree only, reachable from the CLI and the web UI)
+
+None of these can be imported from an installed package. Read them in the
+repository, or copy the approach.
+
+noteIdOf(k1) -> string | null (src/spend.ts): hex(Q) of whatever k1 spends, read locally,
+  verifying nothing; null if k1 is no spend. Via the package, read NoteRecord.id instead.
+identityCandidates(input, passphrase?) / identitySecretFor(input, expectedPubkey, passphrase?)
+  (src/identitysecret.ts): a heartwood master's secret from an nsec (modes bunker,
+  tree-nsec) or a BIP-39 phrase (tree-mnemonic, m/44'/1237'/727'/0'/0'). Plain
+  @noble/@scure/nostr-tools code: the `nsec-tree` package is only a test oracle
+  (a devDependency), not a runtime dependency.
+NostrTransport / poolTransport() (src/nostr.ts): see the `t` parameter above.
 new NwcService({wallet, transport, persist, log?}) - NIP-47 service runtime,
-  .serve(connection) / .stop(id) / .close(); wallet is an NwcServiceWallet
-  (alias/balanceMsat/makeInvoice/payInvoice/lookupInvoice), so the runtime
-  fronts anything that can invoice and pay. walletBridge(wallet, opts) is
-  the bearer-note one. newConnection(...), connectionUri(c), validateGrant(...)
+  .serve(connection) / .stop(id) / .close(); wallet is an NwcServiceWallet, so
+  the runtime fronts anything that can invoice and pay. walletBridge(wallet, opts)
+  is the bearer-note one. newConnection(...), connectionUri(c), validateGrant(...)
+  NwcServiceWallet = {
+    alias(): string
+    balanceMsat(): number
+    makeInvoice({amountMsat: number, description?: string}): Promise<NwcInvoiceView>
+    payInvoice({invoice: string, amountMsat: number}): Promise<{preimage: string, feesPaidMsat: number}>
+    lookupInvoice({paymentHash?: string, invoice?: string}): Promise<NwcInvoiceView | null>
+  }
+  payInvoice must THROW rather than answer without a preimage that settles the
+  invoice. NwcInvoiceView = {type: 'incoming' | 'outgoing', invoice, paymentHash,
+  amountMsat, createdAt, feesPaidMsat?, preimage?, description?, settledAt?,
+  expiresAt?} (src/nwcservice.ts)
 new VaultClient(transport) - the lnurl-vault command protocol over a wire:
   info(), identify() (fresh nonce, signature verified here, TOFU-pinned),
   listNotes() (pages; total is the count, one page is not), newSecret(),
@@ -274,9 +382,5 @@ collectFromVault(wallet, client, note) - export -> receive (rotates at the
 depositToVault(wallet, client, note) - new_secret on the device -> the mint
   rotates into that hash -> confirm. The wallet's OWN secret never crosses
   the cable, and no press is needed. web/src/vaultserial.ts has the WebSerial
-  transport for both framings (newline JSON, and heartwood's HW binary frame).
-createWalletFetch({allowPrivate?, proxy?}) - DNS-pinned fetch, loopback
-  passthrough; with a socks5:// proxy it tunnels instead and resolves remotely
-payWithNwc(uri, pr) -> {preimageHex, feesPaidMsat} / invoiceFromNwc(uri, amountMsat, desc) / nwcStatus(uri)
-
-All amounts are integer milli-satoshis in the engine; the CLI speaks sats.
+  transport for both framings (newline JSON, and heartwood's HW binary frame); it
+  is part of the web UI, outside `files`, and never published.

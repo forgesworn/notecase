@@ -184,9 +184,21 @@ is the trade, stated plainly, so you can decide whether you like it.
 
 ## Use
 
+notecase needs Node 22.19 or later and is ESM-only (`import`, no `require`).
+The floor is the highest one its dependencies declare: `undici`, which
+carries the SOCKS5 proxy, wants Node 22.19.
+
+There are two ways to install it, and they give you different things:
+
 ```bash
-npm install -g @forgesworn/notecase
+npm install -g @forgesworn/notecase   # the `notecase` command (dist/cli.js)
+npm install @forgesworn/notecase      # the library, in a project of your own
 ```
+
+The global install gives the CLI. The local install gives the engine, and
+its one entry point is the package name itself (`import {Wallet, openWallet}
+from '@forgesworn/notecase'`); there are no deep imports, and the CLI is not
+importable. See "As a library" below.
 
 Or from source:
 
@@ -198,19 +210,27 @@ alias notecase="node $PWD/dist/cli.js"
 
 ```bash
 notecase init                          # PIN-locked store, and twelve words shown once
+notecase init --insecure-plaintext     # no PIN: the file is unencrypted, so anyone who reads it owns the notes
 notecase seed                          # shows them again, after the PIN
 notecase init --restore                # a new device, from the words
 notecase restore                       # asks each mint which of your notes are still alive
-notecase mints add mint@mint.example   # or any LNURL / bare domain
-notecase mint 21                       # pay via NWC if set, else an invoice to pay
+notecase mints add mint@mint.example   # or any LNURL / bare domain; the first one added is the default
+notecase mints list                    # the mints you hold, and which is the default
+notecase mints use mint.example        # make this mint the default
+notecase mint 21                       # you PAY 21 sats; the mint's fee comes off, so the note holds less
+notecase mint 21 --manual              # always show the invoice, even with an NWC connection set
 notecase balance
+notecase list                          # live notes by short id (--all: spent and sent ones too)
+notecase verify <note>                 # offline: does this note's signature check out
 notecase send 8                        # prints a bearer note URL + LNURL
 notecase send 8 --to npub1...          # seals it to their key, leaves it on their inbox relays
-notecase address claim donkey          # a lightning address at your mint, paid for with a note
+notecase address claim donkey          # a lightning address at your default mint (--mint <host> for another), paid for with a note
 notecase address                       # what it is
+notecase address unregister            # releases it again (--mint <host> to pick the mint)
 notecase inbox                         # opens what was sent to your npub, claims it at once
 notecase reclaim                       # takes back anything sent but not yet claimed
 notecase receive                       # prompts for the note, rotates it in
+notecase receive --accept-key-rotation # take a mint's published key rotation instead of refusing it
 notecase check                         # asks every mint whether your notes are still good
 notecase check --apply                 # and writes down what it found
 notecase check --resign                # re-signs notes under a mint's new key
@@ -226,6 +246,8 @@ notecase melt <bolt11> --notes c3e3,b8b4 # choose which notes fund it
 notecase transfer 50 --from a.example --to b.example   # move between mints
 notecase reconcile                     # resolves anything uncertain
 notecase nwc set                       # prompts for the connection URI
+notecase nwc status                    # is the connection reachable, and what can it do
+notecase nwc clear                     # forget it
 notecase nwc grant <name> [--methods a,b] [--budget <sats>] [--max <sats>]
 notecase nwc grants | nwc revoke <name> | nwc refill <name> [--budget <sats>]
 notecase nwc serve                     # answer NIP-47 for the grants above
@@ -240,9 +262,12 @@ notecase heartwood address keys <name> # a name the DEVICE's key owns, paid to t
 notecase heartwood address scan [name...] # payments to those keys whose wrap never reached the device
 notecase heartwood recover             # a lost heartwood's notes, from its master's nsec or BIP-39 phrase
 notecase backup shares --threshold 2 --count 3
+notecase backup recover-key            # prompts for the word shares and prints the store key they rebuild
 notecase sync on                       # keep the notes themselves on your relays
 notecase sync                          # pull, let the mints settle, publish what changed
 notecase sync status
+notecase sync off                      # stop; the copies already on your relays stay there
+notecase --help                        # every command, including the ones not listed here
 ```
 
 ### Checking your notes
@@ -604,18 +629,64 @@ accept their argument on the command line, but prefer the prompted form:
 whatever goes on the command line lands in your shell history, and these
 two are live secrets.
 
-As a library, the same engine drives other frontends:
+### As a library
+
+The engine that drives the CLI drives other frontends too. Install the
+package without `-g`, and import from its one entry point; everything the
+snippet uses is exported from there.
 
 ```ts
-import {Wallet, openWallet, createWalletFetch, payWithNwc} from '@forgesworn/notecase'
-const store = await openWallet({pin})
+import {
+  Wallet,
+  openWallet,
+  initWallet,
+  NoWalletError,
+  createWalletFetch,
+  payWithNwc
+} from '@forgesworn/notecase'
+
+const pin = process.env.NOTECASE_PIN!   // the holder's PIN
+const nwcUri = process.env.NWC_URI!     // a nostr+walletconnect:// URI whose wallet can pay_invoice
+
+// openWallet throws NoWalletError on a home with no wallet in it yet, so a
+// first run has to create one. initWallet throws WalletExistsError if there
+// is one already, which is why it is only the fallback.
+const open = async () => {
+  try {
+    return await openWallet({pin})
+  } catch (err) {
+    if (!(err instanceof NoWalletError)) throw err
+    // store.mnemonic holds the twelve recovery words, returned this once:
+    // show them to the holder now, or they are lost.
+    return initWallet({pin})
+  }
+}
+const store = await open()
 const wallet = new Wallet(store.data, store.save, {fetch: createWalletFetch()})
+if (store.data.mints.length === 0) await wallet.addMint('mint@mint.example') // a Lightning Address, LNURL or bare domain
 
 // Mint a note: quote, pay the invoice from any Lightning wallet, then claim.
-const {pending} = await wallet.startMint(21_000) // msat paid; the note holds this less the mint fee
+const {pending} = await wallet.startMint(21_000) // msat PAID; the note holds this less the mint fee
 await payWithNwc(nwcUri, pending.pr)
 const minted = await wallet.awaitMint(pending) // {note, warnings}, or null on timeout
+if (minted) {
+  console.log(`${minted.note.amountMsat} msat at ${minted.note.mintHost}`)
+} else {
+  // Not settled yet. The quote is parked, not lost: wallet.reconcile()
+  // claims it once the invoice is paid.
+  await wallet.reconcile()
+}
+
+// Send: send() returns a NoteRecord, and noteUrlFor() turns it into the
+// shareable note URL the CLI prints.
+const note = await wallet.send(8_000)
+console.log(wallet.noteUrlFor(note))
 ```
+
+`startMint` takes the gross figure, as `notecase mint` does; the web wallet
+asks what the note should hold and adds the fee itself. `llms.txt` has the
+rest of the API, including which parts are importable from the package and
+which live only in its source tree.
 
 ## The web wallet
 
