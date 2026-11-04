@@ -275,7 +275,10 @@ describe('registering at the address itself', () => {
       const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
       if (url.searchParams.get('p')?.startsWith('cp1') && limited < 3) {
         limited += 1
-        return Response.json({status: 'ERROR', reason: 'rate limited'})
+        // LUD-26's wording, then a reverse proxy's 429, as moneyer.dev's Caddy answers
+        return limited === 1
+          ? Response.json({status: 'ERROR', reason: 'rate limited'})
+          : Response.json({status: 'ERROR', reason: 'Too many requests - wait a moment and try again.'}, {status: 429})
       }
       return fetch(input, init)
     }

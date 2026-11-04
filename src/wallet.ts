@@ -235,6 +235,9 @@ const ADDRESS_ACCOUNT = 0
 const SHARE_GAP = 5
 // How many times a lookup answered "rate limited" is asked again.
 const RATE_LIMIT_TRIES = 5
+// A mint's "slow down": LUD-26's own wording, or the reverse proxy in front of
+// it answering 429 "Too many requests", as moneyer.dev's Caddy does.
+const RATE_LIMITED = /rate.?limit|too many requests/i
 const NO_ADDRESS_KEYS = 'This wallet has no recovery words and no Nostr key, so it has no keys to be paid to.'
 // A mint refusing a proof because it is not by the key on file: dni's
 // reference mint's words ("Invalid ownership signature."), conformance's
@@ -2985,7 +2988,7 @@ export class Wallet {
       try {
         return await ask()
       } catch (err) {
-        if (attempt >= RATE_LIMIT_TRIES || !/rate.?limit/i.test(reasonOf(err))) throw err
+        if (attempt >= RATE_LIMIT_TRIES || !RATE_LIMITED.test(reasonOf(err))) throw err
         await new Promise(resolve => setTimeout(resolve, this.opts.rateLimitBackoffMs ?? 2_000))
       }
     }
