@@ -5,7 +5,7 @@
 LUD-26 as it now stands (luds `lnurlcash` `92e430f`), on @lnurlcash/kit
 0.21.2. Breaking for names: a mint on LUD-26 refuses the whole-branch cx1
 and proof every earlier release sent, so this is the release that can still
-register or move a name at a moneyer with LUD-26 (forgesworn/moneyer#80)
+register or move a name at moneyer 0.22.0 and later
 and at dni's lnurl-mint since #77.
 
 - A name is registered to a LUD-26 share, `S/0'/2/n'` below the mint's root
@@ -55,7 +55,7 @@ and at dni's lnurl-mint since #77.
   publishes a name's cx1 any more (`text/cpub` is gone), and `heartwood
   recover` finds what was paid to the superseded branch.
 - The kit's legacy ladders replace this wallet's own copy of the tweak from
-  before purposes. Tested against moneyer's LUD-26 branch and
+  before purposes. Tested against moneyer 0.22.0 and
   lnurlcash-conformance 0.16.2's mock mint and vectors.
 
 ## 0.25.1 - 2026-10-06
