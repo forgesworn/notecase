@@ -1,5 +1,4 @@
 import {sha256} from '@noble/hashes/sha2.js'
-import {schnorr, secp256k1} from '@noble/curves/secp256k1.js'
 import {bytesToHex, hexToBytes, utf8ToBytes} from '@noble/hashes/utils.js'
 import {bech32, bech32m} from '@scure/base'
 import {
@@ -9,8 +8,8 @@ import {
   ck1Pubkey,
   decodeCk1,
   decodeCw1 as decodeCw1Fields,
-  deriveNotePubkey as deriveKitNotePubkey,
-  deriveNoteSecretKey as deriveKitNoteSecretKey,
+  legacyDeriveNotePubkey,
+  legacyDeriveNoteSecretKey,
   deriveScriptPathCommitment,
   encodeCs1WithAmount,
   isCs1WithAmount,
@@ -31,18 +30,17 @@ import {
 //   cw1<...>        script path: a leaf of Q's tree, its control block and
 //                   the witness that satisfies it
 //
-// The kit (@lnurlcash/kit 0.20) carries the primitives: the canonical spend's
+// The kit (@lnurlcash/kit 0.21) carries the primitives: the canonical spend's
 // sighash, the bearer note, the ck1/cw1/cs1 codecs, ck1 signing and
-// verification, certificate checks over Q, the address proof and purposed
-// key derivation. What stays here is wallet policy the kit leaves to its
-// callers: which spends this wallet will judge offline, the ids it files
-// notes under (and filed them under before), and the one ladder the kit no
-// longer derives.
+// verification, certificate checks over the domain and Q, the address
+// proof, LUD-26's BIP-32 shares and the superseded whole-branch ladders.
+// What stays here is wallet policy the kit leaves to its callers: which
+// spends this wallet will judge offline, and the ids it files notes under
+// (and filed them under before).
 
 const HEX32 = /^[0-9a-f]{64}$/i
 // BIP-342 keeps the 520-byte cap on every initial stack element.
 const MAX_STACK_ELEMENT = 520
-const CURVE_ORDER = secp256k1.Point.CURVE().n
 
 const equalBytes = (a: Uint8Array, b: Uint8Array): boolean =>
   a.length === b.length && a.every((byte, i) => byte === b[i])
@@ -143,63 +141,46 @@ export const verifyCk1 = (ck1: string, domain: string): {outputKey: Uint8Array} 
   }
 }
 
-// ---- a cx1 branch's note keys ----
+// ---- a superseded whole-branch cx1's note keys ----
 //
 //   t    = tagged_hash("LNURLcash/derive", P || chaincode || ser32(purpose) || ser32(i)) mod n
 //   pk_i = x(lift_x(P) + t·G)
 //
-// The kit derives every purpose. `null` is the single ladder from before
-// purposes (luds 2e5be03), whose tweak has no ser32(purpose): the kit no
-// longer derives it, but a mint paid names on it until it moved to purpose 2,
-// and a note paid then and never collected is still sitting on it. Only ever
-// walked and signed for, never handed out.
+// Before LUD-26 a name was registered to a whole branch and a mint paid it
+// on these tweaks: purpose 2, or before purposes (luds 2e5be03) the single
+// ladder with no ser32(purpose), `null` here. Notes paid then and never
+// collected are still sitting on them, and a name not yet moved to a share
+// is still paid on purpose 2, so they are walked and signed for. Nothing
+// new is ever handed out on them.
 export type NotePurpose = 0 | 1 | 2 | null
 
-const ser32 = (n: number): Uint8Array => {
-  const bytes = new Uint8Array(4)
-  new DataView(bytes.buffer).setUint32(0, n, false)
-  return bytes
-}
-
-const liftX = (x: Uint8Array) => schnorr.utils.lift_x(BigInt(`0x${bytesToHex(x)}`))
-
-const unpurposedTweak = (branchPubkeyXOnly: Uint8Array, chainCode: Uint8Array, index: number): bigint =>
-  BigInt(`0x${bytesToHex(schnorr.utils.taggedHash('LNURLcash/derive', branchPubkeyXOnly, chainCode, ser32(index)))}`) % CURVE_ORDER
-
-export const deriveNotePubkey = (
+export const deriveLegacyNotePubkey = (
   branchPubkeyXOnly: Uint8Array,
   chainCode: Uint8Array,
   purpose: NotePurpose,
   index: number
-): Uint8Array => {
-  if (purpose !== null) return deriveKitNotePubkey(branchPubkeyXOnly, chainCode, purpose, index)
-  const t = unpurposedTweak(branchPubkeyXOnly, chainCode, index)
-  return schnorr.utils.pointToBytes(liftX(branchPubkeyXOnly).add(secp256k1.Point.BASE.multiply(t)))
-}
+): Uint8Array => legacyDeriveNotePubkey({pubkeyXOnly: branchPubkeyXOnly, chainCode}, purpose, index)
 
-// The branch key is taken at even y first, as lift_x takes P, or the secret
-// would not match the key deriveNotePubkey gives.
-export const deriveNoteSecretKey = (
+export const deriveLegacyNoteSecretKey = (
   branchPrivateKey: Uint8Array,
   chainCode: Uint8Array,
   purpose: NotePurpose,
   index: number
-): Uint8Array => {
-  if (purpose !== null) return deriveKitNoteSecretKey(branchPrivateKey, chainCode, purpose, index)
-  const raw = BigInt(`0x${bytesToHex(branchPrivateKey)}`)
-  const even = secp256k1.getPublicKey(branchPrivateKey, true)[0] === 2 ? raw : CURVE_ORDER - raw
-  const t = unpurposedTweak(schnorr.getPublicKey(branchPrivateKey), chainCode, index)
-  return hexToBytes(((even + t) % CURVE_ORDER).toString(16).padStart(64, '0'))
-}
+): Uint8Array => legacyDeriveNoteSecretKey(branchPrivateKey, chainCode, purpose, index)
 
 // ---- the address registration proof ----
 
-// What LUD-25's address proof signs: sha256("LNURLcash:<action>:<domain>:<name>"),
-// `domain` being the SERVICE's bare hostname. The kit signs it
-// (signAddressProof) but does not export the digest, which this wallet needs
-// to check a proof a heartwood signed before sending it on.
-export const addressProofDigest = (action: AddressProofAction, domain: string, username: string): Uint8Array =>
-  sha256(utf8ToBytes(`LNURLcash:${action}:${spendDomainOf(domain)}:${username}`))
+// What LUD-26's address proof signs: sha256("LNURLcash:<action>:<domain>:<name>"),
+// with ":<cx1>" after a register or update, `domain` being the SERVICE's
+// bare hostname. The kit signs it (signAddressProof) but does not export
+// the digest, which this wallet needs to check a proof a heartwood signed
+// before sending it on.
+export const addressProofDigest = (action: AddressProofAction, domain: string, username: string, cx1?: string): Uint8Array => {
+  const at = `${spendDomainOf(domain)}:${username.trim().toLowerCase()}`
+  if (action === 'unregister') return sha256(utf8ToBytes(`LNURLcash:unregister:${at}`))
+  if (!cx1) throw new Error(`A ${action} proof binds the cx1 it puts on file.`)
+  return sha256(utf8ToBytes(`LNURLcash:${action}:${at}:${cx1.trim().toLowerCase()}`))
+}
 
 // ---- note ids ----
 
@@ -245,10 +226,12 @@ export const bearerHashOf = (k1: string): string | null => {
 
 // ---- offline verification ----
 
-// Does `certificate` certify this note at this amount under `mintPubkey`?
+// Does `certificate` certify this note at this amount under `mintPubkey`,
+// at the mint `domain` names (a note URL, or its host)?
 //
-// LUD-25 certifies every note over hex(Q), as a cs1<amount>, and the kit
-// does the recovery. A mint from before that change certified a bearer note
+// LUD-25 certifies every note over its domain and hex(Q), as a cs1<amount>,
+// and the kit does the recovery; it also takes one made over hex(Q) alone,
+// as every mint certified before the domain was bound. A mint from before that change certified a bearer note
 // over its h instead, as 65 bytes of hex (`sig`), or as the fixed-HRP cs1
 // with no amount in it - and such a mint still answers only in that shape,
 // so a note it issued, or rotated, carries nothing else. Those are checked
@@ -263,6 +246,7 @@ export const bearerHashOf = (k1: string): string | null => {
 // nothing here: no mint ever issued one.
 export const verifyNoteCertificate = (
   k1: string,
+  domain: string,
   amountMsat: number,
   certificate: string,
   mintPubkey: string
@@ -270,7 +254,7 @@ export const verifyNoteCertificate = (
   const value = certificate.trim()
   if (isCs1WithAmount(value)) {
     const id = noteIdOf(k1)
-    return id !== null && verifyNoteSignatureForKey(id, amountMsat, value, mintPubkey)
+    return id !== null && verifyNoteSignatureForKey(id, spendDomainOf(domain), amountMsat, value, mintPubkey)
   }
   const signature = legacyCertificateBytes(value)
   const preimage = k1.trim().toLowerCase()
@@ -278,7 +262,7 @@ export const verifyNoteCertificate = (
   const h = bytesToHex(sha256(hexToBytes(preimage)))
   for (const layout of [signature, new Uint8Array([...signature.subarray(1), signature[0]!])]) {
     try {
-      if (verifyNoteSignatureForKey(h, amountMsat, encodeCs1WithAmount(amountMsat, layout), mintPubkey)) return true
+      if (verifyNoteSignatureForKey(h, spendDomainOf(domain), amountMsat, encodeCs1WithAmount(amountMsat, layout), mintPubkey)) return true
     } catch {
       // not a certificate under this layout
     }

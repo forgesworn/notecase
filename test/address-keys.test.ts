@@ -9,7 +9,7 @@ import {
   deriveCashRoot,
   deriveLegacyCashAddressNode,
   deriveNostrAddressNode,
-  encodeCx1,
+  encodeLegacyCx1,
   bearerNoteIdOfPreimage,
   isCk1
 } from '../src/lnurlcash.js'
@@ -57,7 +57,9 @@ const freePort = (): Promise<number> =>
 type Mint = {moneyer: Moneyer; backend: FakeBackend; host: string; relay: ReturnType<typeof memoryRelay>}
 let mint: Mint | null = null
 
-const startMint = async (namePriceMsat = 0): Promise<Mint> => {
+// null: registration closed, as on moneyer.dev - only a name's owner may
+// still say where it pays
+const startMint = async (namePriceMsat: number | null = 0): Promise<Mint> => {
   const port = await freePort()
   const backend = createFakeBackend()
   const relay = memoryRelay()
@@ -79,7 +81,7 @@ const startMint = async (namePriceMsat = 0): Promise<Mint> => {
       sunset: false,
       publicOrigin: `http://127.0.0.1:${port}`,
       zap: {nostrKey: bytesToHex(randomBytes(32)), relays: ['wss://relay.test'], names: {}},
-      namePriceMsat
+      ...(namePriceMsat === null ? {} : {namePriceMsat})
     },
     {backend, nostr: relay.transport, zapPollMs: 20}
   )
@@ -120,9 +122,10 @@ describe('a name paid to this wallet\'s keys', () => {
     const theMint = await startMint()
     const {wallet} = seededWallet()
     await wallet.addMint(`mint@${theMint.host}`)
+    const share = wallet.addressCx1(theMint.host)
     const claimed = await wallet.registerName({name: 'alice'})
     expect(claimed.toKeys).toBe(true)
-    expect(theMint.moneyer.store.zapName('alice')?.cx1).toBe(wallet.addressCx1(theMint.host))
+    expect(theMint.moneyer.store.zapName('alice')?.cx1).toBe(share)
 
     await pay(theMint, 'alice', 21_000)
     const got = await wallet.receiveFromNostr(theMint.relay.transport)
@@ -134,7 +137,7 @@ describe('a name paid to this wallet\'s keys', () => {
     expect(wallet.balanceMsat()).toBe(21_000)
   })
 
-  it('finds a payment whose wrap never arrived by scanning the branch', async () => {
+  it('finds a payment whose wrap never arrived by scanning the share', async () => {
     const theMint = await startMint()
     const {wallet} = seededWallet()
     await wallet.addMint(`mint@${theMint.host}`)
@@ -144,10 +147,11 @@ describe('a name paid to this wallet\'s keys', () => {
 
     const scan = await wallet.scanAddress(theMint.host, {gap: 5})
     expect(scan.received.map(r => r.note.amountMsat).sort((a, b) => a - b)).toEqual([5_000, 21_000])
-    // the words branch, then the Nostr key's and both old m/139'/1'
+    // share 0 to its two keys paid and a gap; shares 1 to 5 empty, and so
+    // 0 to 4 on the Nostr key's root; then the four superseded whole
     // branches, each on the Lightning Address purpose and the ladder from
-    // before purposes: eight gaps, and the two keys paid
-    expect(scan.scanned).toBe(2 + 5 * 8)
+    // before purposes
+    expect(scan.scanned).toBe(2 + 5 + 5 * 5 + 5 * 5 + 5 * 8)
     expect(wallet.balanceMsat()).toBe(26_000)
 
     // the wraps that arrive late find their notes already taken
@@ -173,38 +177,43 @@ describe('a name paid to this wallet\'s keys', () => {
     const theMint = await startMint()
     const made = makeWallet()
     await made.wallet.addMint(`mint@${theMint.host}`)
+    await made.wallet.ensureNostrIdentity()
+    const nostrCx1 = made.wallet.addressCx1(theMint.host)
     const claimed = await made.wallet.registerName({name: 'alice'})
     expect(claimed.toKeys).toBe(true)
-    const nostrBranch = cashNodeToCx1(deriveNostrAddressNode(made.wallet.nostrIdentity()!.secret, theMint.host))
-    const nostrCx1 = encodeCx1(nostrBranch.pubkeyXOnly, nostrBranch.chainCode)
     expect(theMint.moneyer.store.zapName('alice')?.cx1).toBe(nostrCx1)
     await pay(theMint, 'alice', 21_000)
     expect((await made.wallet.receiveFromNostr(theMint.relay.transport)).received.map(r => r.note.amountMsat)).toEqual([21_000])
 
     // Words later. A payment made before the name moves still lands on the
-    // Nostr branch, and the wallet still holds that key.
+    // Nostr key's share, and the wallet still holds that key.
     made.data.seedHex = seedFromMnemonic(newMnemonic())
     await pay(theMint, 'alice', 5_000)
     const late = await made.wallet.receiveFromNostr(theMint.relay.transport)
     expect(late.skipped).toEqual([])
     expect(late.received.map(r => r.note.amountMsat)).toEqual([5_000])
 
+    // the share on file is never overwritten: the move is LUD-26's PUT,
+    // proven by the Nostr key's share and by the new one from the words
+    const wordsCx1 = made.wallet.addressCx1(theMint.host)
+    expect(wordsCx1).not.toBe(nostrCx1)
     expect((await made.wallet.payNameToKeys()).toKeys).toBe(true)
-    expect(theMint.moneyer.store.zapName('alice')?.cx1).toBe(made.wallet.addressCx1(theMint.host))
-    expect(made.wallet.addressCx1(theMint.host)).not.toBe(nostrCx1)
+    expect(theMint.moneyer.store.zapName('alice')?.cx1).toBe(wordsCx1)
+    await pay(theMint, 'alice', 3_000)
+    expect((await made.wallet.receiveFromNostr(theMint.relay.transport)).received.map(r => r.note.amountMsat)).toEqual([3_000])
     expect((await made.wallet.payNameToKeys(false)).toKeys).toBe(false)
     expect(theMint.moneyer.store.zapName('alice')?.cx1).toBeNull()
-    expect(made.wallet.balanceMsat()).toBe(26_000)
+    expect(made.wallet.balanceMsat()).toBe(29_000)
   })
 
-  it("keeps paying a name still on the old m/139'/1' branch, and moves it onto the spec's", async () => {
+  it("keeps paying a name still on a whole branch from before LUD-26, and moves it onto a share", async () => {
     const theMint = await startMint()
     const made = seededWallet()
     await made.wallet.addMint(`mint@${theMint.host}`)
     await made.wallet.registerName({name: 'alice'})
     // where a wallet before 2026-09-16 pointed the name
     const legacy = cashNodeToCx1(deriveLegacyCashAddressNode(deriveCashRoot(hexToBytes(made.data.seedHex!)), theMint.host))
-    const legacyCx1 = encodeCx1(legacy.pubkeyXOnly, legacy.chainCode)
+    const legacyCx1 = encodeLegacyCx1({pubkeyXOnly: legacy.pubkeyXOnly, chainCode: legacy.chainCode})
     expect(legacyCx1).not.toBe(made.wallet.addressCx1(theMint.host))
     theMint.moneyer.store.setZapNameCx1('alice', legacyCx1)
 
@@ -219,8 +228,11 @@ describe('a name paid to this wallet\'s keys', () => {
     const scan = await made.wallet.scanAddress(theMint.host, {gap: 3})
     expect(scan.received.map(r => r.note.amountMsat)).toEqual([5_000])
 
+    // PUT, proven by the old branch's own key and by the new share
+    const next = made.wallet.addressCx1(theMint.host)
     await made.wallet.payNameToKeys()
-    expect(theMint.moneyer.store.zapName('alice')?.cx1).toBe(made.wallet.addressCx1(theMint.host))
+    expect(theMint.moneyer.store.zapName('alice')?.cx1).toBe(next)
+    expect(made.data.settings.lightningAddressCx1).toBe(next)
     await pay(theMint, 'alice', 3_000)
     expect((await made.wallet.receiveFromNostr(theMint.relay.transport)).received.map(r => r.note.amountMsat)).toEqual([3_000])
     expect(made.wallet.balanceMsat()).toBe(29_000)
@@ -238,7 +250,9 @@ describe('a name paid to this wallet\'s keys', () => {
 
     const scan = await wallet.scanAddress(theMint.host, {gap: 3})
     expect(scan.received).toEqual([])
-    expect(scan.scanned).toBe(1 + 3 * 8)
+    // share 0's spent key and a gap, five empty shares on each root, and
+    // the whole branches on both of their ladders
+    expect(scan.scanned).toBe(1 + 3 + 5 * 3 + 5 * 3 + 3 * 8)
     const stats = (await (await fetch(`${theMint.moneyer.url}/stats`)).json()) as {outstandingNotes: number}
     // the rotated note, and nothing left on the key
     expect(stats.outstandingNotes).toBe(1)
@@ -246,19 +260,23 @@ describe('a name paid to this wallet\'s keys', () => {
   })
 
   it('moves a name its key owns but never recorded, such as one the operator set up', async () => {
-    const theMint = await startMint()
+    const theMint = await startMint(null)
     const {wallet} = seededWallet()
     await wallet.addMint(`mint@${theMint.host}`)
     theMint.moneyer.store.putOperatorZapName('ops', (await wallet.ensureNostrIdentity()).pubkey)
 
     await expect(wallet.payNameToKeys()).rejects.toThrow(WalletUsageError)
+    const share = wallet.addressCx1(theMint.host)
     const moved = await wallet.payNameToKeys(true, {name: 'ops'})
     expect(moved.toKeys).toBe(true)
-    expect(theMint.moneyer.store.zapName('ops')?.cx1).toBe(wallet.addressCx1(theMint.host))
+    expect(theMint.moneyer.store.zapName('ops')?.cx1).toBe(share)
     expect(wallet.lightningAddress()).toBe(`ops@${theMint.host}`)
+    // and back to gift-wrapped notes, proven by the share on file
+    expect((await wallet.payNameToKeys(false)).toKeys).toBe(false)
+    expect(theMint.moneyer.store.zapName('ops')?.cx1).toBeNull()
   })
 
-  it('takes the note back when re-claiming a priced name it already owns', async () => {
+  it('takes the note back when re-claiming a priced name it already owns, and says how to move it', async () => {
     const theMint = await startMint(21_000)
     const {wallet} = seededWallet()
     await wallet.addMint(`mint@${theMint.host}`)
@@ -270,10 +288,49 @@ describe('a name paid to this wallet\'s keys', () => {
     expect(first.paidMsat).toBe(21_000)
     expect(wallet.balanceMsat()).toBe(29_000)
 
-    // the mint only updates where the name pays, and takes nothing
-    const again = await wallet.registerName({name: 'alice'})
-    expect(again.paidMsat).toBe(0)
-    expect(again.toKeys).toBe(true)
+    // the share on file is never overwritten by a claim: the mint refuses,
+    // takes nothing, and the note comes home
+    await expect(wallet.registerName({name: 'alice'})).rejects.toThrow(/address keys alice/)
     expect(wallet.balanceMsat()).toBe(29_000)
+    expect(wallet.sentNotes()).toEqual([])
+  })
+
+  it("pays a name at the same mint with a note, free, and the name's wallet finds it on its share", async () => {
+    const theMint = await startMint()
+    const {wallet: bob} = seededWallet()
+    await bob.addMint(`mint@${theMint.host}`)
+    await bob.registerName({name: 'bob'})
+
+    const {wallet: alice} = seededWallet()
+    await alice.addMint(`mint@${theMint.host}`)
+    const k1 = freshK1()
+    theMint.moneyer.store.creditNote(bearerNoteIdOfPreimage(k1), 50_000)
+    await alice.receive(`${theMint.moneyer.url}/w?k1=${k1}&amount=50000`)
+
+    const sent = await alice.payAddressInternally(`bob@${theMint.host}`, 21_000)
+    expect(sent).toMatchObject({host: theMint.host, ambiguous: false})
+    expect(sent!.note.state).toBe('spent')
+    expect(alice.balanceMsat()).toBe(29_000)
+
+    // no fee taken, and no Lightning payment made
+    const scan = await bob.scanAddress(theMint.host, {gap: 3})
+    expect(scan.received.map(r => r.note.amountMsat)).toEqual([21_000])
+    const stats = (await (await fetch(`${theMint.moneyer.url}/stats`)).json()) as {outstandingMsat: number}
+    expect(stats.outstandingMsat).toBe(50_000)
+  })
+
+  it('leaves a name it cannot cover, or that is no registered name, to be paid over Lightning', async () => {
+    const theMint = await startMint()
+    const {wallet: bob} = seededWallet()
+    await bob.addMint(`mint@${theMint.host}`)
+    await bob.registerName({name: 'bob'})
+    const {wallet: alice} = seededWallet()
+    await alice.addMint(`mint@${theMint.host}`)
+    // nothing held there
+    expect(await alice.payAddressInternally(`bob@${theMint.host}`, 21_000)).toBeNull()
+    // a name nobody registered
+    expect(await alice.payAddressInternally(`nobody@${theMint.host}`, 21_000)).toBeNull()
+    // the mint's own address takes payments, but is no registered name
+    expect(await alice.payAddressInternally(`mint@${theMint.host}`, 21_000)).toBeNull()
   })
 })

@@ -1315,7 +1315,7 @@ const signedOk = (w: Wallet, note: NoteRecord): boolean => {
   if (!note.signature) return false
   const keys = [w.data.pubkeyPins[note.mintHost], ...w.pubkeyHistoryFor(note.mintHost)]
   // a key the mint has since retired still proves where the note came from
-  return keys.some(key => Boolean(key) && verifyNoteCertificate(note.k1, note.amountMsat, note.signature!, key!))
+  return keys.some(key => Boolean(key) && verifyNoteCertificate(note.k1, note.mintHost, note.amountMsat, note.signature!, key!))
 }
 
 // ---------- choosing several notes at once ----------
@@ -4096,6 +4096,18 @@ const viewSettings = (): void => {
           confirm.addEventListener('click', () =>
             busy(confirm as HTMLButtonElement, async () => {
               const got = await w.registerName({name: wanted, mintHost: host})
+              if (got.feeInvoice) {
+                // LUD-26's address fee, not paid here: over what the mint
+                // advertised, or no note could cover it. The mint holds the
+                // name until the invoice is paid from anywhere, or expires.
+                priceArea.replaceChildren()
+                const held = el('<p class="warn" style="text-align:left"></p>')
+                held.textContent = `${got.address} is held for you. Pay its registration fee from any wallet to activate it:`
+                const invoice = el('<p class="mono" style="text-align:left;word-break:break-all"></p>')
+                invoice.textContent = got.feeInvoice
+                priceArea.append(held, invoice)
+                return
+              }
               toast(
                 got.toKeys
                   ? `${got.address} is yours, paid to your own keys - the mint never holds what arrives.`

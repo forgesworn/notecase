@@ -7,8 +7,9 @@ export * from '@lnurlcash/kit'
 // Every note is a taproot output key (LUD-25's unified verification), and
 // the kit carries the primitives. These are this wallet's own and shadow the
 // kit's names where they share one: a cw1 has to commit to a Q to count
-// (isCw1, decodeCw1), and the derivation also reaches the ladder from before
-// purposes (deriveNotePubkey, deriveNoteSecretKey with purpose null).
+// (isCw1, decodeCw1). The superseded whole-branch ladders, purpose null
+// included, are deriveLegacyNotePubkey and deriveLegacyNoteSecretKey, so
+// neither passes for the kit's LUD-26 share derivation (deriveNotePubkey).
 export {
   addressProofDigest,
   bearerHashOf,
@@ -17,8 +18,8 @@ export {
   checkLeaf,
   checkSpendOffline,
   decodeCw1,
-  deriveNotePubkey,
-  deriveNoteSecretKey,
+  deriveLegacyNotePubkey,
+  deriveLegacyNoteSecretKey,
   isCw1,
   isLegacyCertificate,
   legacyNoteIdOf,
@@ -101,6 +102,11 @@ export {
   splitNoteWithHash,
   mergeNotesWithHash,
   requestInvoice,
+  registerAddress,
+  updateAddress,
+  unregisterAddress,
+  unregisterAddressWithProof,
+  sendNoteToAddress,
   type LnurlcashOptions,
   type MintAddressExtensions,
   type WithdrawInfoExtensions,

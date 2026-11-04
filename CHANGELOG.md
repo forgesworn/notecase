@@ -1,5 +1,63 @@
 # Changelog
 
+## Unreleased
+
+LUD-26 as it now stands (luds `lnurlcash` `92e430f`), on @lnurlcash/kit
+0.21.2. Breaking for names: a mint on LUD-26 refuses the whole-branch cx1
+and proof every earlier release sent, so this is the release that can still
+register or move a name at a moneyer with LUD-26 (forgesworn/moneyer#80)
+and at dni's lnurl-mint since #77.
+
+- A name is registered to a LUD-26 share, `S/0'/2/n'` below the mint's root
+  (from the words, or without them from the Nostr key), exported as the
+  65-byte cx1. One share per name, never reused; a share the mint has seen
+  ("cx1 already used", from another device on the same words) is skipped.
+  The share proves it agrees by its own key, over a message binding the
+  mint's hostname, the name and the cx1.
+- Registration at a mint other than moneyer is LUD-26's own, at the address:
+  `POST`, `PUT` and `DELETE` on `/.well-known/lnurlp/<name>`, replacing the
+  reference mint's old `/p/<name>` and its probe. An address fee comes back
+  as an invoice, melted from a note of that mint only if it is no more than
+  the fee advertised as the third `Mint fees` value; otherwise `address claim`
+  prints it, and the name is held until it is paid or expires. No npub is
+  sent: a mint would publish it for NIP-05, tying the name to a Nostr
+  identity.
+- A cx1 on file is never overwritten. `address keys` moves a name with `PUT`,
+  proven by the key on file and by the new share, and this is how a name
+  registered before LUD-26 gets off its whole branch. `address unregister`
+  uses `DELETE`. The key on file is the one recorded, or whichever share or
+  old branch the mint accepts, so a device that never saw the name can still
+  move or release it. The key each name is on is recorded, so that search,
+  which shows the mint which keys are one wallet's, is rarely needed.
+- moneyer names keep `POST /names` (NIP-98), now with a share and the new
+  proof, and a closed moneyer, which publishes no price, is still found
+  there for its names' owners. Re-claiming a name this wallet already holds
+  is refused and the note comes home, with a pointer to `address keys`.
+- New: `melt <sats> --to name@mint` pays a LUD-26 name at a mint this wallet
+  holds enough at with a note of exactly that amount, sent to the address's
+  callback and credited to the payee's share free (internal transfer), and
+  falls back to Lightning otherwise. The address and its callback must
+  both be that mint's own, and an answer of `pending` or `already in use`
+  leaves the note handed over for `reclaim`. `--mint` keeps it to that mint, and
+  `--notes` always pays by invoice. Library: `payAddressInternally`.
+- `address scan` walks shares, stopping after five empty in a row, as well
+  as the old whole branches, so it asks a mint roughly twice as many
+  questions as it did; a mint's `rate limited` is waited out. A payment wrap that names a key is matched on every
+  share and branch the wallet holds.
+- The web wallet shows an address fee invoice it did not pay, rather than
+  reporting the name as taken.
+- Every certificate is checked over the mint's domain as well as the note's
+  Q and value; one made before the domain was bound is still read.
+- Heartwood: firmware still hands out its whole branch, so `heartwood
+  address keys` is refused until it hands out shares; `custodial` and
+  `unregister` still work on the device's proof, and `unregister` now uses
+  `DELETE`. `heartwood address scan` no longer takes names: no mint
+  publishes a name's cx1 any more (`text/cpub` is gone), and `heartwood
+  recover` finds what was paid to the superseded branch.
+- The kit's legacy ladders replace this wallet's own copy of the tweak from
+  before purposes. Tested against moneyer's LUD-26 branch and
+  lnurlcash-conformance 0.16.2's mock mint and vectors.
+
 ## 0.25.1 - 2026-10-06
 
 Fixes 0.25.0 for notes held at mints that predate LUD-25's 29 September

@@ -35,6 +35,19 @@ contract: only a definitive rejection unstages anything; every ambiguous
 shape keeps the staged secrets and defers to reconcile. The conformance
 mock mint's misbehaviour matrix runs in CI to keep this true.
 
+**A mint that prices a name after the fact.** LUD-26 lets a mint answer a
+registration with an invoice for its address fee. It is paid from a note
+only if it asks no more than the fee the mint advertised; anything else is
+handed back to the holder unpaid. A name's share is watch-only and
+registered to that name alone, so the mint holding it can link what is paid
+to the name and nothing else the wallet holds, and spend none of it.
+
+**A payee that names someone else's mint.** An internal transfer sends the
+note's spend itself, so it goes only to an address, and a callback, on the
+note's own mint: the payRequest's `withdrawLink` is a claim, never proof.
+Only a plain refusal returns the note; `pending`, `already in use` or no
+answer leave it handed over until the mint says what happened.
+
 **A melt that never settles.** The note stays `melting` and every other
 operation on it refuses; the reconcile probe uses a rotate - safe in every
 outcome: it succeeds only if the melt failed and the mint restored the

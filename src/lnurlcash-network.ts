@@ -17,6 +17,8 @@ export type LnurlcashOptions = {
   retryMutations?: number
   mutationRetries?: number
   h?: string
+  // How long a scan waits on a mint's "rate limited" before asking again.
+  rateLimitBackoffMs?: number
 }
 
 const configure = (options: LnurlcashOptions = {}): void => {
@@ -24,10 +26,12 @@ const configure = (options: LnurlcashOptions = {}): void => {
     if (options.offline) throw new Error('Offline mode is on.')
   })
   const fetchImpl = options.fetch ?? globalThis.fetch
-  kit.configureTransport((url, signal, method) =>
+  kit.configureTransport((url, signal, method, body) =>
     fetchImpl(String(url), {
       method,
-      signal: options.timeoutMs === undefined ? signal : AbortSignal.timeout(options.timeoutMs)
+      signal: options.timeoutMs === undefined ? signal : AbortSignal.timeout(options.timeoutMs),
+      // LUD-26 registration goes as a form, which needs no CORS preflight.
+      ...(body === undefined ? {} : {body, headers: {'content-type': 'application/x-www-form-urlencoded'}})
     })
   )
   kit.configureSecretProvider(() => (options.randomSecret ?? defaultRandomSecret)())
@@ -202,11 +206,84 @@ const serviceJson = async (url: string, options: LnurlcashOptions): Promise<Reco
   return body
 }
 
-// The kit reads a name's branch from LUD-25's `text/cpub` (its index counts
-// the Lightning Address purpose) into `internalTransfer`.
 export const fetchPayRequest = async (url: string, options: LnurlcashOptions = {}) => {
   configure(options)
   return kit.fetchPayRequest(url)
+}
+
+// ---- LUD-26: a Lightning Address registered to a share ----
+//
+// Registration happens at the address itself, POST, PUT and DELETE at
+// /.well-known/lnurlp/<username>, each proven by a key the kit signs with.
+// A refusal comes back as the kit's ServiceError, its reason verbatim
+// ("already registered", "cx1 already used", "unknown user", "Invalid
+// ownership signature."), for the caller to act on.
+
+export const registerAddress = async (
+  server: string,
+  username: string,
+  share: kit.Cx1,
+  shareKey: Uint8Array,
+  options: LnurlcashOptions = {},
+  npub?: string
+): Promise<{pr?: string}> => {
+  configure(options)
+  return kit.registerUsername(server, username, share, shareKey, npub)
+}
+
+export const updateAddress = async (
+  server: string,
+  username: string,
+  currentKey: Uint8Array,
+  next: kit.Cx1,
+  nextKey: Uint8Array,
+  options: LnurlcashOptions = {}
+): Promise<void> => {
+  configure(options)
+  await kit.updateUsername(server, username, currentKey, next, nextKey)
+}
+
+export const unregisterAddress = async (
+  server: string,
+  username: string,
+  currentKey: Uint8Array,
+  options: LnurlcashOptions = {}
+): Promise<void> => {
+  configure(options)
+  await kit.unregisterUsername(server, username, currentKey)
+}
+
+// An unregister whose proof was signed elsewhere, by a heartwood holding
+// the key on file.
+export const unregisterAddressWithProof = async (
+  server: string,
+  username: string,
+  sig: string,
+  options: LnurlcashOptions = {}
+): Promise<void> => {
+  configure(options)
+  const url = new URL(`/.well-known/lnurlp/${encodeURIComponent(username.trim().toLowerCase())}`, server)
+  const body = await kit.lnurlFetch(url, 'DELETE', {sig})
+  if (body?.status !== 'OK') throw new kit.ServiceError('The service did not confirm the unregistration.')
+}
+
+// LUD-26's internal transfer: the note goes to the address's own callback,
+// at its full value, and the mint credits it to the payee's share free.
+export const sendNoteToAddress = async (
+  payee: kit.InternalTransferPayee,
+  noteUrl: string,
+  k1: string,
+  amountMsat: number,
+  options: LnurlcashOptions = {}
+): Promise<void> => {
+  configure(options)
+  try {
+    await kit.sendNoteInternally(payee, noteUrl, k1, amountMsat)
+  } catch (err) {
+    // the kit throws every refusal as it came; "pending" and "already in
+    // use" say something about the note, so they are named as such
+    throw err instanceof Error ? kit.classifyNoteError(err) : err
+  }
 }
 
 export type MintAddressExtensions = {

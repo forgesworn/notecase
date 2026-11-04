@@ -226,6 +226,7 @@ notecase send 8                        # prints a bearer note URL + LNURL
 notecase send 8 --to npub1...          # seals it to their key, leaves it on their inbox relays
 notecase address claim donkey          # a lightning address at your default mint (--mint <host> for another), paid for with a note
 notecase address                       # what it is
+notecase address keys                  # moves it to a fresh share of your keys (how a pre-LUD-26 name gets off its branch)
 notecase address unregister            # releases it again (--mint <host> to pick the mint)
 notecase inbox                         # opens what was sent to your npub, claims it at once
 notecase reclaim                       # takes back anything sent but not yet claimed
@@ -258,8 +259,8 @@ notecase heartwood inbox               # publishes the device's inbox relays (ki
 notecase heartwood trust <npub|nip05>  # the device stores notes from this sender without a hold (a mint's zap key)
 notecase heartwood pair [label]        # mints a bunker URI for another wallet, one hold; first pairing needs the cable
 notecase heartwood collect [<id>...]   # brings in what arrived at the device (or just the notes named)
-notecase heartwood address keys <name> # a name the DEVICE's key owns, paid to the device's own keys; a hold or two
-notecase heartwood address scan [name...] # payments to those keys whose wrap never reached the device
+notecase heartwood address custodial <name> # a name the DEVICE's key owns, taken off its keys; two holds
+notecase heartwood address scan        # payments to the device's keys whose wrap never reached it
 notecase heartwood recover             # a lost heartwood's notes, from its master's nsec or BIP-39 phrase
 notecase backup shares --threshold 2 --count 3
 notecase backup recover-key            # prompts for the word shares and prints the store key they rebuild
@@ -358,62 +359,69 @@ web wallet it is a switch in the header, and on the CLI it is `--offline`.
 ### A lightning address
 
 `notecase address claim <name>` takes `name@mint.example` at a mint that
-hands them out. The mint charges for it in its own notes, so the wallet
-cuts one out of your balance and the mint burns it; where the price is
-zero, nothing is cut at all. Moneyer binds the name to this wallet's Nostr
-key with a signed NIP-98 request, without an account. When the request
-points the name at a branch of keys, or takes it off one, it also carries
-that branch's proof, as below.
+hands them out, registered to a LUD-26 share of this wallet's keys: a
+watch-only `cx1` for that one name, `S/0'/2/n'` below the mint's root, never
+used for anything else. The mint mints every payment to the name onto the
+share's next key, and holds nothing that could spend it. The share proves
+it agrees with a BIP-340 signature by its own key over the mint's hostname,
+the name and the `cx1` itself, so a proof one mint has seen cannot be
+replayed at another, or around another share.
 
-The reference `lnurl-mint` has a different management route. A claim sends
-the wallet's `cx1` branch plus a signature from that branch's purpose-0 index-0 key
-over the name and the mint's own hostname, proving the wallet controls the
-keys it is registering; a proof one mint has seen cannot be replayed at
-another (LUD-25 test vector 2). Notecase detects the
-route with a reserved-name request that cannot write, then uses signed
-`POST /p/<name>` to register or update it. Its npub is included too, so the
-same name can resolve over NIP-05. `notecase address unregister [name]`
-releases it with the action-separated `DELETE` proof.
+Moneyer sells names at `POST /names`, binding each to this wallet's Nostr
+key with a signed NIP-98 request, without an account. It charges in its own
+notes, so the wallet cuts one out of your balance and the mint burns it;
+where the price is zero, nothing is cut at all. If the mint refuses the
+name, that note comes straight home under a fresh secret.
 
-When changing branches, Notecase retains the current public `cx1` and uses
-that old branch for the one update proof; only after the mint confirms the
-change does the replacement branch become the registered one locally. On
-Moneyer it first reads the branch on file off the name's own payRequest
-(`text/cpub`, or `text/xpub` before it), so a name still pointing at an older branch is moved with
-that branch's proof even where nothing about it was recorded here.
+Any other mint takes LUD-26's registration at the address itself (`POST`
+to `/.well-known/lnurlp/<name>`). No npub goes with it: a mint would
+publish it for NIP-05, tying the name to a Nostr identity. A mint that charges an address fee answers with an invoice, which
+the wallet pays by melting a note of that mint once it has checked it
+against the fee the mint advertises. One over it, or one the wallet cannot
+pay, is printed instead: the mint holds the name until it is paid from
+anywhere, or expires.
 
-On Moneyer, what arrives at the address is a bearer note sealed to that same
-key, so it is yours seconds after it is paid and the mint holds it for no
-longer than that. `notecase inbox` opens what has come in. A note that
-arrived as a zap carries the payer's own signed request with it, so the
-wallet can show who sent it and what they wrote - and it checks that
+A mint refuses a share it has ever accepted, so each name takes a fresh one,
+and one another device on the same words registered is skipped.
+
+- `notecase address keys` moves a name onto a fresh share with LUD-26's
+  `PUT`, proven both by the key on file and by the new share. That is how a
+  name registered before LUD-26, to a whole branch, gets off it. On Moneyer
+  it also points a name that pays no key yet at one, and `address custodial`
+  takes it off its keys again, back to gift-wrapped notes. Give the name,
+  `address keys <name>`, for one your key owns that this wallet never
+  claimed itself, such as a name the mint's operator set up for you.
+- `notecase address unregister [name]` releases it with LUD-26's `DELETE`,
+  proven by the key on file. On Moneyer a name its Nostr key owns stays
+  that key's and pays gift-wrapped notes again.
+- The wallet finds the key on file itself: the one recorded here, or, on a
+  device that never saw the name, whichever share or old branch of its
+  words or Nostr key the mint accepts.
+
+On Moneyer a payment to the name sends a wrap to that same key saying only
+which key the note is on, and `notecase inbox` derives it, checks the
+mint's certificate, and rotates the note onto a secret of its own at once.
+A note that arrived as a zap carries the payer's own signed request with it,
+so the wallet can show who sent it and what they wrote - and it checks that
 signature, so a mint cannot invent a sender.
 
-The reference mint does not send that Nostr wrap. Use `notecase address
-scan`, or **Check address for payments** in the web wallet, to find notes on
-the branch after payment.
+Other mints send nothing. `notecase address scan`, or **Check address for
+payments** in the web wallet, walks every share (until five in a row have
+nothing, as LUD-26 has it) and the old whole branches for what was paid,
+and takes it in. The note is at the mint either way.
 
-If the mint refuses the name, the note that was going to pay for it comes
-straight home under a fresh secret.
+**Paying a name at the same mint.** `notecase melt <sats> --to name@mint`
+first asks whether the address is a LUD-26 name at a mint this wallet holds
+enough at. If so it hands over a note of exactly that amount at the
+address's own callback, and the mint credits it to the payee's share free,
+with no Lightning payment at all. The address and its callback both have
+to be on that mint: a payRequest only claims where its notes are, and a
+note sent anywhere else could be taken. Anything else is paid by invoice,
+as before.
 
-**Paid to your own keys.** A wallet with recovery words hands the mint a
-`cx1` when it claims a name: a watch-only branch of its keys (LUD-25 Part
-2). A mint that takes it, moneyer 0.13 or later, stops holding anything
-that could spend what arrives. It credits each payment to your next key and
-sends a wrap saying only which key, and `notecase inbox` derives that key,
-checks the mint's certificate, and rotates the note onto a secret of its own
-at once. `address claim` says which way the mint took it.
-
-- `notecase address keys` moves a Moneyer name you already hold onto your keys;
-  `address custodial` moves it back. A reference-mint address has no custodial
-  payout mode; use `address unregister` to release it. Give the name, `address keys <name>`,
-  for one your key owns that this wallet never claimed itself, such as a
-  name the mint's operator set up for you.
-- `notecase address scan` walks the branch for anything whose wrap never
-  arrived. The note is at the mint either way.
-
-The mint can see every key on that branch, so it can link what is paid to
-the name, as it could before. What it can no longer do is spend it.
+The mint can see every key on a share, so it can link what is paid to that
+name, as it could before. It cannot link the name to anything else this
+wallet holds, and it cannot spend any of it.
 
 ### Letting something else spend from this wallet
 
@@ -592,26 +600,29 @@ into a known one, and it is what you show a mint to say what existed.
 `heartwood notes` falls back to it, marked as a past reading and dated, when
 the device does not answer.
 
-A name whose owner is the device's npub can be paid to the device's own keys
-instead (LUD-25 Part 2). `heartwood address keys <name>` asks the device for
-the watch-only branch it derives from that identity key, and for the branch's
-purpose-0 index-0 proof that it agrees (`heartwood_note_address_proof`), on one hold
-behind a card naming the action, the name and the mint. Notecase checks the
-proof before sending it on: it has to come from the branch expected and verify
+A name whose owner is the device's npub, registered before LUD-26 to the
+device's own branch, goes on being paid to the device's keys (LUD-25 Part
+2): the mint mints each payment to the device's next key, and the wrap
+carries no secret at all, only where to look. Only the device can spend
+those notes - this wallet's words cannot - and the device's recovery phrase
+brings them back. `heartwood address scan` walks the branch for payments
+whose wrap never arrived and has the device keep them; `heartwood collect`
+takes them, as it takes wraps.
+
+Mints now take only a LUD-26 share, and heartwood firmware still hands out
+its whole branch, so `heartwood address keys <name>` is refused until the
+firmware hands out shares. `heartwood address custodial <name>` takes a
+Moneyer name off the device's keys, and `heartwood address unregister
+<name>` releases one with LUD-26's `DELETE`. Each asks the device for the
+branch's unregister proof (`heartwood_note_address_proof`) on a hold behind
+a card naming the action, the name and the mint, and Notecase checks it
+before sending it on: it has to come from the branch expected and verify
 over the mint's own domain, or nothing is sent. Moneyer also has the device
-sign the ownership request, on a second hold; the reference mint takes the
-proof alone. `heartwood address unregister <name>` releases a reference-mint
-name the same way. Firmware from before the method is told to update rather
-than failing obscurely. Once registered, the mint mints each
-payment to the device's next key and the wrap carries no secret at all, only
-where to look. Only the device can spend those notes - this wallet's words
-cannot - and the device's recovery phrase brings them back. `heartwood
-address scan` walks the branch for payments whose wrap never arrived and has
-the device keep them; `heartwood collect` takes them, as it takes wraps. A
-name registered before heartwood 0.18.0-beta.24 still points at the branch
-older firmware handed out (`m/139'/1'`), where the mint goes on paying it:
-name it (`heartwood address scan <name>`) and the scan walks the branch the
-mint has on file for it too, which the updated device can still claim from.
+sign the request, on a second hold. Firmware from before the method is told
+to update rather than failing obscurely. A name registered before heartwood
+0.18.0-beta.24 still points at the branch older firmware handed out
+(`m/139'/1'`), which no mint publishes any more: `heartwood recover` finds
+what was paid there.
 
 If the heartwood itself is lost, `heartwood recover` rebuilds that branch
 from the master's nsec, or the BIP-39 phrase it was made from, prompted for

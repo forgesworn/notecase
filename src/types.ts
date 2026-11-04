@@ -301,11 +301,20 @@ export type WalletData = {
     // A lightning address claimed at a mint, as name@host. Payments to it
     // arrive as notes sealed to this wallet's Nostr key.
     lightningAddress?: string
-    // The branch the recorded address currently pays, at a reference mint or
-    // a moneyer. An update to another branch must be signed by this old
-    // branch's index-0 key, so retaining the public cx1 selects the right
-    // local private node without storing any additional secret.
+    // The cx1 the recorded address is registered to: a LUD-26 share, or the
+    // whole branch a name was registered to before LUD-26. Moving or
+    // releasing the name is signed by that key, so keeping the public cx1
+    // picks the right one without storing any further secret.
     lightningAddressCx1?: string
+    // The cx1 each name this wallet holds is registered to, by address, so a
+    // change to any of them is signed by the right key first time. Trying
+    // keys blind shows the mint which of them are one wallet's.
+    nameKeys?: Record<string, string>
+    // LUD-26: the next share to hand out at each mint, by its domain. A
+    // mint never accepts a share twice, so a share it took (or refused as
+    // "cx1 already used", taken from another device on this seed) is never
+    // offered again.
+    addressShares?: Record<string, number>
     // The hardware vault this wallet has met over the wire, by the identity
     // key it proved. Trust on first use: a different key later is either a
     // different device or a wiped one, and both deserve a stop.

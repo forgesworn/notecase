@@ -60,7 +60,7 @@ const HELP = `notecase - a case for Lightning bearer notes (LNURLcash, LUD-25)
   notecase nostr init | nostr show | nostr relays [set <url>...]
   notecase heartwood link <bunker://...> | heartwood notes | heartwood collect [<id>...]
   notecase heartwood send <id> --to <npub> | heartwood rename <id> <label> | heartwood unlink
-  notecase heartwood address keys <name> | address custodial <name> | address unregister <name> | address scan [name...] [--mint <host>]
+  notecase heartwood address keys <name> | address custodial <name> | address unregister <name> | address scan [--mint <host>]
   notecase heartwood recover [--npub <master npub>] [--mint <host>]   a lost heartwood's notes, from its nsec or phrase
   notecase backup export | backup shares [--threshold N --count M] | backup recover-key
   notecase backup nostr on|off|push|pull
@@ -974,6 +974,21 @@ const main = async (): Promise<void> => {
       if (/^\d+$/.test(first)) {
         const amountMsat = parseAmountMsat(first, values.msat)
         if (values.to) {
+          // LUD-26: an address registered at a mint this wallet holds notes
+          // at is paid there, free, with a note of exactly the amount.
+          // Notes picked by hand are spent as picked, over Lightning.
+          const internal =
+            values.to.includes('@') && !values.notes
+              ? await wallet.payAddressInternally(values.to, amountMsat, values.mint ? {mintHost: values.mint} : {})
+              : null
+          if (internal) {
+            console.log(
+              internal.ambiguous
+                ? `Sent ${sats(amountMsat)} to ${values.to} inside ${internal.host}, but the mint did not confirm it - \`notecase reclaim\` takes it back if the mint did not take it, and marks it taken if it did.`
+                : `Sent ${sats(amountMsat)} to ${values.to} inside ${internal.host}, free.`
+            )
+            return
+          }
           const {resolveLnurlPay} = await import('farrier-kit/lnurl')
           const resolved = await resolveLnurlPay({
             address: values.to,
@@ -1085,6 +1100,14 @@ const main = async (): Promise<void> => {
             : `Claiming ${wanted} is free at that mint.`
         )
         const claimed = await wallet.registerName({name: wanted, ...(values.mint ? {mintHost: values.mint} : {})})
+        if (claimed.feeInvoice) {
+          // LUD-26's address fee, not paid here: over what the mint
+          // advertised, or no note could pay it. The name is held until the
+          // invoice expires, and paying it from anywhere activates it.
+          console.log(`${claimed.address} is held for you. Pay its registration fee to activate it:`)
+          console.log(claimed.feeInvoice)
+          return
+        }
         console.log(
           claimed.toKeys
             ? `${claimed.address} is yours. Payments to it go to your own keys, which the mint never holds - \`notecase address scan\` finds any whose notification did not arrive.`
@@ -1109,7 +1132,7 @@ const main = async (): Promise<void> => {
           ...(wanted ? {name: wanted} : {}),
           ...(values.mint ? {mintHost: values.mint} : {})
         })
-        console.log(`${removed.address} is unregistered and can now be claimed again.`)
+        console.log(`${removed.address} is unregistered.`)
         return
       }
       if (sub === 'scan') {
@@ -1308,7 +1331,7 @@ const main = async (): Promise<void> => {
           // only the device can spend what arrives, and its recovery phrase
           // brings it back.
           if (!third) throw new WalletUsageError(`heartwood address ${arg} <name> [--mint <host>]`)
-          console.log('  the device will supply its watch-only branch and, on a hold, its proof for the change; a mint that binds the name to its npub will also ask it to sign the request')
+          if (arg === 'custodial') console.log('  hold the device button twice: once for the proof that clears its key, once to sign the request')
           const moved = await wallet.heartwoodNameToKeys(transport, third, {
             toKeys: arg === 'keys',
             ...(values.mint ? {mintHost: values.mint} : {})
@@ -1319,21 +1342,18 @@ const main = async (): Promise<void> => {
               : `${moved.address} now pays as notes sealed to the device's npub.`
           )
         } else if (sub === 'address' && arg === 'unregister') {
-          // A reference-mint name on the device's branch, released on the
-          // branch's own proof: one hold on the device.
+          // A name on the device's branch, released with LUD-26's DELETE on
+          // the branch's own proof: one hold on the device.
           if (!third) throw new WalletUsageError('heartwood address unregister <name> [--mint <host>]')
           console.log('  hold the device button to sign the release')
           const released = await wallet.heartwoodUnregisterName(transport, third, {
             ...(values.mint ? {mintHost: values.mint} : {})
           })
-          console.log(`${released.address} is unregistered and can now be claimed again.`)
+          console.log(`${released.address} is unregistered.`)
         } else if (sub === 'address' && arg === 'scan') {
           // The fallback for a wrap the device never saw: the note waits at
-          // the mint on the key it was paid to. Names given are looked up at
-          // the mint, so a name still on the branch older firmware handed
-          // out is walked there too.
-          const names = rest.slice(2)
-          const result = await wallet.heartwoodScanAddress(transport, values.mint, names.length ? {names} : {})
+          // the mint on the key it was paid to.
+          const result = await wallet.heartwoodScanAddress(transport, values.mint)
           for (const c of result.claimed) {
             console.log(`The device kept ${sats(c.amountMsat)} paid to its key #${c.index} (${c.id}).`)
           }
@@ -1381,7 +1401,7 @@ const main = async (): Promise<void> => {
           if (sent.relays.length) console.log(`  on: ${sent.relays.join(', ')}`)
           if (sent.failed.length) console.log(`  failed: ${sent.failed.join(', ')}`)
         } else {
-          console.log('heartwood link <bunker://...> | inbox | notes | collect [id...] | recover [--npub <npub>] | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | pair [label] | address keys|custodial <name> | address scan [name...] | unlink')
+          console.log('heartwood link <bunker://...> | inbox | notes | collect [id...] | recover [--npub <npub>] | send <id> --to <npub> | trust <npub|nip05> | untrust <npub> | trusted | pair [label] | address keys|custodial <name> | address scan | unlink')
         }
       } finally {
         transport.close()
