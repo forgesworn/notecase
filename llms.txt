@@ -83,7 +83,8 @@ notecase send <sats> --offline [--overpay] [--notes <id,..>] [--strip-sig] | rec
 notecase address                                  # show the claimed name
 notecase address claim <name> [--mint <host>]     # --mint optional: the default mint
 notecase address unregister [<name>] [--mint <host>]
-notecase address keys [<name>] | custodial [<name>] | scan [--mint <host>]
+notecase address keys [<name>] | custodial [<name>] | scan [--mint <host>]   # keys: move to a fresh share (PUT)
+notecase melt <sats> --to <name@mint>             # a LUD-26 name at a mint you hold notes at is paid there, free (internal transfer)
 notecase inbox | reclaim [id]
 notecase request <sats> [--memo <text>] [--wait <seconds>] [--mint <host>] | requests [--all] | pay <lnurlcashreq1...>
 notecase balance | list [--all] | reconcile | verify <note>
@@ -102,7 +103,7 @@ notecase backup nostr on|off|push|pull   # the mint list, under a key from the s
 notecase sync [on|off|status]   # notes themselves on relays, several devices, one seed
 notecase heartwood link <bunker://...> | notes | collect [<id>...] | send <id> --to <npub> | rename <id> <label> | unlink
 notecase heartwood trust <npub|hex|nip05> | untrust <npub|hex|nip05> | trusted | inbox | pair [label]
-notecase heartwood address keys|custodial|unregister <name> | address scan [name...] [--mint <host>]   # a name the DEVICE's key owns, paid to the device's keys
+notecase heartwood address custodial|unregister <name> | address scan [--mint <host>]   # a name the DEVICE's key owns, on its pre-LUD-26 branch (keys is refused until the firmware hands out shares)
 notecase heartwood recover [--npub <npub>] [--mint <host>]   # a lost heartwood's notes, from its nsec or BIP-39 phrase
 notecase device provision [--mint <host>] [--port <path>]   # set a mint up on a locker, over the cable
 notecase device ports|info|mints|forget [--port <path>] [--mint <host>]
@@ -177,7 +178,7 @@ A k1 is a spend of Q:
             any other script is looked up by passing the cw1 itself to the
             mint, which judges it, and cannot be taken offline
 cs1 certificates: recoverable ECDSA over sha256(sha256("Lightning Signed
-Message:LNURLcash:" + amount_msat + ":" + hex(Q))), for every note, as
+Message:LNURLcash:" + domain + ":" + amount_msat + ":" + hex(Q))), for every note, as
 cs1<amount> (the BOLT11 amount suffix in the HRP), read from a note URL's c=
 (sig= before it) and a mint's c/c2. A mint from before that still certifies
 a bearer note over its h instead, as 65 bytes of hex or the fixed-HRP cs1
@@ -185,17 +186,21 @@ a bearer note over its h instead, as 65 bytes of hex or the fixed-HRP cs1
 (either recovery-id layout), are kept as sent, and travel as sig= beside
 amount=. On a ck1 or cw1, or over anything but this note's h, they verify
 nowhere; a cs1<amount> over h verifies nowhere either.
+(One made before the domain was bound, without it, is still read.)
 Offline receive/verify also checks the spend opens Q at the note URL's domain.
-Address proofs: BIP-340 by the branch's sk_0 over sha256("LNURLcash:register:"
-+ domain + ":" + name) (or ":unregister:"), domain = the SERVICE's hostname
-(spec vector 2); sent as ?sig= on the reference /p/<name> and as "sig" in
-moneyer's POST /names body whenever it sets or clears a cx1.
+Address proofs (LUD-26): BIP-340 by the share's own key p over
+sha256("LNURLcash:register:" + domain + ":" + name + ":" + cx1), ":update:"
+the same by the key on file binding the new cx1, ":unregister:" + domain + ":"
++ name with no cx1; domain = the SERVICE's hostname, no port. Sent as form
+fields cx1/sig/newsig on POST/PUT/DELETE /.well-known/lnurlp/<name>, and as
+"sig" in moneyer's POST /names body. A whole branch from before LUD-26 signs
+its PUT or DELETE with its own key x(P).
 Stored ids move from sha256(k1) to hex(Q) on read (openWallet, the web store,
 importBackup, new Wallet), with replaces, melts[].noteId, requests[].paidBy
 and settings.noteSyncPushed. Deterministic and idempotent. The relay store
 matches a record filed under an old id to its note, and the next push files
-it under Q. The primitives come from @lnurlcash/kit 0.20; src/spend.ts keeps
-only wallet policy (note ids, offline spend checks, the pre-purpose ladder).
+it under Q. The primitives come from @lnurlcash/kit 0.21; src/spend.ts keeps
+only wallet policy (note ids, offline spend checks).
 
 ## Library API
 
@@ -270,25 +275,39 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
       close(): void
     The CLI builds one from nostr-tools' SimplePool with poolTransport() (also
     not exported); a library user writes the same thin wrapper
-  namePriceMsat(host?), registerName({name, mintHost?}) -> {address, paidMsat, toKeys},
-  lightningAddress(), payNameToKeys(toKeys?, {name?, mintHost?}), unregisterName({name?, mintHost?}), addressCx1(host), scanAddress(host?, {gap?})
-  - with a seed, registerName sends a cx1 (the spec's m/139'/d1..d4, as lnurl-wallet); a
-    moneyer >=0.13 then pays the name to the wallet's keys, and the inbox opens the
-    index-only wrap (/w?p=<cp1>&c=<amount-bearing-cs1>&i=; sig= before c=) by deriving the
-    key at that index on LUD-25's Lightning Address purpose (2), or the ladder from before
-    purposes for a note paid under it, and rotating
-  - moneyer's POST /names carries "sig" whenever it sets or clears a cx1: set is proven
-    by the branch on file (read off the name's payRequest text/cpub or text/xpub, else the one
-    recorded here), or by the new branch when none is; clear by the branch on file
-  - the reference lnurl-mint is detected with a reserved-name probe, then takes signed
-    POST/DELETE /p/{username} requests. The signature proves control of the branch's
-    purpose-0 index-0 key, over the mint's own hostname; an update is signed by the branch
-    currently recorded, then the new public cx1 becomes current locally. An optional npub also makes the name NIP-05. It sends no wrap, so
-    address scan (also available in the web settings) finds payments
+  namePriceMsat(host?), registerName({name, mintHost?}) -> {address, paidMsat, toKeys, feeInvoice?},
+  lightningAddress(), payNameToKeys(toKeys?, {name?, mintHost?}), unregisterName({name?, mintHost?}), addressCx1(host), scanAddress(host?, {gap?}),
+  payAddressInternally(address, amountMsat) -> {note, host, ambiguous} | null
+  - a name is registered to a LUD-26 share: S/0'/2/n' below the mint's root S =
+    m/139'/d1..d4 (domain without port), from the words or, without, from the Nostr
+    key's seed; cx1 = chaincode || P, 65 bytes. One share per name, counted per domain
+    in settings.addressShares; "cx1 already used" skips to the next. addressCx1 is the
+    next share to hand out
+  - moneyer (namePriceMsat in its discovery document, or an unsigned POST /names
+    answered with its NIP-98 refusal): POST /names, NIP-98 by the Nostr key, {name,
+    note?, cx1, sig}; custodial sends cx1: null with an unregister proof by the key on
+    file. Any other mint: LUD-26 POST /.well-known/lnurlp/<name> (no npub: it
+    would be published for NIP-05); an address fee's pr is melted from a note of that mint only if it is no
+    more than the advertised third Mint fees value, else handed back as feeInvoice
+  - a cx1 on file is never overwritten: payNameToKeys moves with PUT (sig by the key
+    on file, newsig by the new share), unregisterName uses DELETE. The key on file is
+    the recorded settings.lightningAddressCx1, else whichever share or old whole branch
+    the mint accepts (it refuses the others' proofs)
+  - moneyer wraps say only where the note is (/w?p=<cp1>&c=<cs1>&i=); the inbox derives
+    the key at that index on each share and old branch, signs a ck1 and rotates. Other
+    mints send nothing: scanAddress walks shares (stopping after 5 empty in a row) and
+    the old branches (LUD-25 purpose 2 and the ladder before purposes), gap 20
+  - payAddressInternally: a payee whose payRequest has a withdrawLink on a mint this
+    wallet holds enough at, and no commentAllowed (isRegisteredAddress), whose address
+    host and callback are both that mint's own, is sent an exact note at
+    callback?amount=&k1=; the mint credits the payee's share free. "pending", "already
+    in use" or no answer leave it sent (ambiguous), for reclaim. Null means pay it by
+    invoice
+  - settings.nameKeys records the cx1 each name is on, so a change is signed by the
+    right key first; trying keys blind shows the mint they are one wallet's
   heartwoodNameToKeys(t, name, {toKeys?, mintHost?}), heartwoodUnregisterName(t, name, {mintHost?}),
-  heartwoodScanAddress(t, host?, {gap?, names?}) -> {claimed, waiting, scanned} (waiting: keys the
-    firmware cannot derive - purpose 2 before 0.18.0-beta.24, the pre-purpose ladder since;
-    names: walk the cx1 the mint has on file for each name too, e.g. the superseded branch),
+  heartwoodScanAddress(t, host?, {gap?}) -> {claimed, waiting, scanned} (waiting: keys the
+    firmware cannot derive - purpose 2 before 0.18.0-beta.24, the pre-purpose ladder since),
   collectFromHeartwood(t, onProgress?, {ids?}), recoverHeartwoodNotes(input, {expectedPubkey, mintHost?, passphrase?, gap?})
   heartwoodNotes(t), heartwoodNotesOrLastSeen(t) -> {live:true, notes} | {live:false, notes, at, reason},
   heartwoodHeld(), heartwoodInventory() -> {notes, at}
@@ -299,24 +318,25 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     dated by settings.heartwood.held.at. Nothing spendable ever enters it; it backs up
     and restores, and an older backup with none restores unchanged. A collected note
     leaves it, and a shorter reading replaces the last one rather than merging
-  - notes and names on the pre-2026-09-16 m/139'/1'/d1..d4 branches (words and Nostr key)
-    are still received, scanned and proven for; they are never handed out again, and
-    payNameToKeys moves such a name onto the spec's branch
+  - notes and names on the whole branches from before LUD-26 (m/139'/d1..d4 and the
+    pre-2026-09-16 m/139'/1'/d1..d4, words and Nostr key, host with port) are still
+    received, scanned and proven for; they are never handed out again, and
+    payNameToKeys moves such a name onto a share
   - a heartwood derives its branch from the identity key that owns the name
     (HMAC-SHA256(key, "LNURLcash/nostr-seed") -> m/139'/d1..d4 since firmware
-    0.18.0-beta.24, m/139'/1'/d1..d4 before; a words-less wallet does the same), hands over the
-    cx1 (heartwood_note_address), and signs its purpose-0 index-0 proof on a hold (firmware
-    from before purposes signs with its unpurposed index 0, which Notecase refuses to send)
+    0.18.0-beta.24, m/139'/1'/d1..d4 before), hands over the 64-byte whole-branch cx1
+    (heartwood_note_address), and signs its purpose-0 index-0 unregister proof on a hold
     (heartwood_note_address_proof {host, name, action} -> {ok, host, domain, name, action,
-    cx1, sig}). Notecase refuses to send a proof whose cx1 is not the branch expected or
-    whose sig does not verify against that cx1's pk_0 over the domain-bound digest.
-    The device signs Moneyer's NIP-98 itself; the reference /p/<name> takes the proof alone,
-    and heartwoodUnregisterName(t, name, {mintHost?}) releases one there. Firmware that does
-    not know the method gets "update heartwood to register this name". Only the device
-    can spend what arrives. A scan has the device claim a key (heartwood_note_claim
-    {host, index, amount_msat, p, purpose, c}; the device finds p on its current or its
-    superseded branch, and refuses a key it does not hold)
-  - with no recovery words the wallet's own branch comes from its Nostr key the same way
+    cx1, sig}). Mints take only shares now, so heartwoodNameToKeys with toKeys is refused
+    before the device is asked; custodial (moneyer, the device signs the NIP-98) and
+    heartwoodUnregisterName (LUD-26 DELETE) still work. Notecase refuses to send a proof
+    whose cx1 is not the branch expected or whose sig does not verify against that cx1's
+    pk_0 over the domain-bound digest. Firmware that does not know the method gets
+    "update heartwood to release this name". Only the device can spend what arrives. A
+    scan has the device claim a key (heartwood_note_claim {host, index, amount_msat, p,
+    purpose, c}; the device finds p on its current or its superseded branch, and refuses
+    a key it does not hold); a name on the superseded branch is found by
+    recoverHeartwoodNotes, since no mint publishes its cx1 any more
   - recoverHeartwoodNotes reads a heartwood master's secret from an nsec or BIP-39 phrase
     with the internal identityCandidates (see "Not exported"); typed recovery words are
     not read yet

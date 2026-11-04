@@ -19,16 +19,32 @@ import {
   deriveLegacyCashAddressNode,
   deriveNostrAddressNode,
   deriveLegacyNostrAddressNode,
-  deriveNoteSecretKey,
   cashNodeToCx1,
-  decodeCx1,
-  deriveNotePubkey,
-  NOTE_PURPOSE_WALLET,
-  NOTE_PURPOSE_LIGHTNING_ADDRESS,
   type NotePurpose,
+  type Cx1,
+  LEGACY_NOTE_PURPOSE_WALLET,
+  LEGACY_NOTE_PURPOSE_LIGHTNING_ADDRESS,
+  canPayInternally,
+  decodeBolt11AmountMsat,
+  decodeLegacyCx1,
+  deriveLegacyNotePubkey,
+  deriveLegacyNoteSecretKey,
+  deriveNostrCashSeed,
+  deriveServiceRoot,
+  deriveShareNode,
+  encodeCx1,
+  encodeLegacyCx1,
+  isRegisteredAddress,
+  registerAddress,
+  sendNoteToAddress,
+  serviceDomainOf,
+  shareCx1,
+  unregisterAddress,
+  unregisterAddressWithProof,
+  updateAddress,
+  type CashNode,
   encodeCk1,
   encodeCp1,
-  encodeCx1,
   fetchNoteInfoByHash,
   fetchNoteInfoByPubkey,
   signNoteOwnership,
@@ -71,6 +87,7 @@ import {
   type LnurlcashOptions,
   type MintFee
 } from './lnurlcash.js'
+import {HDKey} from '@scure/bip32'
 import {bytesToHex, hexToBytes, randomBytes} from '@noble/hashes/utils.js'
 import {schnorr} from '@noble/curves/secp256k1.js'
 import {tryDecodeBolt11} from 'farrier-kit/bolt11'
@@ -200,10 +217,48 @@ export type CheckReport = {
 // sweep of a full case quick, few enough that no mint sees a burst.
 const CHECK_CONCURRENCY = 4
 
-// The ladders a mint can have paid this wallet's names on: LUD-25's
-// Lightning Address purpose, then the single ladder from before purposes.
-// Purposes 0 and 1 are a wallet's own notes, which a name never receives.
-const ADDRESS_PURPOSES: readonly NotePurpose[] = [NOTE_PURPOSE_LIGHTNING_ADDRESS, null]
+// The ladders a mint paid this wallet's names on before LUD-26, off the
+// whole branch a name was registered to: the Lightning Address purpose,
+// then the single ladder from before purposes. Purposes 0 and 1 are a
+// wallet's own notes, which a name never receives.
+const ADDRESS_PURPOSES: readonly NotePurpose[] = [LEGACY_NOTE_PURPOSE_LIGHTNING_ADDRESS, null]
+
+// ---- LUD-26 shares ----
+
+// The account every share is made on, as most wallets only ever use one.
+const ADDRESS_ACCOUNT = 0
+// LUD-26's discovery gap for shares: past five in a row with nothing paid,
+// a share is lost to recovery, so none is made further out than that.
+const SHARE_GAP = 5
+// How many times a lookup answered "rate limited" is asked again.
+const RATE_LIMIT_TRIES = 5
+const NO_ADDRESS_KEYS = 'This wallet has no recovery words and no Nostr key, so it has no keys to be paid to.'
+// A mint refusing a proof because it is not by the key on file: dni's
+// reference mint's words ("Invalid ownership signature."), conformance's
+// mock mint's ("invalid signature") and moneyer's at POST /names.
+const WRONG_KEY = /invalid (ownership )?signature|needs "sig"/i
+
+// Share n at a mint: its cx1, as decoded and as sent, its key p (which signs
+// every proof the share gives) and its BIP-32 node, whose children are the
+// keys the mint credits.
+type AddressShare = {share: number; cx1: Cx1; encoded: string; key: Uint8Array; node: HDKey}
+// A cx1 a name may be registered to, and the key that proves it.
+type RegisteredKey = {cx1: string; key: Uint8Array}
+type NameAnswer = {status?: string; reason?: string; cx1?: string | null; paidMsat?: unknown}
+
+// A mint's reason for a refusal, as the kit or this wallet carries it.
+const reasonOf = (err: unknown): string =>
+  err instanceof ServiceRejectedError ? err.reason : err instanceof Error ? err.message : ''
+
+// Note `index` of a share, or null for the vanishingly rare index BIP-32
+// derives no key at (a mint skips it too).
+const shareNoteKey = (share: HDKey, index: number): Uint8Array | null => {
+  try {
+    return share.deriveChild(index).privateKey
+  } catch {
+    return null
+  }
+}
 
 // The offline cash drawer. LUD-25's whole offline story assumes the payer
 // can hand over the right amount without touching the mint, and a wallet
@@ -252,6 +307,8 @@ export class Wallet {
   readonly data: WalletData
   private readonly persist: () => Promise<void>
   private readonly opts: LnurlcashOptions
+  // Which mints keep moneyer's POST /names, by origin (namesDoor).
+  private readonly namesDoors = new Map<string, boolean>()
 
   constructor(data: WalletData, persist: () => Promise<void>, opts: LnurlcashOptions) {
     this.data = data
@@ -514,9 +571,9 @@ export class Wallet {
     signature: string
   ): {valid: boolean; historic: boolean} {
     const pinned = this.data.pubkeyPins[host]
-    if (pinned && verifyNoteCertificate(k1, amountMsat, signature, pinned)) return {valid: true, historic: false}
+    if (pinned && verifyNoteCertificate(k1, host, amountMsat, signature, pinned)) return {valid: true, historic: false}
     for (const retired of this.pubkeyHistoryFor(host)) {
-      if (verifyNoteCertificate(k1, amountMsat, signature, retired)) return {valid: true, historic: true}
+      if (verifyNoteCertificate(k1, host, amountMsat, signature, retired)) return {valid: true, historic: true}
     }
     return {valid: false, historic: false}
   }
@@ -550,146 +607,154 @@ export class Wallet {
     return {url, body: body ?? {}}
   }
 
-  // The reference lnurl-mint manages addresses at POST/DELETE /p/{username}.
-  // There is no advertised capability bit, so probe its reserved `_` identity
-  // with values which can never reach storage: an enabled route rejects the
-  // name before decoding the branch or proof, while a disabled/absent route
-  // says Not found. v0.8.1 permits this cross-origin POST without a preflight.
-  private async referenceRegistrationServer(discoveryUrl: string): Promise<string | null> {
-    try {
-      const fetchImpl = this.opts.fetch ?? fetch
-      const probe = new URL('/p/_', discoveryUrl)
-      probe.searchParams.set('cx1', '_')
-      probe.searchParams.set('sig', '00'.repeat(65))
-      const response = await fetchImpl(probe, {
-        method: 'POST',
-        headers: {accept: 'application/json'},
-        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
-      })
-      const answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; detail?: string}
-      const reason = answer.reason ?? answer.detail ?? ''
-      return answer.status === 'ERROR' && reason.includes('Invalid or reserved username') ? discoveryUrl : null
-    } catch {
-      return null
-    }
-  }
-
-  // LUD-25's address proof for `name` at the mint `server` names: the
-  // branch's index-0 key over sha256("LNURLcash:<action>:<domain>:<name>"),
-  // hex. The domain is the mint's own hostname, never its scheme or port, so
-  // a proof one mint has seen cannot be replayed at another.
-  private addressProof(indexZeroSecretKey: Uint8Array, action: AddressProofAction, server: string, name: string): string {
-    return bytesToHex(signAddressProof(indexZeroSecretKey, action, spendDomainOf(server), name))
-  }
-
-  // `proof` is the register proof, hex, by whichever branch has to give it:
-  // this wallet's own (addressProof) or a heartwood's (deviceAddressProof).
-  private async registerReferenceName(
-    server: string,
-    name: string,
-    cx1: string,
-    proof: string,
-    npub?: string
-  ): Promise<void> {
-    const registration = new URL(`/p/${encodeURIComponent(name)}`, server)
-    registration.searchParams.set('cx1', cx1)
-    registration.searchParams.set('sig', proof)
-    if (npub) registration.searchParams.set('npub', npub)
-    const fetchImpl = this.opts.fetch ?? fetch
-    const response = await fetchImpl(registration, {
-      method: 'POST',
-      headers: {accept: 'application/json'},
-      signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
-    })
-    const answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; detail?: string}
-    if (!response.ok || answer.status !== 'OK') {
-      throw new WalletUsageError(answer.reason ?? answer.detail ?? `${registration.host} refused (${response.status}).`)
-    }
-  }
-
-  private async unregisterReferenceName(server: string, name: string, proof: string): Promise<void> {
-    const registration = new URL(`/p/${encodeURIComponent(name)}`, server)
-    registration.searchParams.set('sig', proof)
-    const fetchImpl = this.opts.fetch ?? fetch
-    const response = await fetchImpl(registration, {
-      method: 'DELETE',
-      headers: {accept: 'application/json'},
-      signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
-    })
-    const answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; detail?: string}
-    if (!response.ok || answer.status !== 'OK') {
-      throw new WalletUsageError(answer.reason ?? answer.detail ?? `${registration.host} refused (${response.status}).`)
-    }
-  }
-
-  // The cx1 a mint has on file for `name`, as the name's own payRequest
-  // publishes it: LUD-25 has it carried as text/cpub (text/xpub before), for
-  // internal transfers.
-  // Null when it names none, or the mint cannot be asked.
-  private async branchOnFile(discoveryUrl: string, name: string): Promise<string | null> {
-    try {
-      const url = new URL(`/.well-known/lnurlp/${encodeURIComponent(name)}`, discoveryUrl).toString()
-      const hint = (await fetchPayRequest(url, this.opts)).internalTransfer
-      return hint ? encodeCx1(hint.cx1.pubkeyXOnly, hint.cx1.chainCode) : null
-    } catch {
-      return null
-    }
-  }
-
-  // The proof a request that sets or clears a name's cx1 carries. LUD-25 has
-  // every such change proven by a branch, never asserted: setting is proven
-  // by the branch on file, or by the new one when there is none, and clearing
-  // by the branch on file. A branch this wallet holds signs here; a linked
-  // heartwood's own branch is asked to sign on the device. Without either
-  // nothing is sent, and a mint that wants a proof says so while one that
-  // asks for none is none the wiser.
+  // ---- LUD-26 shares ----
   //
-  // `assumed` is the branch taken as on file when the mint publishes none and
-  // nothing is recorded here: a release has to be proven by some branch, and
-  // a heartwood releasing its own name can only prove its own.
-  private async nameProof(
-    entry: MintEntry,
-    discoveryUrl: string,
-    name: string,
-    cx1: string | null,
-    device?: {client: HeartwoodClient; cx1: string},
-    assumed?: string
-  ): Promise<string | undefined> {
-    const recorded =
-      this.data.settings.lightningAddress === `${name}@${entry.host}` ? this.data.settings.lightningAddressCx1 : undefined
-    const onFile = (await this.branchOnFile(discoveryUrl, name)) ?? recorded ?? assumed ?? null
-    const signer = cx1 === null ? onFile : (onFile ?? cx1)
-    if (!signer) return undefined
-    const action: AddressProofAction = cx1 === null ? 'unregister' : 'register'
-    const registration = this.addressRegistrations(entry.host).find(candidate => candidate.cx1 === signer)
-    if (registration) return this.addressProof(registration.indexZeroSecretKey, action, discoveryUrl, name)
-    if (device && signer === device.cx1) {
-      return this.deviceAddressProof(device.client, entry.host, discoveryUrl, name, action, device.cx1)
-    }
-    return undefined
+  // A name is registered to a share: S/0'/2/n' below the mint's root S,
+  // exported as its 65-byte cx1 (chaincode || P). The mint auto-mints each
+  // payment to the share's next key, S/0'/2/n'/i, and sees nothing else of
+  // the wallet. One share per name, never reused: a mint refuses a share it
+  // has ever accepted.
+
+  // The roots this wallet derives from, the one it hands shares out on
+  // first: its recovery words, else its Nostr key's own (the root the
+  // superseded deriveNostrAddressNode branch hangs off).
+  private cashRoots(): CashNode[] {
+    const roots: CashNode[] = []
+    const root = this.cashRoot()
+    if (root) roots.push(root)
+    const identity = this.nostrIdentity()
+    if (identity) roots.push(deriveCashRoot(deriveNostrCashSeed(identity.secret)))
+    return roots
   }
 
-  // The same proof, from a heartwood: its branch at `host` signs on the
-  // device, behind a card. Nothing it returns is passed on unchecked. It has
-  // to be the branch this wallet expects, and its signature has to verify
-  // against that branch's pk_0 over the digest this wallet builds itself, for
-  // the domain the request is going to - so a device answering for another
-  // branch, name, action or mint is caught here rather than by the mint.
-  private async deviceAddressProof(
+  // LUD-26's S for `host` under each root.
+  private serviceRoots(host: string): HDKey[] {
+    return this.cashRoots().map(root =>
+      deriveServiceRoot(new HDKey({privateKey: root.privateKey, chainCode: root.chainCode}), host)
+    )
+  }
+
+  private shareOn(root: HDKey, share: number): AddressShare {
+    const node = deriveShareNode(root, ADDRESS_ACCOUNT, share)
+    const cx1 = shareCx1(node)
+    return {share, cx1, encoded: encodeCx1(cx1), key: node.privateKey!, node}
+  }
+
+  private nextShare(host: string): number {
+    return this.data.settings.addressShares?.[serviceDomainOf(host)] ?? 0
+  }
+
+  private spendShare(host: string, share: number): void {
+    const shares = (this.data.settings.addressShares ??= {})
+    const domain = serviceDomainOf(host)
+    shares[domain] = Math.max(shares[domain] ?? 0, share + 1)
+  }
+
+  // Offers `send` fresh shares until the mint takes one. A share the mint
+  // refuses as "cx1 already used" was registered from another device on
+  // this seed, so it is skipped for good; one refused for any other reason
+  // was never accepted, and stays the next to offer.
+  private async withFreshShare<T>(host: string, send: (share: AddressShare) => Promise<T>): Promise<{share: AddressShare; result: T}> {
+    const root = this.serviceRoots(host)[0]
+    if (!root) throw new WalletUsageError(NO_ADDRESS_KEYS)
+    for (let attempt = 1; ; attempt++) {
+      const share = this.shareOn(root, this.nextShare(host))
+      try {
+        const result = await send(share)
+        this.spendShare(host, share.share)
+        await this.persist()
+        return {share, result}
+      } catch (err) {
+        if (!/cx1 already used/i.test(reasonOf(err))) throw err
+        this.spendShare(host, share.share)
+        await this.persist()
+        if (attempt >= SHARE_GAP) throw err
+      }
+    }
+  }
+
+  // Every key this wallet could have registered a name to at `host`, as the
+  // cx1 a mint holds and the key that proves it: the one recorded for
+  // `address` first, then each share handed out (and a few past the counter,
+  // for one another device on this seed handed out), then the whole
+  // branches names were registered to before LUD-26. A whole branch proves
+  // by its own key x(P), as LUD-26 has a mint read one.
+  private registeredKeys(host: string, address?: string): RegisteredKey[] {
+    const keys: RegisteredKey[] = []
+    const upTo = this.nextShare(host) + SHARE_GAP
+    for (const root of this.serviceRoots(host)) {
+      for (let share = 0; share < upTo; share++) {
+        const {encoded, key} = this.shareOn(root, share)
+        keys.push({cx1: encoded, key})
+      }
+    }
+    for (const node of this.addressNodes(host)) {
+      keys.push({cx1: encodeLegacyCx1(cashNodeToCx1(node)), key: node.privateKey})
+    }
+    const recorded = address
+      ? (this.data.settings.nameKeys?.[address] ??
+        (this.data.settings.lightningAddress === address ? this.data.settings.lightningAddressCx1 : undefined))
+      : undefined
+    const first = keys.findIndex(candidate => candidate.cx1 === recorded)
+    if (first > 0) keys.unshift(...keys.splice(first, 1))
+    return keys
+  }
+
+  // Runs `change` with each key in turn until the mint accepts one as the
+  // key on file. A mint says which by refusing the others' proofs. Every
+  // refused proof is a signature by another key of this wallet's, which
+  // tells the mint those keys are one holder's, so the key recorded for the
+  // name goes first and the rest are tried only when nothing is recorded
+  // or the mint has moved on from it (another device on these words).
+  private async withKeyOnFile<T>(
+    host: string,
+    address: string,
+    change: (onFile: RegisteredKey) => Promise<T>
+  ): Promise<{onFile: RegisteredKey; result: T}> {
+    let refused: unknown = null
+    for (const onFile of this.registeredKeys(host, address)) {
+      try {
+        return {onFile, result: await change(onFile)}
+      } catch (err) {
+        if (!WRONG_KEY.test(reasonOf(err))) throw err
+        refused ??= err
+      }
+    }
+    throw new WalletUsageError(
+      `${address} is registered to a key this wallet does not hold${refused ? ` (${reasonOf(refused)})` : ''}: another seed, or someone else, registered it.`
+    )
+  }
+
+  // The mint's own origin, where LUD-26 has its addresses managed.
+  private addressServer(entry: MintEntry): string {
+    return new URL(entry.payUrl).origin
+  }
+
+  // LUD-26's address fee, the third value of the mint's `Mint fees`, or 0.
+  private async addressFeeMsat(entry: MintEntry): Promise<number> {
+    const fee = (await fetchPayRequest(entry.payUrl, this.opts)).mintFee?.addressFeeMsat
+    return typeof fee === 'number' && Number.isSafeInteger(fee) && fee > 0 ? fee : 0
+  }
+
+  // A heartwood's unregister proof for `name`: its branch at `host` signs on
+  // the device, behind a card. Nothing it returns is passed on unchecked. It
+  // has to be the branch this wallet expects, and its signature has to
+  // verify against that branch's index-0 key (what moneyer took from a
+  // whole branch) over the digest this wallet builds itself, for the domain
+  // the request is going to - so a device answering for another branch,
+  // name or mint is caught here rather than by the mint.
+  private async deviceUnregisterProof(
     client: HeartwoodClient,
     host: string,
     server: string,
     name: string,
-    action: AddressProofAction,
     expectedCx1: string
   ): Promise<string> {
-    const proof = await client.addressProof(host, name, action)
+    const proof = await client.addressProof(host, name, 'unregister')
     if (proof.cx1 !== expectedCx1) {
-      throw new HeartwoodError(
-        `The device signed for a different branch than the one ${name} ${action === 'register' ? 'is being registered to' : 'pays'}, so its proof is not sent.`
-      )
+      throw new HeartwoodError(`The device signed for a different branch than the one ${name} pays, so its proof is not sent.`)
     }
-    const branch = decodeCx1(proof.cx1)
+    const branch = decodeLegacyCx1(proof.cx1)
     let valid = false
     try {
       valid =
@@ -697,18 +762,16 @@ export class Wallet {
         /^[0-9a-f]{128}$/i.test(proof.sig) &&
         schnorr.verify(
           hexToBytes(proof.sig),
-          addressProofDigest(action, spendDomainOf(server), name),
+          addressProofDigest('unregister', spendDomainOf(server), name),
           // Firmware from before purposes signs with its unpurposed index 0,
           // which no current mint accepts, so that proof stops here too.
-          deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, NOTE_PURPOSE_WALLET, 0)
+          deriveLegacyNotePubkey(branch.pubkeyXOnly, branch.chainCode, LEGACY_NOTE_PURPOSE_WALLET, 0)
         )
     } catch {
       valid = false
     }
     if (!valid) {
-      throw new HeartwoodError(
-        `The device's proof does not verify for ${action === 'register' ? 'registering' : 'releasing'} ${name} at ${spendDomainOf(server)}, so it is not sent.`
-      )
+      throw new HeartwoodError(`The device's proof does not verify for releasing ${name} at ${spendDomainOf(server)}, so it is not sent.`)
     }
     return proof.sig.toLowerCase()
   }
@@ -818,27 +881,14 @@ export class Wallet {
     return seed ? deriveCashRoot(hexToBytes(seed)) : null
   }
 
-  // LUD-25 Part 2: the branch a mint pays this wallet's name to. With
-  // recovery words it is the spec's path m/139'/d1..d4 from them, the same
-  // branch lnurl-wallet derives from the same words.
-  // Without, it is the same path from this wallet's Nostr key
-  // (deriveNostrAddressNode, exactly as a heartwood derives it), so a wallet
-  // that never made words is paid to keys of its own too, and its Nostr key
-  // is what finds them again. Kept for receiving only: what arrives on it is
-  // rotated onto the secrets above, which the mint holding the branch's cx1
-  // cannot enumerate.
-  private addressNode(host: string): ReturnType<typeof deriveCashAddressNode> | null {
-    return this.addressNodes(host)[0] ?? null
-  }
-
-  // Every branch this wallet could have been paid on at a mint, the one it
-  // hands out first. A wallet that took a name before it had words was paid
-  // on its Nostr key's branch, and it still holds that key.
-  //
-  // The spec's m/139'/d1..d4 branches come first, so a name is only ever
-  // handed out on one. The m/139'/1' branches every wallet used before
-  // 2026-09-16 follow: notes were paid to them and names still point at
-  // them, so they are walked and signed for, never handed out again.
+  // The whole branches a name was registered to before LUD-26, kept for
+  // receiving and for moving a name off them, never handed out again. The
+  // spec's m/139'/d1..d4 (from the words, or from the Nostr key exactly as a
+  // heartwood derives it, for a wallet without words), then the m/139'/1'
+  // branches every wallet used before 2026-09-16. Notes were paid to all of
+  // them, and a name not yet moved to a share is still paid on one. What
+  // arrives is rotated onto this wallet's own secrets, which the mint
+  // holding the branch's cx1 cannot enumerate.
   private addressNodes(host: string): ReturnType<typeof deriveCashAddressNode>[] {
     const root = this.cashRoot()
     const identity = this.nostrIdentity()
@@ -850,67 +900,55 @@ export class Wallet {
     return nodes
   }
 
-  // The watch-only export of that branch, or null for a wallet with neither
-  // words nor a Nostr key.
+  // The share the next name at `host` is registered to, as its cx1, or null
+  // for a wallet with neither words nor a Nostr key. Only a share is ever
+  // handed out: the whole branch's cx1 a name took before LUD-26 let anyone
+  // who fetched the payRequest watch every key-path note of the wallet.
   addressCx1(host: string): string | null {
-    const node = this.addressNode(host)
-    if (!node) return null
-    const {pubkeyXOnly, chainCode} = cashNodeToCx1(node)
-    return encodeCx1(pubkeyXOnly, chainCode)
+    const root = this.serviceRoots(host)[0]
+    return root ? this.shareOn(root, this.nextShare(host)).encoded : null
   }
 
-  private addressRegistration(host: string): {cx1: string; indexZeroSecretKey: Uint8Array} | null {
-    return this.addressRegistrations(host)[0] ?? null
-  }
-
-  private addressRegistrations(host: string): Array<{cx1: string; indexZeroSecretKey: Uint8Array}> {
-    return this.addressNodes(host).map(node => {
-      const {pubkeyXOnly, chainCode} = cashNodeToCx1(node)
-      return {
-        cx1: encodeCx1(pubkeyXOnly, chainCode),
-        indexZeroSecretKey: deriveNoteSecretKey(node.privateKey, node.chainCode, NOTE_PURPOSE_WALLET, 0)
-      }
-    })
-  }
-
-  private addressProofRegistration(host: string, address: string): {cx1: string; indexZeroSecretKey: Uint8Array} | null {
-    const registrations = this.addressRegistrations(host)
-    if (this.data.settings.lightningAddress !== address || !this.data.settings.lightningAddressCx1) {
-      return registrations[0] ?? null
-    }
-    return registrations.find(registration => registration.cx1 === this.data.settings.lightningAddressCx1) ?? null
-  }
-
-  // The ck1 note for index `index` of `purpose` on a branch, and the cp1 it
-  // sits at. The ck1 signs the key-path sighash for the mint at `domain` (a
-  // note or mint URL, or its host), so it opens this note there and nowhere
-  // else. Zero aux_rand makes it deterministic: deriving it again gives the
-  // same URL.
-  private keyNoteOn(
-    node: ReturnType<typeof deriveCashAddressNode>,
-    purpose: NotePurpose,
-    index: number,
-    domain: string
-  ): {ck1: string; cp1: string} {
-    const {pubkeyXOnly, signature} = signNoteOwnership(deriveNoteSecretKey(node.privateKey, node.chainCode, purpose, index), domain)
+  // The ck1 note for a key, and the cp1 it sits at. The ck1 signs the
+  // key-path sighash for the mint at `domain` (a note or mint URL, or its
+  // host), so it opens this note there and nowhere else. Zero aux_rand makes
+  // it deterministic: deriving it again gives the same URL.
+  private keyNoteFor(secretKey: Uint8Array, domain: string): {ck1: string; cp1: string} {
+    const {pubkeyXOnly, signature} = signNoteOwnership(secretKey, domain)
     return {ck1: encodeCk1(pubkeyXOnly, signature), cp1: encodeCp1(pubkeyXOnly)}
   }
 
+  // Every key this wallet could have been paid at `index` at a mint: that
+  // index of each share handed out there (and a few past the counter), and
+  // of each whole branch on each ladder a name was paid on before LUD-26.
+  private keysAtIndex(host: string, index: number): Uint8Array[] {
+    const keys: Uint8Array[] = []
+    const upTo = this.nextShare(host) + SHARE_GAP
+    for (const root of this.serviceRoots(host)) {
+      for (let share = 0; share < upTo; share++) {
+        const key = shareNoteKey(this.shareOn(root, share).node, index)
+        if (key) keys.push(key)
+      }
+    }
+    for (const node of this.addressNodes(host)) {
+      for (const purpose of ADDRESS_PURPOSES) {
+        keys.push(deriveLegacyNoteSecretKey(node.privateKey, node.chainCode, purpose, index))
+      }
+    }
+    return keys
+  }
+
   // A note paid to one of this wallet's keys arrives as a lookup with no
-  // secret. Derive the key at the index the mint named, on each branch the
-  // wallet could have been paid on, check it is the key the note sits at,
-  // and sign for it. A mint pays a name on the Lightning Address purpose;
-  // one from before purposes paid the single ladder, and its notes still sit
-  // there.
+  // secret. Derive the key at the index the mint named, on each share and
+  // branch the wallet could have been paid on, check it is the key the note
+  // sits at, and sign for it.
   private noteUrlForKey(lookupUrl: string, key: {cp1: string; index: number}): string {
     const host = serverOf(lookupUrl)
-    const nodes = this.addressNodes(host)
-    if (!nodes.length) {
+    const candidates = this.keysAtIndex(host, key.index)
+    if (!candidates.length) {
       throw new WalletUsageError('This wallet has no recovery words and no Nostr key, so it holds no keys for a note paid to them.')
     }
-    const ck1 = nodes
-      .flatMap(node => ADDRESS_PURPOSES.map(purpose => this.keyNoteOn(node, purpose, key.index, lookupUrl)))
-      .find(note => note.cp1 === key.cp1)?.ck1
+    const ck1 = candidates.map(secret => this.keyNoteFor(secret, lookupUrl)).find(note => note.cp1 === key.cp1)?.ck1
     if (!ck1) throw new WalletUsageError(`A note at ${host} was paid to a key this wallet does not hold.`)
     const url = new URL(lookupUrl)
     url.searchParams.delete('p')
@@ -2501,38 +2539,58 @@ export class Wallet {
     return this.data.settings.lightningAddress ?? null
   }
 
-  // Which branch the recorded name now pays, as the mint confirmed it, so
-  // the next change is signed by the right one even at a mint that does not
-  // publish it. Not one of this wallet's own branches, or none at all, is
-  // nothing to remember.
-  private recordNameBranch(onFile: string | null | undefined): void {
-    const host = this.data.settings.lightningAddress?.split('@').pop()
-    if (typeof onFile === 'string' && host && this.addressRegistrations(host).some(registration => registration.cx1 === onFile)) {
-      this.data.settings.lightningAddressCx1 = onFile
-    } else {
-      delete this.data.settings.lightningAddressCx1
+  // What the mint confirmed `address` pays: a share or branch of this
+  // wallet's, recorded so the next change is signed by its key, or nothing.
+  // A mint that has just confirmed the name is this wallet's also makes it
+  // the wallet's address, when it has none yet.
+  private async recordName(address: string, onFile: string | null | undefined): Promise<void> {
+    this.data.settings.lightningAddress ??= address
+    const host = address.slice(address.lastIndexOf('@') + 1)
+    const ours = typeof onFile === 'string' && this.registeredKeys(host).some(key => key.cx1 === onFile) ? onFile : null
+    const keys = (this.data.settings.nameKeys ??= {})
+    if (ours) keys[address] = ours
+    else delete keys[address]
+    if (this.data.settings.lightningAddress === address) {
+      if (ours) this.data.settings.lightningAddressCx1 = ours
+      else delete this.data.settings.lightningAddressCx1
     }
+    await this.persist()
   }
 
-  // What a mint charges for a name, or null if it does not sell them.
+  // What a mint charges for a name, or null if it cannot be asked. A
+  // moneyer says in its discovery document. A LUD-26 mint advertises an
+  // address fee as the third value of its `Mint fees`, and registers free
+  // without one.
   async namePriceMsat(mintHost?: string): Promise<number | null> {
     const entry = this.mintEntry(mintHost)
     const discovery = await this.discoveryDocument(entry.host)
     const price = discovery?.body.namePriceMsat
     if (typeof price === 'number' && Number.isSafeInteger(price) && price >= 0) return price
-    if (!discovery) return null
-    return (await this.referenceRegistrationServer(discovery.url)) ? 0 : null
+    try {
+      return await this.addressFeeMsat(entry)
+    } catch {
+      return null
+    }
   }
 
-  // Claims `name@host` at a mint. The mint takes a note of its own as
-  // payment and burns it, and the only identity involved is this wallet's
-  // Nostr key: the request is signed with it (NIP-98), so the name belongs
-  // to the key and payouts arrive sealed to it.
+  // Claims `name@host` at a mint, registered to a fresh share of this
+  // wallet's, so payments to it are minted to its own keys and the mint
+  // never holds a secret.
   //
-  // The note is marked handed over BEFORE the request goes out, as every
-  // other hand-over is. A mint that refuses without taking it leaves a
-  // note this wallet can simply take back, and that is attempted here.
-  async registerName(options: {name: string; mintHost?: string}): Promise<{address: string; paidMsat: number; toKeys: boolean}> {
+  // A moneyer takes the claim at POST /names, signed with this wallet's
+  // Nostr key (NIP-98): the name belongs to that key, which is what a zap or
+  // a gift-wrapped payout notification is addressed to, and its price is
+  // paid with a note of the mint.
+  //
+  // Any other mint takes it as LUD-26 has it, at the address itself, owned
+  // by the share alone. An address fee comes back as an invoice, paid here
+  // by melting a note of the same mint once it is checked against the fee
+  // the mint advertises. Until it settles the mint only holds the name, and
+  // an invoice this wallet would not or could not pay is handed back.
+  async registerName(options: {
+    name: string
+    mintHost?: string
+  }): Promise<{address: string; paidMsat: number; toKeys: boolean; feeInvoice?: string}> {
     const name = options.name.trim().toLowerCase()
     if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(name)) {
       throw new WalletUsageError(
@@ -2540,72 +2598,58 @@ export class Wallet {
       )
     }
     const entry = this.mintEntry(options.mintHost)
+    const address = `${name}@${entry.host}`
     const discovery = await this.discoveryDocument(entry.host)
-    if (!discovery) throw new WalletUsageError(`${entry.host} does not publish what it charges for a name.`)
-    const price = discovery.body.namePriceMsat
+    const price = discovery?.body.namePriceMsat
+    // First: without words, the Nostr key is the shares' root as well as the
+    // key that owns a moneyer name.
     const identity = await this.ensureNostrIdentity()
-
-    // lnurl-mint's reference route is free and takes the watch-only branch,
-    // its index-0 ownership proof and (when available) this wallet's npub.
-    // Keep this separate from moneyer's authenticated, optionally paid name
-    // claim below so neither service's ownership model is blurred.
-    if (typeof price !== 'number' || !Number.isSafeInteger(price) || price < 0) {
-      const server = await this.referenceRegistrationServer(discovery.url)
-      const registration = this.addressRegistration(entry.host)
-      const address = `${name}@${entry.host}`
-      const proof = this.addressProofRegistration(entry.host, address)
-      if (!server || !registration || !proof) throw new WalletUsageError(`${entry.host} is not handing out lightning addresses.`)
-      await this.registerReferenceName(
-        server,
-        name,
-        registration.cx1,
-        this.addressProof(proof.indexZeroSecretKey, 'register', server, name),
-        identity.npub
-      )
-      this.data.settings.lightningAddress = address
-      this.data.settings.lightningAddressCx1 = registration.cx1
-      await this.persist()
-      return {address: this.data.settings.lightningAddress, paidMsat: 0, toKeys: true}
+    if (!discovery || typeof price !== 'number' || !Number.isSafeInteger(price) || price < 0) {
+      return this.registerAtAddress(entry, name)
     }
+    let bought: {share: AddressShare; result: {paidMsat: number; cx1: string | null}}
+    try {
+      bought = await this.withFreshShare(entry.host, share => this.buyName(entry, discovery.url, identity, name, price, share))
+    } catch (err) {
+      // moneyer says this only to the name's own key, about a share on file
+      if (/already registered/i.test(reasonOf(err))) {
+        throw new WalletUsageError(`${address} is this wallet's already - \`notecase address keys ${name}\` moves it to a fresh share.`)
+      }
+      throw err
+    }
+    const {share, result} = bought
+    this.data.settings.lightningAddress = address
+    await this.recordName(address, result.cx1)
+    return {address, paidMsat: result.paidMsat, toKeys: result.cx1 === share.encoded}
+  }
 
-    // Payouts go to this wallet's own keys (LUD-25 Part 2), on the branch
-    // from its recovery words or, without any, from its Nostr key: the mint
-    // gets the watch-only branch, never a secret, and the branch's proof that
-    // it agrees. A mint that does not know the fields ignores them and pays
-    // custodially. Asked before any note is handed over.
-    const cx1 = this.addressCx1(entry.host)
-    const sig = cx1 ? await this.nameProof(entry, discovery.url, name, cx1) : undefined
-
+  // One attempt at a moneyer name, on one share. The note is marked handed
+  // over BEFORE the request goes out, as every other hand-over is. A mint
+  // that refuses without taking it leaves a note this wallet can simply
+  // take back, and that is attempted here.
+  private async buyName(
+    entry: MintEntry,
+    discoveryUrl: string,
+    identity: NostrIdentity,
+    name: string,
+    price: number,
+    share: AddressShare
+  ): Promise<{paidMsat: number; cx1: string | null}> {
+    const sig = bytesToHex(signAddressProof(share.key, 'register', entry.host, name, share.encoded))
     const note = price > 0 ? await this.prepareExact(price, entry.host) : null
     if (note) {
       note.sentTo = entry.host
       this.touch(note, 'sent')
       await this.persist()
     }
-
-    const url = new URL('/names', discovery.url).toString()
-    const body = JSON.stringify({
-      name,
-      ...(note ? {note: this.noteUrlFor(note)} : {}),
-      ...(cx1 ? {cx1} : {}),
-      ...(sig ? {sig} : {})
-    })
-    let answer: {status?: string; reason?: string; cx1?: string | null; paidMsat?: unknown} = {}
+    let answer: NameAnswer
     try {
-      const fetchImpl = this.opts.fetch ?? fetch
-      const response = await fetchImpl(url, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: nip98Header(identity, url, 'POST', body)
-        },
-        body,
-        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
+      answer = await this.postName(discoveryUrl, identity, {
+        name,
+        ...(note ? {note: this.noteUrlFor(note)} : {}),
+        cx1: share.encoded,
+        sig
       })
-      answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; cx1?: string | null; paidMsat?: unknown}
-      if (!response.ok || answer.status === 'ERROR') {
-        throw new WalletUsageError(answer.reason ?? `${entry.host} refused the name (${response.status}).`)
-      }
     } catch (err) {
       // The mint did not take the name. If it did not take the note
       // either, this brings it home under a fresh secret; if it did, the
@@ -2619,7 +2663,6 @@ export class Wallet {
       }
       throw err
     }
-
     // A mint answers paidMsat 0 when the name was already this key's and
     // the request only changed where it pays: nothing was taken. The note
     // went out in the request all the same, so it comes home under a fresh
@@ -2637,74 +2680,14 @@ export class Wallet {
         await this.markTaken(note)
       }
     }
-    this.data.settings.lightningAddress = `${name}@${entry.host}`
-    this.recordNameBranch(answer.cx1)
-    await this.persist()
-    return {address: this.data.settings.lightningAddress, paidMsat, toKeys: typeof answer.cx1 === 'string'}
+    return {paidMsat, cx1: typeof answer.cx1 === 'string' ? answer.cx1 : null}
   }
 
-  // Moves this wallet's name onto its own keys, or back off them. The key
-  // that owns a name may resend it with a branch; payments already made
-  // are not touched.
-  //
-  // `name` reaches one this wallet owns but never recorded, such as a name
-  // the mint's operator set up for this wallet's key.
-  async payNameToKeys(
-    toKeys = true,
-    options: {name?: string; mintHost?: string} = {}
-  ): Promise<{address: string; toKeys: boolean}> {
-    let name: string
-    let entry: ReturnType<typeof this.mintEntry>
-    if (options.name !== undefined) {
-      name = options.name.trim().toLowerCase()
-      if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(name)) throw new WalletUsageError(`${options.name} is not a name a mint hands out.`)
-      entry = this.mintEntry(options.mintHost)
-    } else {
-      const recorded = this.lightningAddress()
-      if (!recorded) {
-        throw new WalletUsageError('This wallet has no lightning address recorded - name it: `notecase address keys <name>`.')
-      }
-      const at = recorded.lastIndexOf('@')
-      name = recorded.slice(0, at)
-      entry = this.mintEntry(options.mintHost ?? recorded.slice(at + 1))
-    }
-    const address = `${name}@${entry.host}`
-    // First: without words, the Nostr key is the branch's root as well as
-    // the key that signs for the name.
-    const identity = await this.ensureNostrIdentity()
-    const cx1 = toKeys ? this.addressCx1(entry.host) : null
-    if (toKeys && !cx1) throw new WalletUsageError('This wallet has no keys to be paid to.')
-    const discovery = await this.discoveryDocument(entry.host)
-    if (!discovery) throw new WalletUsageError(`${entry.host} does not publish where to manage names.`)
-
-    // The reference mint can register or replace the branch using the current
-    // branch's index-0 proof. It has no "custodial" mode: DELETE releases the
-    // address entirely, which is exposed separately by unregisterName.
-    const referenceServer = await this.referenceRegistrationServer(discovery.url)
-    if (referenceServer) {
-      if (!toKeys) {
-        throw new WalletUsageError('A reference-mint address cannot be switched to custodial payout; unregister it instead.')
-      }
-      const registration = this.addressRegistration(entry.host)
-      const proof = this.addressProofRegistration(entry.host, address)
-      if (registration && proof) {
-        await this.registerReferenceName(
-          referenceServer,
-          name,
-          registration.cx1,
-          this.addressProof(proof.indexZeroSecretKey, 'register', referenceServer, name),
-          identity.npub
-        )
-        this.data.settings.lightningAddress = address
-        this.data.settings.lightningAddressCx1 = registration.cx1
-        await this.persist()
-        return {address, toKeys: true}
-      }
-      throw new WalletUsageError('This wallet no longer has the branch key currently registered for that address.')
-    }
-    const url = new URL('/names', discovery.url).toString()
-    const sig = await this.nameProof(entry, discovery.url, name, cx1)
-    const body = JSON.stringify({name, cx1, ...(sig ? {sig} : {})})
+  // moneyer's POST /names, signed with this wallet's Nostr key. A refusal
+  // is thrown with the mint's own reason.
+  private async postName(discoveryUrl: string, identity: NostrIdentity, fields: Record<string, unknown>): Promise<NameAnswer> {
+    const url = new URL('/names', discoveryUrl).toString()
+    const body = JSON.stringify(fields)
     const fetchImpl = this.opts.fetch ?? fetch
     const response = await fetchImpl(url, {
       method: 'POST',
@@ -2712,80 +2695,297 @@ export class Wallet {
       body,
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
     })
-    const answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; cx1?: string | null}
+    const answer = (await response.json().catch(() => ({}))) as NameAnswer
     if (!response.ok || answer.status === 'ERROR') {
-      throw new WalletUsageError(answer.reason ?? `${entry.host} refused (${response.status}).`)
+      throw new WalletUsageError(answer.reason ?? `${new URL(url).host} refused the name (${response.status}).`)
     }
-    if (toKeys && answer.cx1 !== cx1) throw new WalletUsageError(`${entry.host} does not pay names to keys yet.`)
-    // The mint just confirmed this key owns the name.
-    if (!this.data.settings.lightningAddress) this.data.settings.lightningAddress = address
-    if (this.data.settings.lightningAddress === address) {
-      this.recordNameBranch(answer.cx1)
-      await this.persist()
-    }
-    return {address, toKeys: typeof answer.cx1 === 'string'}
+    return answer
   }
 
-  // Releases a reference-mint address. This is deliberately not the same as
-  // moneyer's "custodial" payout mode: DELETE /p/{username} makes the name
-  // unclaimed, and the index-0 branch proof prevents anybody else releasing
-  // it. A transport failure is surfaced without retrying because the delete
-  // may already have landed.
-  async unregisterName(options: {name?: string; mintHost?: string} = {}): Promise<{address: string}> {
+  // Whether a mint keeps moneyer's door onto its names, POST /names, which a
+  // name's NIP-98 owner uses even while registration is closed (and the
+  // discovery document then names no price). Asked without signing
+  // anything, so it says nothing of this wallet: moneyer answers that the
+  // request lacks its NIP-98 header, any other mint that there is no such
+  // route.
+  private async namesDoor(discoveryUrl: string): Promise<boolean> {
+    const origin = new URL(discoveryUrl).origin
+    const known = this.namesDoors.get(origin)
+    if (known !== undefined) return known
+    let door = false
+    try {
+      const fetchImpl = this.opts.fetch ?? fetch
+      const response = await fetchImpl(new URL('/names', origin), {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: '{}',
+        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
+      })
+      const answer = (await response.json().catch(() => ({}))) as {reason?: string}
+      door = /NIP-98/i.test(answer.reason ?? '')
+    } catch {
+      door = false
+    }
+    this.namesDoors.set(origin, door)
+    return door
+  }
+
+  // LUD-26's own registration, at the address itself. No npub goes with it:
+  // a mint would publish it for NIP-05, tying the name to a Nostr identity
+  // the holder never chose to link, and an unsigned one proves nothing.
+  private async registerAtAddress(
+    entry: MintEntry,
+    name: string
+  ): Promise<{address: string; paidMsat: number; toKeys: boolean; feeInvoice?: string}> {
+    const address = `${name}@${entry.host}`
+    const server = this.addressServer(entry)
+    const feeMsat = await this.addressFeeMsat(entry)
+    const {share, result} = await this.withFreshShare(entry.host, share =>
+      registerAddress(server, name, share.cx1, share.key, this.opts)
+    )
+    this.data.settings.lightningAddress = address
+    await this.recordName(address, share.encoded)
+    if (!result.pr) return {address, paidMsat: 0, toKeys: true}
+    // LUD-26: never pay more than the fee the mint advertised, so an
+    // invoice over it, or for no stated amount, is handed back unpaid.
+    const asked = decodeBolt11AmountMsat(result.pr)
+    if (asked === null || asked > feeMsat) {
+      return {address, paidMsat: 0, toKeys: true, feeInvoice: result.pr}
+    }
+    try {
+      await this.melt(result.pr, `the address fee for ${address}`, entry.host)
+    } catch {
+      // nothing was burned (melt says so by throwing): the name stays held
+      // until the invoice expires, and it can be paid from anywhere
+      return {address, paidMsat: 0, toKeys: true, feeInvoice: result.pr}
+    }
+    return {address, paidMsat: asked, toKeys: true}
+  }
+
+  // The name and mint a name call is about: the one given, or the address
+  // this wallet recorded.
+  private nameTarget(options: {name?: string; mintHost?: string}, usage: string): {name: string; entry: MintEntry; address: string} {
     let name: string
-    let entry: ReturnType<typeof this.mintEntry>
+    let entry: MintEntry
     if (options.name !== undefined) {
       name = options.name.trim().toLowerCase()
-      if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(name)) {
-        throw new WalletUsageError(`${options.name} is not a name a mint hands out.`)
-      }
+      if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(name)) throw new WalletUsageError(`${options.name} is not a name a mint hands out.`)
       entry = this.mintEntry(options.mintHost)
     } else {
       const recorded = this.lightningAddress()
-      if (!recorded) throw new WalletUsageError('This wallet has no lightning address recorded.')
+      if (!recorded) throw new WalletUsageError(usage)
       const at = recorded.lastIndexOf('@')
       name = recorded.slice(0, at)
       entry = this.mintEntry(options.mintHost ?? recorded.slice(at + 1))
     }
-    const address = `${name}@${entry.host}`
-    await this.ensureNostrIdentity()
-    const registration = this.addressProofRegistration(entry.host, address)
-    if (!registration) throw new WalletUsageError('This wallet has no key able to prove ownership of that address.')
+    return {name, entry, address: `${name}@${entry.host}`}
+  }
+
+  // Moves this wallet's name onto a fresh share of its own, or at a moneyer
+  // back off its keys onto gift-wrapped payouts. Payments already made are
+  // not touched: notes on the old key stay there, and a scan finds them.
+  //
+  // A cx1 on file is never overwritten by a registration, so a name that
+  // already pays a share or a whole branch moves with LUD-26's PUT, proven
+  // both by the key on file and by the new share; that is how the names
+  // registered before LUD-26 get off their whole branches. A moneyer name
+  // that pays no key yet takes its first share at POST /names, as its
+  // NIP-98 owner.
+  //
+  // `name` reaches one this wallet owns but never recorded, such as a name
+  // the mint's operator set up for this wallet's key.
+  async payNameToKeys(
+    toKeys = true,
+    options: {name?: string; mintHost?: string} = {}
+  ): Promise<{address: string; toKeys: boolean}> {
+    const {name, entry, address} = this.nameTarget(
+      options,
+      'This wallet has no lightning address recorded - name it: `notecase address keys <name>`.'
+    )
+    const identity = await this.ensureNostrIdentity()
     const discovery = await this.discoveryDocument(entry.host)
-    const server = discovery ? await this.referenceRegistrationServer(discovery.url) : null
-    if (!server) throw new WalletUsageError(`${entry.host} does not expose reference address management.`)
-    await this.unregisterReferenceName(server, name, this.addressProof(registration.indexZeroSecretKey, 'unregister', server, name))
+    const ownedByNostrKey =
+      discovery !== null && (typeof discovery.body.namePriceMsat === 'number' || (await this.namesDoor(discovery.url)))
+
+    if (!toKeys) {
+      if (!discovery || !ownedByNostrKey) {
+        throw new WalletUsageError(`${entry.host} pays a name only to its share; \`notecase address unregister\` releases it instead.`)
+      }
+      await this.withKeyOnFile(entry.host, address, onFile =>
+        this.postName(discovery.url, identity, {
+          name,
+          cx1: null,
+          sig: bytesToHex(signAddressProof(onFile.key, 'unregister', entry.host, name))
+        })
+      )
+      await this.recordName(address, null)
+      return {address, toKeys: false}
+    }
+
+    if (discovery && ownedByNostrKey) {
+      try {
+        const {share, result} = await this.withFreshShare(entry.host, share =>
+          this.postName(discovery.url, identity, {
+            name,
+            cx1: share.encoded,
+            sig: bytesToHex(signAddressProof(share.key, 'register', entry.host, name, share.encoded))
+          })
+        )
+        if (result.cx1 !== share.encoded) throw new WalletUsageError(`${entry.host} does not pay names to keys yet.`)
+        await this.recordName(address, share.encoded)
+        return {address, toKeys: true}
+      } catch (err) {
+        // A cx1 is on file already: move it, as any LUD-26 mint does.
+        if (!/already registered/i.test(reasonOf(err))) throw err
+      }
+    }
+
+    const server = this.addressServer(entry)
+    const {result: moved} = await this.withKeyOnFile(entry.host, address, async onFile => {
+      const {share} = await this.withFreshShare(entry.host, share =>
+        updateAddress(server, name, onFile.key, share.cx1, share.key, this.opts)
+      )
+      return share
+    })
+    await this.recordName(address, moved.encoded)
+    return {address, toKeys: true}
+  }
+
+  // Releases a name with LUD-26's DELETE, proven by the key on file. At most
+  // mints the name is then free for anyone to claim; a moneyer name owned by
+  // a Nostr key stays that key's and pays it gift-wrapped notes again. A
+  // transport failure is surfaced without retrying, because the delete may
+  // already have landed.
+  async unregisterName(options: {name?: string; mintHost?: string} = {}): Promise<{address: string}> {
+    const {name, entry, address} = this.nameTarget(options, 'This wallet has no lightning address recorded.')
+    await this.ensureNostrIdentity()
+    const server = this.addressServer(entry)
+    await this.withKeyOnFile(entry.host, address, onFile => unregisterAddress(server, name, onFile.key, this.opts))
+    if (this.data.settings.nameKeys) delete this.data.settings.nameKeys[address]
     if (this.data.settings.lightningAddress === address) {
       delete this.data.settings.lightningAddress
       delete this.data.settings.lightningAddressCx1
-      await this.persist()
     }
+    await this.persist()
     return {address}
   }
 
-  // Walks a mint's address branch and takes what was paid to this wallet's
-  // keys. The fallback for a gift wrap that never arrived: the mint credits
-  // every payment whether or not its wrap reaches a relay. A spent key
-  // counts as used, so the gap is of keys never paid, and a refusal that is
-  // not "unknown" stops the walk rather than reading as its end. Each branch
-  // the wallet could have been paid on is walked in turn, on each ladder a
-  // name is paid on.
+  // LUD-26's internal transfer: a registered address at a mint this wallet
+  // holds enough notes at is paid by handing it a note of exactly the
+  // amount there, free, rather than over Lightning. Null when it is not
+  // one, so the caller pays it by invoice instead.
+  //
+  // The note is marked handed over before it goes out. A definitive refusal
+  // leaves it untouched and live again; an answer that never comes leaves it
+  // handed over, for a check to settle.
+  //
+  // `mintHost` keeps it to that mint: a payee anywhere else is left to be
+  // paid by invoice, from there.
+  async payAddressInternally(
+    address: string,
+    amountMsat: number,
+    options: {mintHost?: string} = {}
+  ): Promise<{note: NoteRecord; host: string; ambiguous: boolean} | null> {
+    const payUrl = address.includes('@') ? resolveMintInput(address.trim()) : null
+    if (!payUrl) return null
+    let payee: Awaited<ReturnType<typeof fetchPayRequest>>
+    try {
+      payee = await fetchPayRequest(payUrl, this.opts)
+    } catch {
+      return null
+    }
+    if (!payee.withdrawLink || !isRegisteredAddress(payee)) return null
+    const entry = this.data.mints.find(mint => canPayInternally(payee, mint.baseUrl ?? mint.payUrl))
+    if (!entry || (options.mintHost !== undefined && this.mintEntry(options.mintHost).host !== entry.host)) return null
+    // The withdrawLink is only the payee's word. The note's spend goes to the
+    // callback, so the address and its callback must both be the mint's own:
+    // anywhere else, whoever is there could redeem the note and say it was
+    // refused.
+    const domain = serviceDomainOf(entry.host)
+    const own = (url: string): boolean => {
+      try {
+        return serviceDomainOf(url) === domain
+      } catch {
+        return false
+      }
+    }
+    if (!own(payUrl) || !own(payee.callback)) return null
+    if (amountMsat < payee.minSendable || amountMsat > payee.maxSendable) return null
+    const held = this.data.notes
+      .filter(note => note.state === 'live' && note.mintHost === entry.host)
+      .reduce((sum, note) => sum + note.amountMsat, 0)
+    if (held < amountMsat) return null
+    const note = await this.prepareExact(amountMsat, entry.host)
+    note.sentTo = address
+    this.touch(note, 'sent')
+    await this.persist()
+    try {
+      await sendNoteToAddress(payee, this.noteUrlFor(note), note.k1, note.amountMsat, this.opts)
+    } catch (err) {
+      // Only a plain refusal leaves the note this wallet's. One still in
+      // flight, one the mint already counts as used (a retry it answered
+      // differently, or a spend elsewhere) and one never answered stay
+      // handed over, for `reclaim` to settle against the mint.
+      if (err instanceof AmbiguousMintError || err instanceof PendingNoteError || err instanceof NoteSpentError) {
+        return {note, host: entry.host, ambiguous: true}
+      }
+      delete note.sentTo
+      this.touch(note, 'live')
+      await this.persist()
+      throw err
+    }
+    await this.markTaken(note)
+    return {note, host: entry.host, ambiguous: false}
+  }
+
+  // Walks a mint's shares and old branches and takes what was paid to this
+  // wallet's keys. The fallback for a gift wrap that never arrived, and how
+  // a LUD-26 mint's payments are found at all: the mint credits every
+  // payment whether or not anything tells the wallet. A spent key counts as
+  // used, so the gap is of keys never paid, and a refusal that is not
+  // "unknown" stops the walk rather than reading as its end.
+  //
+  // Shares are found as LUD-26 has them, BIP-44 style: every one handed out
+  // here, then on until five in a row have nothing. A share another device
+  // on this seed handed out and that has been paid is found that way, and
+  // the counter moves past it.
   async scanAddress(host?: string, options: {gap?: number} = {}): Promise<{received: ReceiveResult[]; scanned: number}> {
     const entry = this.mintEntry(host)
-    const nodes = this.addressNodes(entry.host)
-    if (!nodes.length) {
+    const roots = this.serviceRoots(entry.host)
+    if (!roots.length) {
       throw new WalletUsageError('This wallet has no recovery words and no Nostr key, so it holds no keys for a note paid to them.')
     }
     const baseUrl = await this.withdrawBase(entry)
+    const gap = options.gap ?? 20
     const received: ReceiveResult[] = []
     let scanned = 0
-    for (const node of nodes) {
+    for (const [which, root] of roots.entries()) {
+      let empty = 0
+      for (let share = 0; empty < SHARE_GAP || (which === 0 && share < this.nextShare(entry.host)); share++) {
+        const node = this.shareOn(root, share).node
+        const walked = await this.takeFromKeys(baseUrl, index => shareNoteKey(node, index), gap)
+        received.push(...walked.received)
+        scanned += walked.scanned
+        if (walked.used) {
+          empty = 0
+          if (which === 0) this.spendShare(entry.host, share)
+        } else {
+          empty += 1
+        }
+      }
+    }
+    for (const node of this.addressNodes(entry.host)) {
       for (const purpose of ADDRESS_PURPOSES) {
-        const walked = await this.takeFromBranch(baseUrl, node, purpose, options.gap ?? 20)
+        const walked = await this.takeFromKeys(
+          baseUrl,
+          index => deriveLegacyNoteSecretKey(node.privateKey, node.chainCode, purpose, index),
+          gap
+        )
         received.push(...walked.received)
         scanned += walked.scanned
       }
     }
+    await this.persist()
     return {received, scanned}
   }
 
@@ -2797,34 +2997,54 @@ export class Wallet {
     return entry.baseUrl
   }
 
-  // One branch of the walk: every live note on it comes into this wallet,
-  // rotated onto a secret of its own as any received note is.
-  private async takeFromBranch(
+  // A lookup a mint may answer "rate limited" (LUD-26 lets it, for a
+  // recovery scan): waited out and asked again, a few times, rather than
+  // ending the walk.
+  private async askPatiently<T>(ask: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await ask()
+      } catch (err) {
+        if (attempt >= RATE_LIMIT_TRIES || !/rate.?limit/i.test(reasonOf(err))) throw err
+        await new Promise(resolve => setTimeout(resolve, this.opts.rateLimitBackoffMs ?? 2_000))
+      }
+    }
+  }
+
+  // One chain of keys: every live note on it comes into this wallet,
+  // rotated onto a secret of its own as any received note is. `used` says
+  // whether any key on it was ever paid, live or spent.
+  private async takeFromKeys(
     baseUrl: string,
-    node: ReturnType<typeof deriveCashAddressNode>,
-    purpose: NotePurpose,
+    secretAt: (index: number) => Uint8Array | null,
     gap: number
-  ): Promise<{received: ReceiveResult[]; scanned: number}> {
+  ): Promise<{received: ReceiveResult[]; scanned: number; used: boolean}> {
     const received: ReceiveResult[] = []
+    let used = false
     let quiet = 0
     let index = 0
     while (quiet < gap) {
-      const {ck1, cp1} = this.keyNoteOn(node, purpose, index, baseUrl)
+      const secret = secretAt(index)
       index += 1
+      // An index BIP-32 derives no key for is skipped, as a mint skips it.
+      if (!secret) continue
+      const {ck1, cp1} = this.keyNoteFor(secret, baseUrl)
       let info: Awaited<ReturnType<typeof fetchNoteInfoByHash>>
       try {
-        info = await fetchNoteInfoByPubkey(baseUrl, cp1, this.opts)
+        info = await this.askPatiently(() => fetchNoteInfoByPubkey(baseUrl, cp1, this.opts))
       } catch (err) {
         if (err instanceof NoteUnknownError) {
           quiet += 1
           continue
         }
         if (err instanceof NoteSpentError || err instanceof PendingNoteError) {
+          used = true
           quiet = 0
           continue
         }
         throw err
       }
+      used = true
       quiet = 0
       const id = noteId(ck1)
       if (this.data.notes.some(note => note.id === id && note.state !== 'spent' && note.state !== 'sent')) continue
@@ -2832,7 +3052,7 @@ export class Wallet {
       if (info.c) url.searchParams.set('c', info.c)
       received.push(await this.receive(url.toString()))
     }
-    return {received, scanned: index}
+    return {received, scanned: index, used}
   }
 
   // A heartwood's notes, with no heartwood: rebuild the branch it was paid on
@@ -2863,7 +3083,11 @@ export class Wallet {
         const node = derive(identity.secret, entry.host)
         try {
           for (const purpose of ADDRESS_PURPOSES) {
-            const walked = await this.takeFromBranch(baseUrl, node, purpose, options.gap ?? 20)
+            const walked = await this.takeFromKeys(
+              baseUrl,
+              index => deriveLegacyNoteSecretKey(node.privateKey, node.chainCode, purpose, index),
+              options.gap ?? 20
+            )
             received.push(...walked.received)
             scanned += walked.scanned
           }
@@ -3021,37 +3245,32 @@ export class Wallet {
     const toKeys = options.toKeys ?? true
     const wanted = name.trim().toLowerCase()
     if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(wanted)) throw new WalletUsageError(`${name} is not a name a mint hands out.`)
+    // A mint now takes only a LUD-26 share, and heartwood firmware still
+    // hands out its whole branch, whose cx1 let anyone who fetched the
+    // payRequest watch every note on it. Nothing is asked of the device.
+    if (toKeys) {
+      throw new HeartwoodError(
+        "Registering a name to the device's keys needs firmware that hands out a LUD-26 share; this one hands out its whole branch, which mints refuse now."
+      )
+    }
     const entry = this.mintEntry(options.mintHost)
     const client = this.heartwoodClient(transport)
     const device = await this.deviceBranch(client, entry.host)
-    const cx1 = toKeys ? device.cx1 : null
     const address = `${wanted}@${entry.host}`
     const discovery = await this.discoveryDocument(entry.host)
-    if (!discovery) throw new WalletUsageError(`${entry.host} does not publish where to manage names.`)
-
-    // The reference mint registers a name against a branch on that branch's
-    // index-0 proof alone, which the device now signs on a hold. It has no
-    // custodial mode: releasing the name is heartwoodUnregisterName.
-    const referenceServer = await this.referenceRegistrationServer(discovery.url)
-    if (referenceServer) {
-      if (!toKeys) {
-        throw new WalletUsageError(
-          'A reference-mint address cannot be switched to custodial payout; `heartwood address unregister` releases it instead.'
-        )
-      }
-      const proof = await this.nameProof(entry, discovery.url, wanted, device.cx1, device)
-      if (!proof) throw new WalletUsageError(`${address} pays a branch neither this wallet nor the device holds, so neither can prove the change.`)
-      await this.registerReferenceName(referenceServer, wanted, device.cx1, proof, npubOf(device.pubkey))
-      return {address, toKeys: true}
+    if (!discovery || (typeof discovery.body.namePriceMsat !== 'number' && !(await this.namesDoor(discovery.url)))) {
+      throw new WalletUsageError(
+        `${entry.host} pays a name only to its share; \`heartwood address unregister\` releases it instead.`
+      )
     }
 
     const url = new URL('/names', discovery.url).toString()
-    // The branch proof, from whichever branch has to give it: the device's
-    // own, signed on the device, or one of this wallet's when the name pays
-    // one of those now. Asked before the NIP-98 request is signed, so the
-    // body that request commits to already carries it.
-    const sig = await this.nameProof(entry, discovery.url, wanted, cx1, device)
-    const body = JSON.stringify({name: wanted, cx1, ...(sig ? {sig} : {})})
+    // A name that pays the device's branch is cleared on the branch's
+    // unregister proof, signed on the device; one that pays no key needs
+    // none. Asked before the NIP-98 request is signed, so the body that
+    // request commits to already carries it.
+    const sig = await this.deviceUnregisterProof(client, entry.host, discovery.url, wanted, device.cx1)
+    const body = JSON.stringify({name: wanted, cx1: null, sig})
     // Signed with the time it is asked for, and the mint allows sixty
     // seconds, so a hold that takes longer is refused and simply re-asked.
     const signed = await client.signEvent(nip98Template(url, 'POST', body))
@@ -3065,18 +3284,16 @@ export class Wallet {
     const answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; cx1?: string | null}
     if (!response.ok || answer.status === 'ERROR') {
       const reason = answer.reason ?? `${entry.host} refused (${response.status}).`
-      if (!sig && /\bsig\b|proof/i.test(reason)) {
-        throw new WalletUsageError(`${reason} ${address} pays a branch neither this wallet nor the device holds, so neither can prove the change.`)
+      if (WRONG_KEY.test(reason)) {
+        throw new WalletUsageError(`${reason} ${address} pays a key the device does not hold, so it cannot prove the change.`)
       }
       throw new WalletUsageError(reason)
     }
-    if (toKeys && answer.cx1 !== cx1) throw new WalletUsageError(`${entry.host} does not pay names to keys yet.`)
-    return {address, toKeys: typeof answer.cx1 === 'string'}
+    return {address, toKeys: false}
   }
 
-  // Releases a reference-mint name the device's branch holds, on the
-  // branch's unregister proof, signed on the device. The name is unclaimed
-  // afterwards, as unregisterName leaves one of this wallet's own.
+  // Releases a name the device's branch holds, with LUD-26's DELETE and the
+  // branch's unregister proof, signed on the device.
   async heartwoodUnregisterName(
     transport: NostrTransport,
     name: string,
@@ -3088,16 +3305,16 @@ export class Wallet {
     const client = this.heartwoodClient(transport)
     const device = await this.deviceBranch(client, entry.host)
     const address = `${wanted}@${entry.host}`
-    const discovery = await this.discoveryDocument(entry.host)
-    const server = discovery ? await this.referenceRegistrationServer(discovery.url) : null
-    if (!server) {
-      throw new WalletUsageError(
-        `${entry.host} does not expose reference address management - \`heartwood address custodial\` takes a name off the device's keys there.`
-      )
+    const server = this.addressServer(entry)
+    const proof = await this.deviceUnregisterProof(client, entry.host, server, wanted, device.cx1)
+    try {
+      await unregisterAddressWithProof(server, wanted, proof, this.opts)
+    } catch (err) {
+      if (WRONG_KEY.test(reasonOf(err))) {
+        throw new WalletUsageError(`${reasonOf(err)} ${address} pays a key the device does not hold, so it cannot release it.`)
+      }
+      throw err
     }
-    const proof = await this.nameProof(entry, discovery!.url, wanted, null, device, device.cx1)
-    if (!proof) throw new WalletUsageError(`${address} pays a branch neither this wallet nor the device holds, so neither can release it.`)
-    await this.unregisterReferenceName(server, wanted, proof)
     return {address}
   }
 
@@ -3133,17 +3350,14 @@ export class Wallet {
   // derives. Such a note is reported as `waiting`, safe at the mint where the
   // device's nsec reaches it (recoverHeartwoodNotes), and the walk goes on.
   //
-  // The device hands out only its current branch, but a name registered
-  // before firmware 0.18.0-beta.24 still points at the superseded one, and a
-  // mint goes on paying it there (on purpose 2) until the name is moved. This
-  // machine cannot derive that branch, so `names` asks the mint for the cx1
-  // each name is registered with and walks that too; the device checks every
-  // key it is asked to keep, so a branch it does not hold yields nothing but
-  // `waiting`.
+  // A name registered before firmware 0.18.0-beta.24 still points at the
+  // superseded branch, which this machine cannot derive and which no mint
+  // publishes any more (LUD-26 dropped text/cpub). Its notes are found from
+  // the device's nsec instead, by recoverHeartwoodNotes.
   async heartwoodScanAddress(
     transport: NostrTransport,
     host?: string,
-    options: {gap?: number; names?: string[]} = {}
+    options: {gap?: number} = {}
   ): Promise<{
     claimed: {id: string; index: number; amountMsat: number}[]
     waiting: {index: number; amountMsat: number}[]
@@ -3159,16 +3373,8 @@ export class Wallet {
     }
     const client = this.heartwoodClient(transport)
     const current = (await client.cashAddress(entry.host)).cx1
-    if (!decodeCx1(current)) throw new HeartwoodError('The device answered with something that is not a cx1.')
-    const branches = [current]
-    if (options.names?.length) {
-      const discovery = await this.discoveryDocument(entry.host)
-      if (!discovery) throw new WalletUsageError(`${entry.host} does not publish where its names are.`)
-      for (const name of options.names) {
-        const onFile = await this.branchOnFile(discovery.url, name.trim().toLowerCase())
-        if (onFile && !branches.includes(onFile)) branches.push(onFile)
-      }
-    }
+    const branch = decodeLegacyCx1(current)
+    if (!branch) throw new HeartwoodError('The device answered with something that is not a cx1.')
     const inventory = await client.listNotes()
     this.rememberHeartwoodHeld(inventory)
     const held = new Set(inventory.flatMap(note => (note.p ? [note.p] : [])))
@@ -3178,13 +3384,13 @@ export class Wallet {
     const claimed: {id: string; index: number; amountMsat: number}[] = []
     const waiting: {index: number; amountMsat: number}[] = []
     let scanned = 0
-    for (const branch of branches.map(cx1 => decodeCx1(cx1)!)) for (const purpose of ADDRESS_PURPOSES) {
+    for (const purpose of ADDRESS_PURPOSES) {
       let quiet = 0
       let index = 0
       while (quiet < gap) {
         const at = index
         index += 1
-        const cp1 = encodeCp1(deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, purpose, at))
+        const cp1 = encodeCp1(deriveLegacyNotePubkey(branch.pubkeyXOnly, branch.chainCode, purpose, at))
         let info: Awaited<ReturnType<typeof fetchNoteInfoByHash>>
         try {
           info = await fetchNoteInfoByPubkey(baseUrl, cp1, this.opts)

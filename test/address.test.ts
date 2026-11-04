@@ -1,27 +1,24 @@
 import {afterEach, describe, expect, it} from 'vitest'
+import {createRequire} from 'node:module'
 import {createMockMint} from 'lnurlcash-conformance/mock-mint'
 import {finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type Event} from 'nostr-tools'
 import {schnorr} from '@noble/curves/secp256k1.js'
 import {bytesToHex, hexToBytes} from '@noble/hashes/utils.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {utf8ToBytes} from '@noble/hashes/utils.js'
-import {
-  cashNodeToCx1,
-  decodeCx1,
-  deriveCashRoot,
-  deriveLegacyCashAddressNode,
-  deriveNotePubkey,
-  NOTE_PURPOSE_WALLET,
-  encodeCx1,
-  noteK1
-} from '../src/lnurlcash.js'
+import {bolt11PaymentHash} from 'farrier-kit/bolt11'
+import {fakeBolt11} from '@forgesworn/moneyer'
+import {cx1PubkeyXOnly, decodeCx1, noteK1} from '../src/lnurlcash.js'
 import {WalletUsageError} from '../src/wallet.ts'
 import {freshK1, makeWallet} from './helpers.ts'
 
-// Claiming name@mint. The mint takes a note of its own as the fee and
-// reads the buyer's identity off a NIP-98 signature, so no account exists
-// anywhere - the name belongs to a Nostr key, and payouts to it arrive
-// sealed to that key.
+// Claiming name@mint, registered to a LUD-26 share of this wallet's: the
+// mint is given the share's watch-only cx1 and the share's proof that it
+// agrees, and mints every payment to the name onto the share's own keys.
+//
+// A moneyer sells names at POST /names, paid with a note of its own and
+// owned by the Nostr key that signs the request (NIP-98). Any other mint
+// takes LUD-26's registration at the address itself.
 
 type Mint = Awaited<ReturnType<typeof createMockMint>>
 let mint: Mint | null = null
@@ -31,18 +28,25 @@ afterEach(async () => {
 })
 
 const hostOf = (theMint: Mint): string => new URL(theMint.url).host
+const domainOf = (theMint: Mint): string => new URL(theMint.url).hostname
+
+// A BIP-340 proof by the share a cx1 exports, over LUD-26's message.
+const provenBy = (cx1: string, message: string, sig: string): boolean =>
+  schnorr.verify(hexToBytes(sig), sha256(utf8ToBytes(message)), cx1PubkeyXOnly(decodeCx1(cx1)!))
 
 type Registration = {name: string; note?: string; cx1?: string | null; sig?: string; auth: Event; url: string}
 
-// A mint that sells names, standing in front of the mock: the discovery
-// document gains a price, and POST /names is answered here.
-const sellingNames = (theMint: Mint, options: {priceMsat: number | null; refuse?: string}) => {
+// A moneyer selling names, standing in front of the mock: the discovery
+// document gains a price, and POST /names is answered here. `refuse` turns
+// every request away with that reason; `usedShares` are cx1s it refuses
+// as already used, as a mint does a share another device registered.
+const sellingNames = (theMint: Mint, options: {priceMsat: number; refuse?: string; usedShares?: string[]}) => {
   const seen: Registration[] = []
   const fetchImpl: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
     if (url.pathname.startsWith('/.well-known/lnurlw/')) {
       const body = (await (await fetch(input, init)).json()) as Record<string, unknown>
-      return Response.json({...body, ...(options.priceMsat === null ? {} : {namePriceMsat: options.priceMsat})})
+      return Response.json({...body, namePriceMsat: options.priceMsat})
     }
     if (url.pathname === '/names') {
       const raw = String(init?.body ?? '')
@@ -58,39 +62,15 @@ const sellingNames = (theMint: Mint, options: {priceMsat: number | null; refuse?
         url: url.toString()
       })
       if (options.refuse) return Response.json({status: 'ERROR', reason: options.refuse}, {status: 400})
+      if (typeof parsed.cx1 === 'string' && options.usedShares?.includes(parsed.cx1)) {
+        return Response.json({status: 'ERROR', reason: 'cx1 already used'}, {status: 409})
+      }
       // paid for with a note of this mint: the mint burns it
       if (parsed.note) {
         const k1 = noteK1(parsed.note)
         if (k1) theMint.state.settleMelt(k1)
       }
-      return Response.json({status: 'OK', name: parsed.name})
-    }
-    return fetch(input, init)
-  }
-  return {fetchImpl, seen}
-}
-
-// The current reference lnurl-mint's signed POST/DELETE /p/{username}
-// management surface. The reserved-name probe can never reach storage.
-const referenceNames = () => {
-  const seen: Array<{method: string; username: string; cx1?: string; sig: string; npub?: string}> = []
-  const fetchImpl: typeof globalThis.fetch = async (input, init) => {
-    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
-    if (url.pathname === '/p/_' && init?.method === 'POST') {
-      return Response.json({status: 'ERROR', reason: 'Invalid or reserved username.'})
-    }
-    const match = url.pathname.match(/^\/p\/([^/]+)$/)
-    if (match && (init?.method === 'POST' || init?.method === 'DELETE')) {
-      const cx1 = url.searchParams.get('cx1')
-      const npub = url.searchParams.get('npub')
-      seen.push({
-        method: init.method,
-        username: decodeURIComponent(match[1]!),
-        ...(cx1 ? {cx1} : {}),
-        sig: url.searchParams.get('sig') ?? '',
-        ...(npub ? {npub} : {})
-      })
-      return Response.json({status: 'OK'})
+      return Response.json({status: 'OK', name: parsed.name, cx1: parsed.cx1 ?? null})
     }
     return fetch(input, init)
   }
@@ -103,7 +83,7 @@ const fund = (theMint: Mint, amountMsat: number): string => {
   return `${theMint.url}/w?k1=${k1}&amount=${amountMsat}`
 }
 
-describe('claiming a lightning address', () => {
+describe('claiming a moneyer name', () => {
   it('pays the mint with one of its own notes and signs the request as this wallet', async () => {
     mint = await createMockMint()
     const stub = sellingNames(mint, {priceMsat: 21_000})
@@ -112,11 +92,14 @@ describe('claiming a lightning address', () => {
     await wallet.receive(fund(mint, 100_000))
 
     expect(await wallet.namePriceMsat()).toBe(21_000)
+    // with no recovery words, the share comes from its Nostr key: asked for
+    // now, before the claim hands it out and moves on to the next
+    await wallet.ensureNostrIdentity()
+    const cx1 = wallet.addressCx1(hostOf(mint))!
     // typed with a capital, stored the way an address is read
     const claimed = await wallet.registerName({name: 'Donkey'})
 
-    expect(claimed.address).toBe(`donkey@${hostOf(mint)}`)
-    expect(claimed.paidMsat).toBe(21_000)
+    expect(claimed).toEqual({address: `donkey@${hostOf(mint)}`, paidMsat: 21_000, toKeys: true})
     expect(wallet.lightningAddress()).toBe(`donkey@${hostOf(mint)}`)
     expect(wallet.balanceMsat()).toBe(79_000)
 
@@ -129,23 +112,19 @@ describe('claiming a lightning address', () => {
     expect(request.auth.pubkey).toBe(wallet.nostrIdentity()!.pubkey)
     expect(request.auth.tags.find(tag => tag[0] === 'u')?.[1]).toBe(request.url)
     expect(request.auth.tags.find(tag => tag[0] === 'method')?.[1]).toBe('POST')
-    // with no recovery words, the branch it asks to be paid on comes from
-    // its Nostr key, and that branch proves it agrees: its index-0 key over
-    // sha256("LNURLcash:register:<domain>:<name>"), the domain being the
-    // mint's bare hostname
-    const cx1 = wallet.addressCx1(hostOf(mint))
-    expect(cx1).toMatch(/^cx1/)
+    expect(Math.abs(request.auth.created_at - Math.floor(Date.now() / 1000))).toBeLessThan(60)
+    // a LUD-26 share, 65 bytes, proven by its own key over a message that
+    // binds the mint's bare hostname, the name and the cx1 itself
     expect(request.cx1).toBe(cx1)
+    expect(decodeCx1(cx1)).not.toBeNull()
     expect(request.auth.tags.find(tag => tag[0] === 'payload')?.[1]).toBe(
       bytesToHex(sha256(utf8ToBytes(JSON.stringify({name: 'donkey', note: request.note, cx1, sig: request.sig}))))
     )
-    const branch = decodeCx1(cx1!)!
-    const pk0 = deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, NOTE_PURPOSE_WALLET, 0)
-    const domain = new URL(mint.url).hostname
-    expect(schnorr.verify(hexToBytes(request.sig!), sha256(utf8ToBytes(`LNURLcash:register:${domain}:donkey`)), pk0)).toBe(true)
-    expect(Math.abs(request.auth.created_at - Math.floor(Date.now() / 1000))).toBeLessThan(60)
+    expect(provenBy(cx1, `LNURLcash:register:${domainOf(mint)}:donkey:${cx1}`, request.sig!)).toBe(true)
     // the note really was one of this mint's, and it really was burned
     expect(mint.state.noteState(noteK1(request.note!)!)).toBe('burned')
+    // that share is spent: the next name gets the next one
+    expect(wallet.addressCx1(hostOf(mint))).not.toBe(cx1)
   })
 
   it('leaves the money alone when the mint refuses', async () => {
@@ -154,25 +133,35 @@ describe('claiming a lightning address', () => {
     const {wallet} = makeWallet({fetch: stub.fetchImpl})
     await wallet.addMint(`mint@${hostOf(mint)}`)
     await wallet.receive(fund(mint, 100_000))
+    await wallet.ensureNostrIdentity()
+    const cx1 = wallet.addressCx1(hostOf(mint))
 
     await expect(wallet.registerName({name: 'donkey'})).rejects.toThrow('that name is taken')
     expect(wallet.lightningAddress()).toBeNull()
     // the fee note came home under a fresh secret
     expect(wallet.balanceMsat()).toBe(100_000)
     expect(wallet.sentNotes()).toEqual([])
+    // and the share the mint never took is still the next to offer
+    expect(wallet.addressCx1(hostOf(mint))).toBe(cx1)
   })
 
-  it('refuses a mint that is not handing out names, without touching a note', async () => {
+  it('moves past a share another device on this seed registered, without paying twice', async () => {
     mint = await createMockMint()
-    const stub = sellingNames(mint, {priceMsat: null})
-    const {wallet} = makeWallet({fetch: stub.fetchImpl})
+    const {wallet: probe, data: probed} = makeWallet()
+    probed.seedHex = freshK1()
+    const first = probe.addressCx1(hostOf(mint))!
+    const stub = sellingNames(mint, {priceMsat: 21_000, usedShares: [first]})
+    const {wallet, data} = makeWallet({fetch: stub.fetchImpl})
+    data.seedHex = probed.seedHex
     await wallet.addMint(`mint@${hostOf(mint)}`)
     await wallet.receive(fund(mint, 100_000))
 
-    expect(await wallet.namePriceMsat()).toBeNull()
-    await expect(wallet.registerName({name: 'donkey'})).rejects.toThrow(WalletUsageError)
-    expect(wallet.balanceMsat()).toBe(100_000)
-    expect(stub.seen).toEqual([])
+    const claimed = await wallet.registerName({name: 'donkey'})
+    expect(claimed.toKeys).toBe(true)
+    expect(stub.seen.map(request => request.cx1)).toEqual([first, data.settings.lightningAddressCx1])
+    expect(data.settings.lightningAddressCx1).not.toBe(first)
+    // the refused attempt's note came home; only the accepted one was taken
+    expect(wallet.balanceMsat()).toBe(79_000)
   })
 
   it('refuses a name the rules do not allow before anything goes out', async () => {
@@ -198,252 +187,299 @@ describe('claiming a lightning address', () => {
     expect(stub.seen[0]!.note).toBeUndefined()
     expect(wallet.balanceMsat()).toBe(100_000)
   })
+})
 
-  it("claims a reference lnurl-mint name on its wallet's watch-only branch", async () => {
+// conformance's mock mint, which serves LUD-26 registration as the spec has
+// it: POST, PUT and DELETE at the address, each proof checked, a share
+// accepted once only.
+describe('registering at the address itself', () => {
+  it('registers a share, moves the name to the next with PUT, and releases it', async () => {
     mint = await createMockMint()
-    const reference = referenceNames()
-    const {wallet} = makeWallet({fetch: reference.fetchImpl})
+    const {wallet, data} = makeWallet()
+    data.seedHex = freshK1()
     await wallet.addMint(`mint@${hostOf(mint)}`)
+    const address = `donkey@${hostOf(mint)}`
 
     expect(await wallet.namePriceMsat()).toBe(0)
-    const claimed = await wallet.registerName({name: 'Donkey'})
+    const first = wallet.addressCx1(hostOf(mint))!
+    await expect(wallet.registerName({name: 'Donkey'})).resolves.toEqual({address, paidMsat: 0, toKeys: true})
+    expect(mint.state.registrations.get('donkey')).toMatchObject({cx1: first, paid: true})
+    expect(data.settings.lightningAddressCx1).toBe(first)
 
-    expect(claimed).toEqual({address: `donkey@${hostOf(mint)}`, paidMsat: 0, toKeys: true})
-    expect(reference.seen).toEqual([
-      {
-        method: 'POST',
-        username: 'donkey',
-        cx1: wallet.addressCx1(hostOf(mint)),
-        sig: expect.stringMatching(/^[0-9a-f]{128}$/),
-        npub: wallet.nostrIdentity()!.npub
-      }
-    ])
-    // What the reference mint checks: a BIP-340 signature over
-    // sha256("LNURLcash:register:<domain>:<name>") by pk_0 of the submitted
-    // cx1, the domain being its own bare hostname - never the port.
-    const branch = decodeCx1(reference.seen[0]!.cx1!)!
-    const pk0 = deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, NOTE_PURPOSE_WALLET, 0)
-    const domain = new URL(mint.url).hostname
-    const digest = sha256(utf8ToBytes(`LNURLcash:register:${domain}:donkey`))
-    expect(schnorr.verify(hexToBytes(reference.seen[0]!.sig!), digest, pk0)).toBe(true)
-    expect(schnorr.verify(hexToBytes(reference.seen[0]!.sig!), sha256(utf8ToBytes('LNURLcash:register:donkey')), pk0)).toBe(false)
-    expect(wallet.lightningAddress()).toBe(`donkey@${hostOf(mint)}`)
-  })
+    const second = wallet.addressCx1(hostOf(mint))!
+    expect(second).not.toBe(first)
+    await expect(wallet.payNameToKeys(true)).resolves.toEqual({address, toKeys: true})
+    expect(mint.state.registrations.get('donkey')).toMatchObject({cx1: second})
+    expect(data.settings.lightningAddressCx1).toBe(second)
+    expect(data.settings.nameKeys).toEqual({[address]: second})
 
-  it('updates and unregisters a reference address with action-separated proofs', async () => {
-    mint = await createMockMint()
-    const reference = referenceNames()
-    const {wallet, data} = makeWallet({fetch: reference.fetchImpl})
-    await wallet.addMint(`mint@${hostOf(mint)}`)
-
-    await wallet.registerName({name: 'donkey'})
-    const firstCx1 = reference.seen[0]!.cx1
-    // A wallet created before recovery words used its Nostr branch. Adding a
-    // seed changes the preferred receiving branch, but the old registered
-    // branch must authorise that one migration.
-    data.seedHex = freshK1()
-    await expect(wallet.payNameToKeys(true)).resolves.toEqual({
-      address: `donkey@${hostOf(mint)}`,
-      toKeys: true
-    })
-    await expect(wallet.unregisterName()).resolves.toEqual({address: `donkey@${hostOf(mint)}`})
-
-    expect(reference.seen.map(request => request.method)).toEqual(['POST', 'POST', 'DELETE'])
-    expect(reference.seen[0]!.sig).toBe(reference.seen[1]!.sig)
-    expect(reference.seen[1]!.cx1).not.toBe(firstCx1)
-    expect(reference.seen[2]!.sig).not.toBe(reference.seen[1]!.sig)
+    await expect(wallet.unregisterName()).resolves.toEqual({address})
+    expect(mint.state.registrations.has('donkey')).toBe(false)
     expect(wallet.lightningAddress()).toBeNull()
   })
-})
 
-describe("a reference name on the old m/139'/1' branch", () => {
-  it("moves onto the spec's branch, proven by the old branch's index-0 key", async () => {
+  it('finds the key on file when nothing here recorded it', async () => {
     mint = await createMockMint()
-    const reference = referenceNames()
-    const {wallet, data} = makeWallet({fetch: reference.fetchImpl})
+    const seed = freshK1()
+    const {wallet: other, data: otherData} = makeWallet()
+    otherData.seedHex = seed
+    await other.addMint(`mint@${hostOf(mint)}`)
+    await other.registerName({name: 'donkey'})
+
+    // the same words on a device that has never seen the name
+    const {wallet, data} = makeWallet()
+    data.seedHex = seed
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    await expect(wallet.unregisterName({name: 'donkey'})).resolves.toEqual({address: `donkey@${hostOf(mint)}`})
+    expect(mint.state.registrations.has('donkey')).toBe(false)
+  })
+
+  it('moves past a share the mint has seen before, as LUD-26 says', async () => {
+    mint = await createMockMint()
+    const seed = freshK1()
+    const {wallet: other, data: otherData} = makeWallet()
+    otherData.seedHex = seed
+    await other.addMint(`mint@${hostOf(mint)}`)
+    const taken = other.addressCx1(hostOf(mint))!
+    await other.registerName({name: 'first'})
+
+    const {wallet, data} = makeWallet()
+    data.seedHex = seed
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    expect(wallet.addressCx1(hostOf(mint))).toBe(taken)
+    await wallet.registerName({name: 'second'})
+    expect(mint.state.registrations.get('second')!.cx1).not.toBe(taken)
+    expect(data.settings.addressShares).toEqual({[domainOf(mint)]: 2})
+  })
+
+  it('says so when the name is someone else\'s, and records nothing', async () => {
+    mint = await createMockMint()
+    const {wallet: other, data: otherData} = makeWallet()
+    otherData.seedHex = freshK1()
+    await other.addMint(`mint@${hostOf(mint)}`)
+    await other.registerName({name: 'donkey'})
+
+    const {wallet, data} = makeWallet()
     data.seedHex = freshK1()
     await wallet.addMint(`mint@${hostOf(mint)}`)
-    await wallet.ensureNostrIdentity()
-    const host = hostOf(mint)
-    const legacy = cashNodeToCx1(deriveLegacyCashAddressNode(deriveCashRoot(hexToBytes(data.seedHex)), host))
-    const legacyCx1 = encodeCx1(legacy.pubkeyXOnly, legacy.chainCode)
-    // what a wallet before 2026-09-16 recorded
-    data.settings.lightningAddress = `donkey@${host}`
-    data.settings.lightningAddressCx1 = legacyCx1
+    await expect(wallet.registerName({name: 'donkey'})).rejects.toThrow('already registered')
+    expect(wallet.lightningAddress()).toBeNull()
+    await expect(wallet.unregisterName({name: 'donkey'})).rejects.toThrow(/registered to a key this wallet does not hold/)
+    expect(mint.state.registrations.has('donkey')).toBe(true)
+  })
 
-    await expect(wallet.payNameToKeys(true)).resolves.toEqual({address: `donkey@${host}`, toKeys: true})
-    const moved = reference.seen[0]!
-    expect(moved.cx1).toBe(wallet.addressCx1(host))
-    expect(moved.cx1).not.toBe(legacyCx1)
-    const pk0 = deriveNotePubkey(legacy.pubkeyXOnly, legacy.chainCode, NOTE_PURPOSE_WALLET, 0)
-    const domain = new URL(mint.url).hostname
-    expect(schnorr.verify(hexToBytes(moved.sig!), sha256(utf8ToBytes(`LNURLcash:register:${domain}:donkey`)), pk0)).toBe(true)
-    expect(data.settings.lightningAddressCx1).toBe(moved.cx1)
+  it('waits out a mint that rate-limits the scan, rather than stopping', async () => {
+    mint = await createMockMint()
+    let limited = 0
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
+      if (url.searchParams.get('p')?.startsWith('cp1') && limited < 3) {
+        limited += 1
+        return Response.json({status: 'ERROR', reason: 'rate limited'})
+      }
+      return fetch(input, init)
+    }
+    const {wallet, data} = makeWallet({fetch: fetchImpl, rateLimitBackoffMs: 1})
+    data.seedHex = freshK1()
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    const scan = await wallet.scanAddress(hostOf(mint), {gap: 2})
+    expect(limited).toBe(3)
+    expect(scan.received).toEqual([])
+    expect(scan.scanned).toBeGreaterThan(0)
+  })
+
+  it('pays an address fee by melting a note of the mint, once it is checked against the fee advertised', async () => {
+    mint = await createMockMint({addressFeeMsat: 21_000})
+    const theMint = mint
+    // the mock's invoices carry only their amount; this gives the fee one a
+    // wallet can melt, for the same payment hash
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      const response = await fetch(input, init)
+      if (init?.method !== 'POST' || !String(input).includes('/.well-known/lnurlp/')) return response
+      const body = (await response.json()) as {status: string; pr?: string}
+      const held = theMint.state.registrations.get('donkey')
+      if (!body.pr || !held?.paymentHash) return Response.json(body)
+      return Response.json({...body, pr: fakeBolt11({amountMsat: 21_000, paymentHashHex: held.paymentHash})})
+    }
+    const {wallet, data} = makeWallet({fetch: fetchImpl})
+    data.seedHex = freshK1()
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    await wallet.receive(fund(mint, 100_000))
+
+    expect(await wallet.namePriceMsat()).toBe(21_000)
+    const claimed = await wallet.registerName({name: 'donkey'})
+    expect(claimed).toEqual({address: `donkey@${hostOf(mint)}`, paidMsat: 21_000, toKeys: true})
+    const melt = wallet.data.melts[0]!
+    expect(melt.amountMsat).toBe(21_000)
+    // held until the invoice settles, which is the mint's own to settle
+    expect(mint.state.registrations.get('donkey')!.paid).toBe(false)
+    mint.state.settle(bolt11PaymentHash(melt.pr)!)
+    expect(mint.state.registrations.get('donkey')!.paid).toBe(true)
+  })
+
+  it('hands back an invoice over the fee advertised, and pays nothing', async () => {
+    mint = await createMockMint({addressFeeMsat: 21_000, addressFeeChargedMsat: 50_000})
+    const {wallet, data} = makeWallet()
+    data.seedHex = freshK1()
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    await wallet.receive(fund(mint, 100_000))
+
+    const claimed = await wallet.registerName({name: 'donkey'})
+    expect(claimed.paidMsat).toBe(0)
+    expect(claimed.feeInvoice).toMatch(/^ln/)
+    expect(wallet.data.melts).toEqual([])
+    expect(wallet.balanceMsat()).toBe(100_000)
+    expect(mint.state.registrations.get('donkey')!.paid).toBe(false)
   })
 })
 
-// A mint on cash.example.com, test vector 2's domain, that manages names
-// either way a mint does: moneyer's NIP-98 POST /names with its body, or the
-// reference's POST/DELETE /p/{name}. The moneyer route enforces the branch
-// proof as a mint following LUD-25 does - set proven by the branch on file,
-// or by the new one when there is none, cleared by the branch on file - and
-// publishes the branch on file as text/cpub on the name's payRequest.
-const namesAt = (route: 'moneyer' | 'reference', onFile: Record<string, string | null> = {}) => {
-  const origin = 'https://cash.example.com'
-  const posts: Array<{method: string; name: string; cx1?: string | null; sig?: string}> = []
-  const proven = (cx1: string, action: 'register' | 'unregister', name: string, sig: string | undefined) => {
-    if (!sig) return false
-    const branch = decodeCx1(cx1)!
-    const pk0 = deriveNotePubkey(branch.pubkeyXOnly, branch.chainCode, NOTE_PURPOSE_WALLET, 0)
-    return schnorr.verify(hexToBytes(sig), sha256(utf8ToBytes(`LNURLcash:${action}:cash.example.com:${name}`)), pk0)
+// LUD-26's own vectors (26-vectors.json, as conformance ships it): alice at
+// cash.example.com from derivation[1]'s seed, registered to share 0, moved
+// to share 1, released by share 1. The wallet sends exactly those proofs.
+const specVectors = createRequire(import.meta.url)('lnurlcash-conformance/vectors/spec-vectors.json') as {
+  lud26: {
+    derivation: Array<{seed: string; domain: string; accounts: Array<{shareable: Array<{cx1: string}>}>}>
+    registration: {
+      username: string
+      domain: string
+      cx1: string
+      new_cx1: string
+      register: {sig: string}
+      update: {sig: {sig: string}; newsig: {sig: string}}
+      unregister: {sig: string}
+    }
   }
-  const fetchImpl: typeof globalThis.fetch = async (input, init) => {
-    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
-    const lnurlp = url.pathname.match(/^\/\.well-known\/lnurlp\/([^/]+)$/)
-    if (url.pathname === '/.well-known/lnurlw/mint') {
-      return Response.json({
-        tag: 'withdrawRequest',
-        callback: `${origin}/cb`,
-        minWithdrawable: 1000,
-        maxWithdrawable: 1000,
-        payLink: `${origin}/.well-known/lnurlp/mint`,
-        mintPubkey: `02${'11'.repeat(32)}`,
-        ...(route === 'moneyer' ? {namePriceMsat: 0} : {})
-      })
-    }
-    if (lnurlp && lnurlp[1] !== 'mint') {
-      const cx1 = onFile[lnurlp[1]!]
-      if (cx1 === undefined) return Response.json({status: 'ERROR', reason: 'Unknown user.'}, {status: 404})
-      const metadata = [['text/identifier', `${lnurlp[1]}@cash.example.com`], ...(cx1 ? [['text/cpub', `${cx1}:0`]] : [])]
-      return Response.json({
-        tag: 'payRequest',
-        callback: `${origin}/z/cb/${lnurlp[1]}`,
-        minSendable: 1000,
-        maxSendable: 1_000_000,
-        metadata: JSON.stringify(metadata)
-      })
-    }
-    if (url.pathname === '/names' && init?.method === 'POST') {
-      const body = JSON.parse(String(init.body)) as {name: string; cx1?: string | null; sig?: string}
-      posts.push({method: 'POST', ...body})
-      const current = onFile[body.name]
-      if (body.cx1 === null && current && !proven(current, 'unregister', body.name, body.sig)) {
-        return Response.json({status: 'ERROR', reason: 'Setting or clearing a cx1 needs "sig".'}, {status: 403})
-      }
-      if (typeof body.cx1 === 'string' && !proven(current ?? body.cx1, 'register', body.name, body.sig)) {
-        return Response.json({status: 'ERROR', reason: 'Setting or clearing a cx1 needs "sig".'}, {status: 403})
-      }
-      if (body.cx1 !== undefined) onFile[body.name] = body.cx1
-      return Response.json({status: 'OK', name: body.name, cx1: onFile[body.name] ?? null, paidMsat: 0})
-    }
-    if (url.pathname === '/p/_' && init?.method === 'POST') {
-      return Response.json({status: 'ERROR', reason: route === 'reference' ? 'Invalid or reserved username.' : 'Not found'})
-    }
-    const reference = url.pathname.match(/^\/p\/([^/]+)$/)
-    if (route === 'reference' && reference && (init?.method === 'POST' || init?.method === 'DELETE')) {
-      posts.push({method: init.method, name: reference[1]!, cx1: url.searchParams.get('cx1'), sig: url.searchParams.get('sig') ?? ''})
-      return Response.json({status: 'OK'})
-    }
-    return Response.json({status: 'ERROR', reason: 'Not found.'}, {status: 404})
-  }
-  return {fetchImpl, posts, onFile}
 }
 
-// Test vector 2's seed: its m/139' branch at cash.example.com is the vector's.
-const VECTOR2_SEED =
-  'fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542'
-const VECTOR2_CX1 =
-  'cx1vjy9489tj0kq29mphzstsrsc2jnpsev834v0w23kth7kgzzs7e6kh9tet7vq0tdgtjx22rkf8jfpfqapsw4la49rkj47dw2u3xyqxpspgvxpa'
-
-const vectorWallet = (fetchImpl: typeof globalThis.fetch) => {
-  const made = makeWallet({fetch: fetchImpl})
-  made.data.seedHex = VECTOR2_SEED
-  made.data.mints.push({
-    input: 'mint@cash.example.com',
-    host: 'cash.example.com',
-    payUrl: 'https://cash.example.com/.well-known/lnurlp/mint',
-    addedAt: 1
-  })
-  made.data.settings.defaultMintHost = 'cash.example.com'
-  return made
-}
-
-describe('test vector 2, through the wallet', () => {
-  it('registers and releases a reference name with exactly the proofs the spec prints', async () => {
-    const names = namesAt('reference')
-    const {wallet} = vectorWallet(names.fetchImpl)
-    expect(wallet.addressCx1('cash.example.com')).toBe(VECTOR2_CX1)
+describe("LUD-26's vectors, through the wallet", () => {
+  it('registers, moves and releases alice with exactly the proofs the spec prints', async () => {
+    const vectors = specVectors.lud26
+    const origin = 'https://cash.example.com'
+    const sent: Array<{method: string; form: Record<string, string>}> = []
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
+      if (url.pathname === '/.well-known/lnurlw/mint') return Response.json({status: 'ERROR', reason: 'Not found.'}, {status: 404})
+      if (url.pathname === '/.well-known/lnurlp/mint') {
+        return Response.json({
+          tag: 'payRequest',
+          callback: `${origin}/cb`,
+          minSendable: 1000,
+          maxSendable: 1_000_000,
+          metadata: JSON.stringify([['text/plain', 'Mint fees: 0,0']]),
+          withdrawLink: `${origin}/w`
+        })
+      }
+      if (url.pathname === '/.well-known/lnurlp/alice' && init?.method) {
+        sent.push({method: init.method, form: Object.fromEntries(new URLSearchParams(String(init.body ?? '')))})
+        return Response.json({status: 'OK'})
+      }
+      return Response.json({status: 'ERROR', reason: 'Not found.'}, {status: 404})
+    }
+    const {wallet, data} = makeWallet({fetch: fetchImpl})
+    data.seedHex = vectors.derivation[1]!.seed
+    data.mints.push({input: 'mint@cash.example.com', host: 'cash.example.com', payUrl: `${origin}/.well-known/lnurlp/mint`, addedAt: 1})
+    data.settings.defaultMintHost = 'cash.example.com'
 
     await wallet.registerName({name: 'alice'})
+    await wallet.payNameToKeys(true)
     await wallet.unregisterName()
-    expect(names.posts).toEqual([
-      {
-        method: 'POST',
-        name: 'alice',
-        cx1: VECTOR2_CX1,
-        sig: '9169a81db3372d8bb8a080f271f8036192131d4ed02596c0baa181613fdc5d6e17b3230b01f510a759fdb6c46b53671e57678f57ac0a6a3deb6300761225adc7'
-      },
-      {
-        method: 'DELETE',
-        name: 'alice',
-        cx1: null,
-        sig: 'fcc6a96f560d6505bfc475d8c2d4383047f2ece6593412af9b2834913af60f108b6e194cef31c377a23a051f8c80c1660efc2313b7876a2f80bc1f0f423c7835'
-      }
+    const proofs = vectors.registration
+    expect(sent).toEqual([
+      // no npub: an unsigned one would tie the name to a Nostr identity
+      {method: 'POST', form: {cx1: proofs.cx1, sig: proofs.register.sig}},
+      {method: 'PUT', form: {cx1: proofs.new_cx1, sig: proofs.update.sig.sig, newsig: proofs.update.newsig.sig}},
+      {method: 'DELETE', form: {sig: proofs.unregister.sig}}
     ])
-  })
-
-  it('sends the same register proof in a moneyer name request', async () => {
-    const names = namesAt('moneyer')
-    const {wallet} = vectorWallet(names.fetchImpl)
-    const claimed = await wallet.registerName({name: 'alice'})
-    expect(claimed.toKeys).toBe(true)
-    expect(names.posts[0]).toMatchObject({
-      name: 'alice',
-      cx1: VECTOR2_CX1,
-      sig: '9169a81db3372d8bb8a080f271f8036192131d4ed02596c0baa181613fdc5d6e17b3230b01f510a759fdb6c46b53671e57678f57ac0a6a3deb6300761225adc7'
-    })
   })
 })
 
-describe('the branch proof on a moneyer name', () => {
-  it("proves a move off the old m/139'/1' branch with that branch, which the mint publishes", async () => {
-    const legacy = cashNodeToCx1(deriveLegacyCashAddressNode(deriveCashRoot(hexToBytes(VECTOR2_SEED)), 'cash.example.com'))
-    const legacyCx1 = encodeCx1(legacy.pubkeyXOnly, legacy.chainCode)
-    // on file from before 2026-09-16, and nothing about it recorded here
-    const names = namesAt('moneyer', {alice: legacyCx1})
-    const {wallet} = vectorWallet(names.fetchImpl)
+// LUD-26's internal transfer, to a name a stub serves in front of the
+// mock: the address's payRequest and its callback, answered as `answer`.
+describe('paying a name at the same mint', () => {
+  const payee = (theMint: Mint, opts: {callbackOrigin?: string; answer?: Record<string, unknown>} = {}) => {
+    const sent: string[] = []
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
+      if (url.pathname === '/.well-known/lnurlp/bob') {
+        return Response.json({
+          tag: 'payRequest',
+          callback: `${opts.callbackOrigin ?? theMint.url}/z/cb/bob`,
+          minSendable: 1000,
+          maxSendable: 1_000_000,
+          metadata: JSON.stringify([['text/plain', 'bob']]),
+          withdrawLink: `${theMint.url}/w`
+        })
+      }
+      if (url.pathname === '/z/cb/bob') {
+        sent.push(url.searchParams.get('k1') ?? '')
+        return Response.json(opts.answer ?? {status: 'OK'})
+      }
+      return fetch(input, init)
+    }
+    return {fetchImpl, sent}
+  }
+  const funded = async (fetchImpl: typeof globalThis.fetch) => {
+    const {wallet} = makeWallet({fetch: fetchImpl})
+    await wallet.addMint(`mint@${hostOf(mint!)}`)
+    await wallet.receive(fund(mint!, 50_000))
+    return wallet
+  }
 
-    await expect(wallet.payNameToKeys(true, {name: 'alice'})).resolves.toEqual({
-      address: 'alice@cash.example.com',
-      toKeys: true
-    })
-    expect(names.onFile.alice).toBe(VECTOR2_CX1)
-    const pk0 = deriveNotePubkey(legacy.pubkeyXOnly, legacy.chainCode, NOTE_PURPOSE_WALLET, 0)
-    expect(
-      schnorr.verify(hexToBytes(names.posts[0]!.sig!), sha256(utf8ToBytes('LNURLcash:register:cash.example.com:alice')), pk0)
-    ).toBe(true)
+  it('hands over an exact note at the callback, and writes it off once the mint says OK', async () => {
+    mint = await createMockMint()
+    const stub = payee(mint)
+    const wallet = await funded(stub.fetchImpl)
+    const paid = await wallet.payAddressInternally(`bob@${hostOf(mint)}`, 21_000)
+    expect(paid).toMatchObject({host: hostOf(mint), ambiguous: false})
+    expect(paid!.note.state).toBe('spent')
+    expect(stub.sent).toEqual([paid!.note.k1])
+    expect(wallet.balanceMsat()).toBe(29_000)
   })
 
-  it('proves clearing the branch with the branch on file, as an unregister', async () => {
-    const names = namesAt('moneyer', {alice: VECTOR2_CX1})
-    const {wallet} = vectorWallet(names.fetchImpl)
-    await expect(wallet.payNameToKeys(false, {name: 'alice'})).resolves.toEqual({
-      address: 'alice@cash.example.com',
-      toKeys: false
-    })
-    expect(names.onFile.alice).toBeNull()
-    expect(names.posts[0]!.sig).toBe(
-      'fcc6a96f560d6505bfc475d8c2d4383047f2ece6593412af9b2834913af60f108b6e194cef31c377a23a051f8c80c1660efc2313b7876a2f80bc1f0f423c7835'
-    )
+  it('never sends a note to a callback off the mint, whatever the payRequest claims', async () => {
+    mint = await createMockMint()
+    const stub = payee(mint, {callbackOrigin: 'https://evil.example'})
+    const wallet = await funded(stub.fetchImpl)
+    expect(await wallet.payAddressInternally(`bob@${hostOf(mint)}`, 21_000)).toBeNull()
+    expect(stub.sent).toEqual([])
+    expect(wallet.balanceMsat()).toBe(50_000)
   })
 
-  it('cannot prove a change for a branch it does not hold, and passes on what the mint says', async () => {
-    const stranger = encodeCx1(new Uint8Array(32).fill(2), new Uint8Array(32).fill(3))
-    const names = namesAt('moneyer', {alice: stranger})
-    const {wallet} = vectorWallet(names.fetchImpl)
-    await expect(wallet.payNameToKeys(true, {name: 'alice'})).rejects.toThrow('needs "sig"')
-    expect(names.posts[0]!.sig).toBeUndefined()
-    expect(names.onFile.alice).toBe(stranger)
+  it('never pays an address on another host this way, even one naming the mint as its withdrawLink', async () => {
+    mint = await createMockMint()
+    const stub = payee(mint)
+    const wallet = await funded(stub.fetchImpl)
+    expect(await wallet.payAddressInternally('bob@evil.example', 21_000)).toBeNull()
+    expect(stub.sent).toEqual([])
+  })
+
+  for (const reason of ['pending', 'already in use']) {
+    it(`keeps the note handed over when the mint answers "${reason}"`, async () => {
+      mint = await createMockMint()
+      const stub = payee(mint, {answer: {status: 'ERROR', reason}})
+      const wallet = await funded(stub.fetchImpl)
+      const paid = await wallet.payAddressInternally(`bob@${hostOf(mint)}`, 21_000)
+      expect(paid).toMatchObject({ambiguous: true})
+      expect(paid!.note.state).toBe('sent')
+      expect(wallet.balanceMsat()).toBe(29_000)
+    })
+  }
+
+  it('takes the note back on a plain refusal', async () => {
+    mint = await createMockMint()
+    const stub = payee(mint, {answer: {status: 'ERROR', reason: 'Amount out of range.'}})
+    const wallet = await funded(stub.fetchImpl)
+    await expect(wallet.payAddressInternally(`bob@${hostOf(mint)}`, 21_000)).rejects.toThrow('Amount out of range.')
+    expect(wallet.balanceMsat()).toBe(50_000)
+    expect(wallet.sentNotes()).toEqual([])
+  })
+
+  it('cuts nothing for an amount the address does not take', async () => {
+    mint = await createMockMint()
+    const stub = payee(mint)
+    const wallet = await funded(stub.fetchImpl)
+    expect(await wallet.payAddressInternally(`bob@${hostOf(mint)}`, 2_000_000)).toBeNull()
+    expect(wallet.liveNotes()).toHaveLength(1)
   })
 })
 

@@ -52,8 +52,11 @@ export const legacySchnorrCk1 = (secretKey: Uint8Array): string =>
 // A mint's cs1 certificate for the note filed under `noteId` (64 hex: its Q,
 // or anything else a test wants a certificate over), signed with `mintKey`
 // as a Lightning node's signmessage would, r || s || recovery id.
-export const certify = (mintKey: Uint8Array, amountMsat: number, noteId: string): string => {
-  const digest = sha256(sha256(utf8ToBytes(`Lightning Signed Message:LNURLcash:${amountMsat}:${noteId}`)))
+// `domain` binds it to one mint, as LUD-25 now certifies; without, it is a
+// certificate from before that, which wallets still take.
+export const certify = (mintKey: Uint8Array, amountMsat: number, noteId: string, domain?: string): string => {
+  const message = domain === undefined ? `LNURLcash:${amountMsat}:${noteId}` : `LNURLcash:${domain}:${amountMsat}:${noteId}`
+  const digest = sha256(sha256(utf8ToBytes(`Lightning Signed Message:${message}`)))
   const lead = secp256k1.sign(digest, mintKey, {format: 'recovered', prehash: false})
   return encodeCs1WithAmount(amountMsat, new Uint8Array([...lead.subarray(1), lead[0]!]))
 }

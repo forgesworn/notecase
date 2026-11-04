@@ -266,12 +266,18 @@ describe('notecase against moneyer', () => {
     backend.control.settleInvoice(pending.id)
     await wallet.wallet.awaitMint(pending, {timeoutMs: 5_000, intervalMs: 20})
 
-    backend.control.setPayMode('fail-clean')
-    const pr = fakeBolt11({amountMsat: 21_000, paymentHashHex: bytesToHex(randomBytes(32))})
+    // A payment still in flight when the melt is answered, which then
+    // fails: moneyer restores the note once the node says so. (One that
+    // fails cleanly is refused there and then, and never leaves the wallet.)
+    backend.control.setPayMode('ambiguous-pending')
+    const paymentHashHex = bytesToHex(randomBytes(32))
+    const pr = fakeBolt11({amountMsat: 21_000, paymentHashHex})
     await wallet.wallet.melt(pr, 'invoice')
     expect(wallet.wallet.balanceMsat()).toBe(0)
+    backend.control.resolvePayment(paymentHashHex, 'failed')
+    // the mint's own reconcile pass learns the payment failed
+    await moneyer.reconcile()
 
-    await new Promise(resolve => setTimeout(resolve, 100))
     const events = await wallet.wallet.reconcile()
     expect(events.some(event => event.kind === 'melt-returned')).toBe(true)
     expect(wallet.wallet.balanceMsat()).toBe(21_000)

@@ -30,6 +30,23 @@ import {
 } from '../src/lnurlcash.js'
 import {bech32m} from '@scure/base'
 import {certify, legacyEcdsaCk1, legacySchnorrCk1} from './helpers.ts'
+import {createRequire} from 'node:module'
+
+type Share = {share: number; p: string; P: string; cx1: string; notes: Array<{i: number; sk: string; Q: string; cp1: string}>}
+const specVectors = createRequire(import.meta.url)('lnurlcash-conformance/vectors/spec-vectors.json') as {
+  lud26: {
+    derivation: Array<{seed: string; domain: string; accounts: Array<{account: number; shareable: Share[]}>}>
+    registration: {
+      username: string
+      domain: string
+      cx1: string
+      new_cx1: string
+      register: {digest: string; sig: string}
+      update: {sig: {digest: string; sig: string}; newsig: {digest: string; sig: string}}
+      unregister: {digest: string; sig: string}
+    }
+  }
+}
 
 // LUD-25's own test vectors (lnurl/luds 25.md at 50d740a), byte for byte.
 // Every spend in them was accepted by Bitcoin Core's interpreter against the
@@ -122,17 +139,17 @@ describe('test vector 5: a bearer note', () => {
   })
 
   it("takes vector 4's certificate over Q, and no longer one over its h", () => {
-    expect(verifyNoteCertificate(V5.preimage, 1000, V5.cs1, V4.mintPubkey)).toBe(true)
-    expect(verifyNoteCertificate(V5.cw1, 1000, V5.cs1, V4.mintPubkey)).toBe(true)
+    expect(verifyNoteCertificate(V5.preimage, 'mint.example', 1000, V5.cs1, V4.mintPubkey)).toBe(true)
+    expect(verifyNoteCertificate(V5.cw1, 'mint.example', 1000, V5.cs1, V4.mintPubkey)).toBe(true)
     // kit 0.20 dropped certificates over a bearer note's h, as LUD-25 did
     const overH = certify(hexToBytes(V4.mintKey), 1000, V5.h)
-    expect(verifyNoteCertificate(V5.preimage, 1000, overH, V4.mintPubkey)).toBe(false)
-    expect(verifyNoteCertificate(V5.cw1, 1000, overH, V4.mintPubkey)).toBe(false)
+    expect(verifyNoteCertificate(V5.preimage, 'mint.example', 1000, overH, V4.mintPubkey)).toBe(false)
+    expect(verifyNoteCertificate(V5.cw1, 'mint.example', 1000, overH, V4.mintPubkey)).toBe(false)
   })
 
   it('takes a certificate over Q only as a cs1 carrying its amount, never as bare hex', () => {
     const bare = bytesToHex(decodeCs1WithAmount(V5.cs1)!.signature)
-    expect(verifyNoteCertificate(V5.preimage, 1000, bare, V4.mintPubkey)).toBe(false)
+    expect(verifyNoteCertificate(V5.preimage, 'mint.example', 1000, bare, V4.mintPubkey)).toBe(false)
   })
 
   // A mint from before LUD-25's cs1<amount> still certifies only this way:
@@ -145,30 +162,30 @@ describe('test vector 5: a bearer note', () => {
     for (const signature of [overH, leading]) {
       const hex = bytesToHex(signature)
       const fixed = bech32m.encode('cs', bech32m.toWords(signature), false)
-      expect(verifyNoteCertificate(V5.preimage, 1000, hex, V4.mintPubkey)).toBe(true)
-      expect(verifyNoteCertificate(V5.preimage, 1000, fixed, V4.mintPubkey)).toBe(true)
+      expect(verifyNoteCertificate(V5.preimage, 'mint.example', 1000, hex, V4.mintPubkey)).toBe(true)
+      expect(verifyNoteCertificate(V5.preimage, 'mint.example', 1000, fixed, V4.mintPubkey)).toBe(true)
       // the amount is in the digest, so a different one does not verify
-      expect(verifyNoteCertificate(V5.preimage, 2000, hex, V4.mintPubkey)).toBe(false)
+      expect(verifyNoteCertificate(V5.preimage, 'mint.example', 2000, hex, V4.mintPubkey)).toBe(false)
       // no mint ever certified a cw1 this way
-      expect(verifyNoteCertificate(V5.cw1, 1000, hex, V4.mintPubkey)).toBe(false)
+      expect(verifyNoteCertificate(V5.cw1, 'mint.example', 1000, hex, V4.mintPubkey)).toBe(false)
     }
     // nor is a signature over anything but this note's h taken
     const overQ = bytesToHex(decodeCs1WithAmount(certify(hexToBytes(V4.mintKey), 1000, V5.q))!.signature)
-    expect(verifyNoteCertificate(V5.preimage, 1000, overQ, V4.mintPubkey)).toBe(false)
+    expect(verifyNoteCertificate(V5.preimage, 'mint.example', 1000, overQ, V4.mintPubkey)).toBe(false)
     const stranger = bytesToHex(decodeCs1WithAmount(certify(hexToBytes('11'.repeat(32)), 1000, V5.h))!.signature)
-    expect(verifyNoteCertificate(V5.preimage, 1000, stranger, V4.mintPubkey)).toBe(false)
+    expect(verifyNoteCertificate(V5.preimage, 'mint.example', 1000, stranger, V4.mintPubkey)).toBe(false)
   })
 
   it('refuses a certificate under neither id, or for another amount, exactly as before', () => {
-    expect(verifyNoteCertificate(V5.preimage, 2000, V5.cs1, V4.mintPubkey)).toBe(false)
+    expect(verifyNoteCertificate(V5.preimage, 'mint.example', 2000, V5.cs1, V4.mintPubkey)).toBe(false)
     const otherNote = certify(hexToBytes(V4.mintKey), 1000, 'ab'.repeat(32))
-    expect(verifyNoteCertificate(V5.preimage, 1000, otherNote, V4.mintPubkey)).toBe(false)
+    expect(verifyNoteCertificate(V5.preimage, 'mint.example', 1000, otherNote, V4.mintPubkey)).toBe(false)
     // sha256(h) is neither Q nor h
     const hashOfH = certify(hexToBytes(V4.mintKey), 1000, bytesToHex(sha256(hexToBytes(V5.h))))
-    expect(verifyNoteCertificate(V5.preimage, 1000, hashOfH, V4.mintPubkey)).toBe(false)
+    expect(verifyNoteCertificate(V5.preimage, 'mint.example', 1000, hashOfH, V4.mintPubkey)).toBe(false)
     // another mint's key
     const stranger = certify(hexToBytes('11'.repeat(32)), 1000, V5.q)
-    expect(verifyNoteCertificate(V5.preimage, 1000, stranger, V4.mintPubkey)).toBe(false)
+    expect(verifyNoteCertificate(V5.preimage, 'mint.example', 1000, stranger, V4.mintPubkey)).toBe(false)
   })
 })
 
@@ -229,44 +246,66 @@ describe('test vector 3: a key-path spend bound to its mint', () => {
   })
 })
 
-describe('test vector 4: a certificate over a key note', () => {
-  it('verifies at both amounts, and at no other', () => {
-    expect(verifyNoteCertificate(V3.ck1, 1000, V4.cs1At1000, V4.mintPubkey)).toBe(true)
-    expect(verifyNoteCertificate(V3.ck1, 21_000_000, V4.cs1At21m, V4.mintPubkey)).toBe(true)
-    expect(verifyNoteCertificate(V3.ck1, 1001, V4.cs1At1000, V4.mintPubkey)).toBe(false)
-    expect(verifyNoteCertificate(V3.ck1, 21_000_000, V4.cs1At1000, V4.mintPubkey)).toBe(false)
+describe('a certificate bound to its mint', () => {
+  // LUD-25 now certifies over the domain as well, so a certificate one mint
+  // issued never passes for another's note of the same Q and amount.
+  it('verifies at the domain it was issued for, and at no other', () => {
+    const bound = certify(hexToBytes(V4.mintKey), 1000, V5.q, 'mint.example')
+    expect(verifyNoteCertificate(V5.preimage, 'mint.example', 1000, bound, V4.mintPubkey)).toBe(true)
+    expect(verifyNoteCertificate(V5.preimage, 'https://mint.example/w?k1=x', 1000, bound, V4.mintPubkey)).toBe(true)
+    expect(verifyNoteCertificate(V5.preimage, 'elsewhere.example', 1000, bound, V4.mintPubkey)).toBe(false)
+  })
+
+  it('still takes one made before the domain was bound, as every note held from then carries', () => {
+    expect(verifyNoteCertificate(V5.preimage, 'elsewhere.example', 1000, V5.cs1, V4.mintPubkey)).toBe(true)
   })
 })
 
-describe('test vector 2: the address registration proof', () => {
-  const sk0 = hexToBytes('bc1e4427b38f7b48ef379ff7cefbef6612cf84a0f582b06c90bf6b51d2c89f29')
-  const pk0 = hexToBytes('23bf26d94335b65e84b8383eb0a8baec8c32e2ebc561a204a386bb720b4cd130')
-  const register =
-    '9d96780fe55f602a9e238a4b2640a9f8ca939cacbbcde109cfd6ba94a6f9d46ff4aaf56ba1e4e72696f7c0e8833445bd194bd06155a133cf524eb587d52e8d22'
-  const unregister =
-    '7250ab2403333eb5ed73f7a212ac4f35b58f426fe5c2acb8b2194a112881332bfbeebeba0bc4615bcf361bc125d5a4149ddbe4b6ea3b755b711fefd8bba58728'
+describe('test vector 4: a certificate over a key note', () => {
+  it('verifies at both amounts, and at no other', () => {
+    expect(verifyNoteCertificate(V3.ck1, 'mint.example', 1000, V4.cs1At1000, V4.mintPubkey)).toBe(true)
+    expect(verifyNoteCertificate(V3.ck1, 'mint.example', 21_000_000, V4.cs1At21m, V4.mintPubkey)).toBe(true)
+    expect(verifyNoteCertificate(V3.ck1, 'mint.example', 1001, V4.cs1At1000, V4.mintPubkey)).toBe(false)
+    expect(verifyNoteCertificate(V3.ck1, 'mint.example', 21_000_000, V4.cs1At1000, V4.mintPubkey)).toBe(false)
+  })
+})
 
-  it('signs register and unregister over the domain-bound digests', () => {
-    expect(bytesToHex(signAddressProof(sk0, 'register', 'cash.example.com', 'alice'))).toBe(register)
-    expect(bytesToHex(signAddressProof(sk0, 'unregister', 'cash.example.com', 'alice'))).toBe(unregister)
-    // the kit signs the domain it is given; the wallet hands it the
-    // service's bare hostname, as the service verifies
-    const domain = spendDomainOf('https://cash.example.com:8443/.well-known/lnurlw/mint')
-    expect(bytesToHex(signAddressProof(sk0, 'register', domain, 'alice'))).toBe(register)
-    expect(bytesToHex(addressProofDigest('register', domain, 'alice'))).toBe(
-      bytesToHex(sha256(utf8ToBytes('LNURLcash:register:cash.example.com:alice')))
-    )
-    expect(
-      schnorr.verify(hexToBytes(register), sha256(utf8ToBytes('LNURLcash:register:cash.example.com:alice')), pk0)
-    ).toBe(true)
+// LUD-26's registration proofs (luds 26-vectors.json, as conformance ships
+// it): alice at cash.example.com, registered to account 0's share 0, moved
+// to share 1, then released by share 1, now on file.
+describe("LUD-26's registration proofs", () => {
+  const lud26 = specVectors.lud26
+  const shares = lud26.derivation[1]!.accounts[0]!.shareable
+  const [first, second] = [shares[0]!, shares[1]!]
+  const proofs = lud26.registration
+
+  it('signs register, update and unregister exactly as the spec prints them', () => {
+    expect(proofs.cx1).toBe(first.cx1)
+    expect(proofs.new_cx1).toBe(second.cx1)
+    const at = (key: string, action: 'register' | 'update' | 'unregister', cx1?: string) =>
+      bytesToHex(signAddressProof(hexToBytes(key), action, proofs.domain, proofs.username, cx1))
+    expect(at(first.p, 'register', first.cx1)).toBe(proofs.register.sig)
+    expect(at(first.p, 'update', second.cx1)).toBe(proofs.update.sig.sig)
+    expect(at(second.p, 'register', second.cx1)).toBe(proofs.update.newsig.sig)
+    expect(at(second.p, 'unregister')).toBe(proofs.unregister.sig)
   })
 
-  it('binds the domain, so a proof for one service is refused at another', () => {
-    const elsewhere = signAddressProof(sk0, 'register', 'other.example', 'alice')
-    expect(bytesToHex(elsewhere)).not.toBe(register)
-    expect(
-      schnorr.verify(elsewhere, sha256(utf8ToBytes('LNURLcash:register:cash.example.com:alice')), pk0)
-    ).toBe(false)
+  it('builds the digests a heartwood proof is checked against', () => {
+    expect(bytesToHex(addressProofDigest('register', proofs.domain, proofs.username, first.cx1))).toBe(proofs.register.digest)
+    expect(bytesToHex(addressProofDigest('update', proofs.domain, proofs.username, second.cx1))).toBe(proofs.update.sig.digest)
+    expect(bytesToHex(addressProofDigest('unregister', proofs.domain, proofs.username))).toBe(proofs.unregister.digest)
+    // the service's bare hostname, however the wallet came by it
+    const domain = spendDomainOf('https://cash.example.com:8443/.well-known/lnurlw/mint')
+    expect(bytesToHex(addressProofDigest('unregister', domain, 'ALICE'))).toBe(proofs.unregister.digest)
+    expect(() => addressProofDigest('register', domain, 'alice')).toThrow(/binds the cx1/)
+  })
+
+  it('binds the domain and the cx1, so a proof replays nowhere else', () => {
+    const elsewhere = signAddressProof(hexToBytes(first.p), 'register', 'other.example', 'alice', first.cx1)
+    expect(bytesToHex(elsewhere)).not.toBe(proofs.register.sig)
+    const otherCx1 = signAddressProof(hexToBytes(first.p), 'register', proofs.domain, 'alice', second.cx1)
+    expect(bytesToHex(otherCx1)).not.toBe(proofs.register.sig)
+    expect(schnorr.verify(hexToBytes(proofs.register.sig), hexToBytes(proofs.register.digest), hexToBytes(first.P).slice(1))).toBe(true)
   })
 })
 

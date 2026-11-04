@@ -90,7 +90,7 @@ describe('taking a Part 2 note', () => {
     expect(wallet.balanceMsat()).toBe(30_000)
     const [held] = wallet.liveNotes()
     expect(held!.k1).toMatch(/^[0-9a-f]{64}$/)
-    expect(await statusAtMint(theMint, note.ck1)).toBe('Note already spent.')
+    expect(await statusAtMint(theMint, note.ck1)).toBe('already in use')
   })
 
   // kit 0.20 dropped the shape, as LUD-25 did. The mint may still honour
@@ -132,7 +132,7 @@ describe('taking a Part 2 note', () => {
     const rotated = await wallet.rotateLive(data.notes.find(record => record.id === note.id)!)
     expect(rotated.k1).toMatch(/^[0-9a-f]{64}$/)
     expect(wallet.balanceMsat()).toBe(5_000 + 30_000)
-    expect(await statusAtMint(theMint, note.ck1)).toBe('Note already spent.')
+    expect(await statusAtMint(theMint, note.ck1)).toBe('already in use')
   })
 
   // The 65-byte ECDSA ck1 cannot even be asked after by its key any more.
@@ -166,7 +166,7 @@ describe('taking a Part 2 note', () => {
     const note = await partTwoNote(theMint, 30_000, boundCk1)
     await wallet.receive(note.url)
     expect(wallet.balanceMsat()).toBe(30_000)
-    expect(await statusAtMint(theMint, note.ck1)).toBe('Note already spent.')
+    expect(await statusAtMint(theMint, note.ck1)).toBe('already in use')
   })
 
   it('refuses one whose ck1 is bound to another mint, before asking this one anything', async () => {
@@ -206,7 +206,7 @@ describe('taking a Part 2 note offline', () => {
     await wallet.reconcile()
     expect(wallet.liveNotes().some(record => isCk1(record.k1))).toBe(false)
     expect(wallet.balanceMsat()).toBe(5_000 + 21_000)
-    expect(await statusAtMint(theMint, note.ck1)).toBe('Note already spent.')
+    expect(await statusAtMint(theMint, note.ck1)).toBe('already in use')
   })
 
   it('takes the 65-byte ECDSA spelling of its ck1 for no note at all', async () => {
