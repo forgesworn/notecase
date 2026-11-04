@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.26.0 - 2026-11-04
 
 LUD-26 as it now stands (luds `lnurlcash` `92e430f`), on @lnurlcash/kit
 0.21.2. Breaking for names: a mint on LUD-26 refuses the whole-branch cx1
