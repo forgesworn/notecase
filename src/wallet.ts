@@ -3065,7 +3065,8 @@ export class Wallet {
       // with nothing ends the walk.
       const seed = deriveNostrCashSeed(identity.secret)
       const cashRoot = deriveCashRoot(seed)
-      const service = deriveServiceRoot(new HDKey({privateKey: cashRoot.privateKey, chainCode: cashRoot.chainCode}), entry.host)
+      const root = new HDKey({privateKey: cashRoot.privateKey, chainCode: cashRoot.chainCode})
+      const service = deriveServiceRoot(root, entry.host)
       try {
         for (let share = 0, quiet = 0; share < DEVICE_SHARE_LIMIT && quiet < SHARE_GAP; share++) {
           const node = deriveShareNode(service, ADDRESS_ACCOUNT, share)
@@ -3080,6 +3081,7 @@ export class Wallet {
         }
       } finally {
         service.wipePrivateData()
+        root.wipePrivateData()
         cashRoot.privateKey.fill(0)
         seed.fill(0)
       }
@@ -3257,6 +3259,18 @@ export class Wallet {
     shares[slot] = Math.max(shares[slot] ?? 0, share + 1)
   }
 
+  // Hands back a share spent on a request the mint refused outright: it
+  // never went on file, so the next request may use it. A share whose
+  // request went unanswered stays spent, as the mint may hold it.
+  private async unspendDeviceShare(client: HeartwoodClient, host: string, share: number, err: unknown): Promise<void> {
+    const refused = err instanceof ServiceRejectedError || err instanceof WalletUsageError
+    const shares = this.data.settings.heartwoodShares
+    const slot = this.deviceShareSlot(client, host)
+    if (!refused || /cx1 already used/i.test(reasonOf(err)) || shares?.[slot] !== share + 1) return
+    shares[slot] = share
+    await this.persist()
+  }
+
   private async recordDeviceName(client: HeartwoodClient, address: string, cx1: string | null, share?: number): Promise<void> {
     const names = (this.data.settings.heartwoodNames ??= {})
     if (cx1) names[address] = {cx1, device: client.link.devicePubkey, ...(share !== undefined ? {share} : {})}
@@ -3275,6 +3289,11 @@ export class Wallet {
 
   // Share `share` of the device at `host`.
   private async deviceShare(client: HeartwoodClient, host: string, share: number): Promise<DeviceShare> {
+    if (share >= DEVICE_SHARE_LIMIT) {
+      throw new WalletUsageError(
+        `The device has handed out all ${DEVICE_SHARE_LIMIT} of its shares at ${serviceDomainOf(host)}, and a scan looks no further, so none is given past them.`
+      )
+    }
     const got = await client.cashShare(host, share)
     this.checkDeviceIdentity(client, got.pubkey)
     const decoded = decodeCx1(got.cx1)!
@@ -3330,12 +3349,18 @@ export class Wallet {
   }
 
   // Whether `name` at the mint pays keys already: a LUD-26 mint only
-  // advertises notes (withdrawLink) for a name with a cx1 on file.
+  // advertises notes (withdrawLink) for a name with a cx1 on file. A mint
+  // that does not know the name pays it no keys; a mint asking for a pause
+  // is waited out, and one that cannot be reached is an error, not a no.
   private async namePaysKeys(server: string, name: string): Promise<boolean> {
+    const url = new URL(`/.well-known/lnurlp/${encodeURIComponent(name)}`, server).toString()
     try {
-      const payee = await fetchPayRequest(new URL(`/.well-known/lnurlp/${encodeURIComponent(name)}`, server).toString(), this.opts)
+      const payee = await this.askPatiently(() => fetchPayRequest(url, this.opts))
       return Boolean(payee.withdrawLink)
-    } catch {
+    } catch (err) {
+      const unreachable =
+        err instanceof AmbiguousMintError || err instanceof TypeError || (err instanceof Error && /^(AbortError|TimeoutError)$/.test(err.name))
+      if (unreachable || RATE_LIMITED.test(reasonOf(err))) throw err
       return false
     }
   }
@@ -3387,6 +3412,10 @@ export class Wallet {
       try {
         const {sig} = await client.addressProof(entry.host, wanted, {action: 'register', share: share.share, cx1: share.cx1})
         this.checkDeviceProof(sig, share.key, 'register', server, wanted, share.cx1)
+        // Spent before it is sent: a registration whose answer is lost is
+        // still found among the shares handed out, and moved on from.
+        this.spendDeviceShare(client, entry.host, share.share)
+        await this.persist()
         let feeInvoice: string | undefined
         if (moneyer) {
           const answer = await this.postNameAsDevice(client, discovery!.url, address, {name: wanted, cx1: share.cx1, sig})
@@ -3394,10 +3423,10 @@ export class Wallet {
         } else {
           feeInvoice = (await registerAddressWithProof(server, wanted, share.cx1, sig, this.opts)).pr
         }
-        this.spendDeviceShare(client, entry.host, share.share)
         await this.recordDeviceName(client, address, share.cx1, share.share)
         return {address, toKeys: true, ...(feeInvoice ? {feeInvoice} : {})}
       } catch (err) {
+        await this.unspendDeviceShare(client, entry.host, share.share, err)
         // A cx1 on file after all: move it, as any LUD-26 mint does.
         if (/already registered/i.test(reasonOf(err))) {
           await this.deviceMove(client, entry.host, server, wanted, address)
@@ -3405,8 +3434,6 @@ export class Wallet {
         }
         // A share some other wallet on this device's key handed out.
         if (!/cx1 already used/i.test(reasonOf(err)) || attempt >= SHARE_GAP) throw err
-        this.spendDeviceShare(client, entry.host, share.share)
-        await this.persist()
       }
     }
   }
@@ -3465,19 +3492,20 @@ export class Wallet {
           })
           this.checkDeviceProof(sig, onFile.key, 'update', server, name, share.cx1)
           this.checkDeviceProof(newsig!, share.key, 'register', server, name, share.cx1)
-          await updateAddressWithProofs(server, name, share.cx1, sig, newsig!, this.opts)
+          // spent before it is sent, as for a registration
           this.spendDeviceShare(client, host, share.share)
+          await this.persist()
+          await updateAddressWithProofs(server, name, share.cx1, sig, newsig!, this.opts)
           await this.recordDeviceName(client, address, share.cx1, share.share)
           return
         } catch (err) {
+          await this.unspendDeviceShare(client, host, share.share, err)
           const reason = reasonOf(err)
           if (WRONG_KEY.test(reason)) {
             refused ??= err
             break
           }
           if (!/cx1 already used/i.test(reason) || attempt >= SHARE_GAP) throw err
-          this.spendDeviceShare(client, host, share.share)
-          await this.persist()
         }
       }
     }

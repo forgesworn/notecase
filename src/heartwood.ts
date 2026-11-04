@@ -282,7 +282,7 @@ export class HeartwoodClient {
     try {
       res = await this.note<{sig?: unknown; newsig?: unknown; pubkey?: unknown}>('heartwood_note_address_proof', fields, true)
     } catch (err) {
-      if (err instanceof HeartwoodError && /unknown( note)? method|unsupported method|not supported/i.test(err.message)) {
+      if (err instanceof HeartwoodError && /unknown( note)? method|unsupported method|method not supported/i.test(err.message)) {
         throw new HeartwoodError(OLD_FIRMWARE)
       }
       throw err

@@ -1334,7 +1334,7 @@ const main = async (): Promise<void> => {
           console.log(
             arg === 'custodial'
               ? '  hold the device button to sign the release'
-              : "  hold the device button for each card: one to move a name off its keys, or two to register one (the proof, then the request)"
+              : "  hold the device button for each card it shows: one to move a name, two to register one at moneyer (the proof, then the request), and one more for each key on file the mint refuses"
           )
           const moved = await wallet.heartwoodNameToKeys(transport, third, {
             toKeys: arg === 'keys',

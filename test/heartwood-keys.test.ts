@@ -385,8 +385,18 @@ const setUp = async () => {
   // it, and the forms LUD-26's DELETE carried.
   const bodies: Array<{name: string; cx1: string | null; sig?: string}> = []
   const deletes: Array<{name: string; sig: string}> = []
+  // Faults to put in the way: lookups of a name answered as moneyer.dev's
+  // Caddy slows a client down, lookups that never reach the mint, and a
+  // change the mint makes whose answer never comes back.
+  const faults = {lookupsTooMany: 0, lookupsUnreachable: false, loseNextAnswer: false}
   const fetchImpl: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
+    const lookup = /^\/\.well-known\/lnurlp\/[^/]+$/.test(url.pathname) && (init?.method ?? 'GET') === 'GET'
+    if (lookup && faults.lookupsUnreachable) throw new TypeError('fetch failed')
+    if (lookup && faults.lookupsTooMany > 0) {
+      faults.lookupsTooMany--
+      return new Response(JSON.stringify({status: 'ERROR', reason: 'Too many requests - wait a moment and try again.'}), {status: 429})
+    }
     // a signed request, not the unsigned look at whether the route exists
     if (url.pathname === '/names' && init?.method === 'POST' && new Headers(init.headers).has('authorization')) {
       bodies.push(JSON.parse(String(init.body)))
@@ -395,13 +405,19 @@ const setUp = async () => {
     if (address && init?.method === 'DELETE') {
       deletes.push({name: address[1]!, sig: new URLSearchParams(String(init.body ?? '')).get('sig') ?? ''})
     }
+    const changes = (url.pathname === '/names' && new Headers(init?.headers).has('authorization')) || (address && init?.method === 'PUT')
+    if (changes && faults.loseNextAnswer) {
+      faults.loseNextAnswer = false
+      await fetch(input, init)
+      throw new TypeError('fetch failed')
+    }
     return fetch(input, init)
   }
-  const {wallet} = makeWallet({fetch: fetchImpl})
+  const {wallet} = makeWallet({fetch: fetchImpl, rateLimitBackoffMs: 1})
   await wallet.addMint(`mint@${theMint.host}`)
   await wallet.linkHeartwood(device.transport, device.uri)
   theMint.moneyer.store.putOperatorZapName('donkey', device.pubkey)
-  return {theMint, device, wallet, bodies, deletes}
+  return {theMint, device, wallet, bodies, deletes, faults}
 }
 
 // The device's whole branch at the mint, as a name registered before
@@ -419,6 +435,9 @@ const onDeviceBranch = (theMint: Mint, device: ReturnType<typeof fakeHeartwood>)
 const proofKey = (cx1: string): Uint8Array => decodeCx1(cx1)?.pubkey.slice(1) ?? decodeLegacyCx1(cx1)!.pubkeyXOnly
 const provenBy = (cx1: string, message: string, sig: string): boolean =>
   schnorr.verify(hexToBytes(sig), sha256(utf8ToBytes(message)), proofKey(cx1))
+
+// A request that never came back, in the kit's words or fetch's.
+const UNREACHABLE = /fetch failed|failed to reach the service/i
 
 describe("a name a heartwood's key owns, on the heartwood's LUD-26 shares", () => {
   it("registers a name that pays no key yet to the device's share 0, as its npub, at moneyer", async () => {
@@ -723,5 +742,55 @@ describe("a name a heartwood's key owns, on the heartwood's LUD-26 shares", () =
     theMint.moneyer.store.putOperatorZapName('mule', getPublicKey(generateSecretKey()))
     await expect(wallet.heartwoodNameToKeys(device.transport, 'mule')).rejects.toThrow('taken')
     expect(theMint.moneyer.store.zapName('mule')?.cx1 ?? null).toBeNull()
+  })
+
+  it('waits out a mint slowing it down before deciding whether a name pays keys', async () => {
+    const {theMint, device, wallet, faults} = await setUp()
+    onDeviceBranch(theMint, device)
+    faults.lookupsTooMany = 2
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    // a move off the branch, not a register the mint would refuse
+    expect(device.proofs.map(p => p.action)).toEqual(['update'])
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(device.shareCx1Of(theMint.host, 0))
+  })
+
+  it('says a mint it cannot reach is unreachable, not that the name pays no keys', async () => {
+    const {theMint, device, wallet, faults} = await setUp()
+    onDeviceBranch(theMint, device)
+    faults.lookupsUnreachable = true
+    await expect(wallet.heartwoodUnregisterName(device.transport, 'donkey')).rejects.toThrow(UNREACHABLE)
+    expect(device.log).not.toContain('heartwood_note_address_proof')
+  })
+
+  it('moves on from a share whose registration reached the mint but whose answer was lost', async () => {
+    const {theMint, device, wallet, faults} = await setUp()
+    faults.loseNextAnswer = true
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow(UNREACHABLE)
+    const share0 = device.shareCx1Of(theMint.host, 0)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(share0)
+    // asked again: share 0 is among those handed out, so the name moves on
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    const share1 = device.shareCx1Of(theMint.host, 1)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(share1)
+    expect(device.proofs.at(-1)).toMatchObject({action: 'update', share: 1, on_file: share0, on_file_share: 0})
+    expect(wallet.data.settings.heartwoodNames).toEqual({[`donkey@${theMint.host}`]: {cx1: share1, device: device.pubkey, share: 1}})
+  })
+
+  it('moves on from a share a lost move answer left on file', async () => {
+    const {theMint, device, wallet, faults} = await setUp()
+    onDeviceBranch(theMint, device)
+    faults.loseNextAnswer = true
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow(UNREACHABLE)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(device.shareCx1Of(theMint.host, 0))
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(device.shareCx1Of(theMint.host, 1))
+  })
+
+  it('hands out no share past the twenty a scan looks through', async () => {
+    const {theMint, device, wallet} = await setUp()
+    wallet.data.settings.heartwoodShares = {[`${device.pubkey}@127.0.0.1`]: 20}
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow('all 20 of its shares')
+    expect(device.log).not.toContain('heartwood_note_address_proof')
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1 ?? null).toBeNull()
   })
 })
