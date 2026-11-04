@@ -3254,9 +3254,9 @@ export class Wallet {
     shares[slot] = Math.max(shares[slot] ?? 0, share + 1)
   }
 
-  private async recordDeviceName(address: string, cx1: string | null, share?: number): Promise<void> {
+  private async recordDeviceName(client: HeartwoodClient, address: string, cx1: string | null, share?: number): Promise<void> {
     const names = (this.data.settings.heartwoodNames ??= {})
-    if (cx1) names[address] = {cx1, ...(share !== undefined ? {share} : {})}
+    if (cx1) names[address] = {cx1, device: client.link.devicePubkey, ...(share !== undefined ? {share} : {})}
     else delete names[address]
     await this.persist()
   }
@@ -3286,8 +3286,9 @@ export class Wallet {
   private async *deviceKeysOnFile(client: HeartwoodClient, host: string, address: string): AsyncGenerator<DeviceKeyOnFile> {
     const seen = new Set<string>()
     const fresh = (cx1: string): boolean => !seen.has(cx1) && Boolean(seen.add(cx1))
+    // recorded for this device: one paired since cannot prove for it
     const recorded = this.data.settings.heartwoodNames?.[address]
-    if (recorded) {
+    if (recorded && recorded.device === client.link.devicePubkey) {
       const key = proofKeyOfCx1(recorded.cx1)
       if (key && fresh(recorded.cx1)) yield {cx1: recorded.cx1, key, ...(recorded.share !== undefined ? {share: recorded.share} : {})}
     }
@@ -3391,7 +3392,7 @@ export class Wallet {
           feeInvoice = (await registerAddressWithProof(server, wanted, share.cx1, sig, this.opts)).pr
         }
         this.spendDeviceShare(client, entry.host, share.share)
-        await this.recordDeviceName(address, share.cx1, share.share)
+        await this.recordDeviceName(client, address, share.cx1, share.share)
         return {address, toKeys: true, ...(feeInvoice ? {feeInvoice} : {})}
       } catch (err) {
         // A cx1 on file after all: move it, as any LUD-26 mint does.
@@ -3463,7 +3464,7 @@ export class Wallet {
           this.checkDeviceProof(newsig!, share.key, 'register', server, name, share.cx1)
           await updateAddressWithProofs(server, name, share.cx1, sig, newsig!, this.opts)
           this.spendDeviceShare(client, host, share.share)
-          await this.recordDeviceName(address, share.cx1, share.share)
+          await this.recordDeviceName(client, address, share.cx1, share.share)
           return
         } catch (err) {
           const reason = reasonOf(err)
@@ -3504,7 +3505,7 @@ export class Wallet {
         }
         throw err
       }
-      await this.recordDeviceName(address, null)
+      await this.recordDeviceName(client, address, null)
       return
     }
     throw new WalletUsageError(

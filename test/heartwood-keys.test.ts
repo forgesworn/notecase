@@ -433,7 +433,7 @@ describe("a name a heartwood's key owns, on the heartwood's LUD-26 shares", () =
     expect(device.proofs).toEqual([{host: theMint.host, name: 'donkey', action: 'register', share: 0, cx1: share0}])
     expect(bodies[0]).toMatchObject({name: 'donkey', cx1: share0})
     expect(provenBy(share0, `LNURLcash:register:127.0.0.1:donkey:${share0}`, bodies[0]!.sig!)).toBe(true)
-    expect(wallet.data.settings.heartwoodNames).toEqual({[`donkey@${theMint.host}`]: {cx1: share0, share: 0}})
+    expect(wallet.data.settings.heartwoodNames).toEqual({[`donkey@${theMint.host}`]: {cx1: share0, device: device.pubkey, share: 0}})
   })
 
   it("moves a name off the device's old whole branch onto share 0, on one card, then on to share 1", async () => {
@@ -684,6 +684,29 @@ describe("a name a heartwood's key owns, on the heartwood's LUD-26 shares", () =
     expect(rescuer.balanceMsat()).toBe(26_000)
     // taken, so a second recovery finds the keys spent and takes nothing
     expect((await rescuer.recoverHeartwoodNotes(device.nsec, opts)).received).toEqual([])
+  })
+
+  it("recovers what a lost heartwood's shares were paid from its nsec", async () => {
+    const {theMint, device, wallet} = await setUp()
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    await pay(theMint, 'donkey', 21_000)
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    await pay(theMint, 'donkey', 5_000)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(device.shareCx1Of(theMint.host, 1))
+
+    const {wallet: rescuer} = makeWallet()
+    await rescuer.addMint(`mint@${theMint.host}`)
+    const result = await rescuer.recoverHeartwoodNotes(device.nsec, {expectedPubkey: device.pubkey, mintHost: theMint.host, gap: 3})
+    expect(result.received.map(r => r.note.amountMsat).sort((a, b) => a - b)).toEqual([5_000, 21_000])
+    expect(rescuer.balanceMsat()).toBe(26_000)
+  })
+
+  it('does not try a name recorded for another heartwood on the one linked now', async () => {
+    const {theMint, device, wallet} = await setUp()
+    const branch = onDeviceBranch(theMint, device)
+    wallet.data.settings.heartwoodNames = {[`donkey@${theMint.host}`]: {cx1: device.shareCx1Of('other.example', 0), device: 'f'.repeat(64), share: 0}}
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    expect(device.proofs.map(p => p.on_file)).toEqual([branch])
   })
 
   it('refuses a branch the device says belongs to another identity, before anything is signed', async () => {

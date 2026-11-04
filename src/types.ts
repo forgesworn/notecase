@@ -318,9 +318,10 @@ export type WalletData = {
     // A linked heartwood's LUD-26 shares, kept here because the device keeps
     // no counter: the next share to hand out by `<device pubkey>@<domain>`,
     // and the cx1 (and share) each name on the device's keys is on, by
-    // address, so moving or releasing it is one card, not one per key tried.
+    // address, with the device it is on, so moving or releasing it is one
+    // card, not one per key tried.
     heartwoodShares?: Record<string, number>
-    heartwoodNames?: Record<string, {cx1: string; share?: number}>
+    heartwoodNames?: Record<string, {cx1: string; device: string; share?: number}>
     // The hardware vault this wallet has met over the wire, by the identity
     // key it proved. Trust on first use: a different key later is either a
     // different device or a wiped one, and both deserve a stop.
