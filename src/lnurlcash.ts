@@ -106,6 +106,8 @@ export {
   updateAddress,
   unregisterAddress,
   unregisterAddressWithProof,
+  registerAddressWithProof,
+  updateAddressWithProofs,
   sendNoteToAddress,
   type LnurlcashOptions,
   type MintAddressExtensions,

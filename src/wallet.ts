@@ -30,6 +30,7 @@ import {
   deriveLegacyNotePubkey,
   deriveLegacyNoteSecretKey,
   deriveNostrCashSeed,
+  decodeCx1,
   deriveServiceRoot,
   deriveShareNode,
   encodeCx1,
@@ -41,6 +42,8 @@ import {
   shareCx1,
   unregisterAddress,
   unregisterAddressWithProof,
+  registerAddressWithProof,
+  updateAddressWithProofs,
   updateAddress,
   type CashNode,
   encodeCk1,
@@ -129,7 +132,7 @@ import {
   type NostrIdentity,
   type NostrTransport
 } from './nostr.ts'
-import {HeartwoodClient, HeartwoodError, newHeartwoodLink, type DeviceNote, type HeartwoodLink} from './heartwood.ts'
+import {DEVICE_BRANCHES, HeartwoodClient, HeartwoodError, OLD_FIRMWARE, newHeartwoodLink, type DeviceNote, type HeartwoodLink} from './heartwood.ts'
 import {identitySecretFor, type IdentityMode} from './identitysecret.ts'
 import {migrateNoteIds, noteIdResolver} from './noteids.ts'
 
@@ -245,6 +248,23 @@ type AddressShare = {share: number; cx1: Cx1; encoded: string; key: Uint8Array; 
 // A cx1 a name may be registered to, and the key that proves it.
 type RegisteredKey = {cx1: string; key: Uint8Array}
 type NameAnswer = {status?: string; reason?: string; cx1?: string | null; paidMsat?: unknown}
+
+// A share of a heartwood's, watch-only: its cx1, the key x(P) that proves
+// for it, and its public node, whose children are the keys a mint credits.
+type DeviceShare = {share: number; cx1: string; key: Uint8Array; node: HDKey}
+// A cx1 a heartwood may hold a name on, and the x-only key its proofs are by.
+type DeviceKeyOnFile = {cx1: string; key: Uint8Array; share?: number}
+// The shares the device hands out, 0 to 19: what its search for a wrap's key
+// covers.
+const DEVICE_SHARE_LIMIT = 20
+
+// The x-only key a cx1's proofs are by: a share's x(P), or a whole branch's
+// own key, as LUD-26 has a mint read one.
+const proofKeyOfCx1 = (cx1: string): Uint8Array | null => {
+  const share = decodeCx1(cx1)
+  if (share) return share.pubkey.slice(1)
+  return decodeLegacyCx1(cx1)?.pubkeyXOnly ?? null
+}
 
 // A mint's reason for a refusal, as the kit or this wallet carries it.
 const reasonOf = (err: unknown): string =>
@@ -734,46 +754,6 @@ export class Wallet {
   private async addressFeeMsat(entry: MintEntry): Promise<number> {
     const fee = (await fetchPayRequest(entry.payUrl, this.opts)).mintFee?.addressFeeMsat
     return typeof fee === 'number' && Number.isSafeInteger(fee) && fee > 0 ? fee : 0
-  }
-
-  // A heartwood's unregister proof for `name`: its branch at `host` signs on
-  // the device, behind a card. Nothing it returns is passed on unchecked. It
-  // has to be the branch this wallet expects, and its signature has to
-  // verify against that branch's index-0 key (what moneyer took from a
-  // whole branch) over the digest this wallet builds itself, for the domain
-  // the request is going to - so a device answering for another branch,
-  // name or mint is caught here rather than by the mint.
-  private async deviceUnregisterProof(
-    client: HeartwoodClient,
-    host: string,
-    server: string,
-    name: string,
-    expectedCx1: string
-  ): Promise<string> {
-    const proof = await client.addressProof(host, name, 'unregister')
-    if (proof.cx1 !== expectedCx1) {
-      throw new HeartwoodError(`The device signed for a different branch than the one ${name} pays, so its proof is not sent.`)
-    }
-    const branch = decodeLegacyCx1(proof.cx1)
-    let valid = false
-    try {
-      valid =
-        branch !== null &&
-        /^[0-9a-f]{128}$/i.test(proof.sig) &&
-        schnorr.verify(
-          hexToBytes(proof.sig),
-          addressProofDigest('unregister', spendDomainOf(server), name),
-          // Firmware from before purposes signs with its unpurposed index 0,
-          // which no current mint accepts, so that proof stops here too.
-          deriveLegacyNotePubkey(branch.pubkeyXOnly, branch.chainCode, LEGACY_NOTE_PURPOSE_WALLET, 0)
-        )
-    } catch {
-      valid = false
-    }
-    if (!valid) {
-      throw new HeartwoodError(`The device's proof does not verify for releasing ${name} at ${spendDomainOf(server)}, so it is not sent.`)
-    }
-    return proof.sig.toLowerCase()
   }
 
   private async retiredKeysAt(host: string, payLink?: string | undefined): Promise<string[]> {
@@ -3075,10 +3055,33 @@ export class Wallet {
     }
     try {
       const baseUrl = await this.withdrawBase(entry)
-      // Heartwood firmware still derives the old path, so both, and on
-      // each ladder a name is paid on.
       const received: ReceiveResult[] = []
       let scanned = 0
+      // The device's LUD-26 shares, from the root its identity key derives
+      // (a words-less wallet's on that key), BIP-44 style: five in a row
+      // with nothing ends the walk.
+      const seed = deriveNostrCashSeed(identity.secret)
+      const cashRoot = deriveCashRoot(seed)
+      const service = deriveServiceRoot(new HDKey({privateKey: cashRoot.privateKey, chainCode: cashRoot.chainCode}), entry.host)
+      try {
+        for (let share = 0, quiet = 0; share < DEVICE_SHARE_LIMIT && quiet < SHARE_GAP; share++) {
+          const node = deriveShareNode(service, ADDRESS_ACCOUNT, share)
+          try {
+            const walked = await this.takeFromKeys(baseUrl, index => shareNoteKey(node, index), options.gap ?? 20)
+            received.push(...walked.received)
+            scanned += walked.scanned
+            quiet = walked.used ? 0 : quiet + 1
+          } finally {
+            node.wipePrivateData()
+          }
+        }
+      } finally {
+        service.wipePrivateData()
+        cashRoot.privateKey.fill(0)
+        seed.fill(0)
+      }
+      // Then the whole branches names were paid on before LUD-26, and on
+      // each ladder a name is paid on.
       for (const derive of [deriveNostrAddressNode, deriveLegacyNostrAddressNode]) {
         const node = derive(identity.secret, entry.host)
         try {
@@ -3229,50 +3232,193 @@ export class Wallet {
     return this.heartwoodClient(transport).trusted()
   }
 
-  // Points a lightning address the device's key owns at the device's own
-  // keys (LUD-25 Part 2), or back to notes sealed to its npub. The device
-  // hands over the watch-only branch, and signs the branch's index-0 proof
-  // that it agrees, on one hold. A mint which binds the name to its npub
-  // also has the device sign the NIP-98 request, on a second. Only the
-  // device can spend what the name is paid after this: the branch comes from
-  // its identity key, not from these words.
-  // Payments already made are not touched.
+  // ---- a heartwood's names, on LUD-26 shares ----
+  //
+  // The device derives its shares from its identity key (the root a
+  // words-less wallet on that key derives too) and keeps no counter, so
+  // which share comes next, and which one each name is on, is kept here.
+  // Every proof is signed on the device behind a card, and checked here
+  // against the key it has to be by before anything is sent.
+
+  private deviceShareSlot(client: HeartwoodClient, host: string): string {
+    return `${client.link.devicePubkey}@${serviceDomainOf(host)}`
+  }
+
+  private nextDeviceShare(client: HeartwoodClient, host: string): number {
+    return this.data.settings.heartwoodShares?.[this.deviceShareSlot(client, host)] ?? 0
+  }
+
+  private spendDeviceShare(client: HeartwoodClient, host: string, share: number): void {
+    const shares = (this.data.settings.heartwoodShares ??= {})
+    const slot = this.deviceShareSlot(client, host)
+    shares[slot] = Math.max(shares[slot] ?? 0, share + 1)
+  }
+
+  private async recordDeviceName(address: string, cx1: string | null, share?: number): Promise<void> {
+    const names = (this.data.settings.heartwoodNames ??= {})
+    if (cx1) names[address] = {cx1, ...(share !== undefined ? {share} : {})}
+    else delete names[address]
+    await this.persist()
+  }
+
+  // Whatever the device hands out belongs to the identity the link serves
+  // as, and that has to be the npub the name belongs to: the mint signs off
+  // on the NIP-98 key, and the wraps name it.
+  private checkDeviceIdentity(client: HeartwoodClient, pubkey: string): void {
+    if (pubkey !== client.link.devicePubkey) {
+      throw new HeartwoodError(`The device answered for ${npubOf(pubkey)}, not the linked ${npubOf(client.link.devicePubkey)}.`)
+    }
+  }
+
+  // Share `share` of the device at `host`.
+  private async deviceShare(client: HeartwoodClient, host: string, share: number): Promise<DeviceShare> {
+    const got = await client.cashShare(host, share)
+    this.checkDeviceIdentity(client, got.pubkey)
+    const decoded = decodeCx1(got.cx1)!
+    return {share, cx1: got.cx1, key: decoded.pubkey.slice(1), node: new HDKey({publicKey: decoded.pubkey, chainCode: decoded.chainCode})}
+  }
+
+  // The cx1s the device could hold `address` on, most likely first: the one
+  // recorded, then the whole branches names were registered to before
+  // LUD-26, then each share handed out here. Each try is a card on the
+  // device, and each refused proof tells the mint those keys are one
+  // holder's, so the recorded one goes first.
+  private async *deviceKeysOnFile(client: HeartwoodClient, host: string, address: string): AsyncGenerator<DeviceKeyOnFile> {
+    const seen = new Set<string>()
+    const fresh = (cx1: string): boolean => !seen.has(cx1) && Boolean(seen.add(cx1))
+    const recorded = this.data.settings.heartwoodNames?.[address]
+    if (recorded) {
+      const key = proofKeyOfCx1(recorded.cx1)
+      if (key && fresh(recorded.cx1)) yield {cx1: recorded.cx1, key, ...(recorded.share !== undefined ? {share: recorded.share} : {})}
+    }
+    for (const branch of DEVICE_BRANCHES) {
+      const got = await client.cashBranch(host, branch)
+      this.checkDeviceIdentity(client, got.pubkey)
+      const key = proofKeyOfCx1(got.cx1)
+      if (key && fresh(got.cx1)) yield {cx1: got.cx1, key}
+    }
+    for (let share = 0; share < this.nextDeviceShare(client, host); share++) {
+      const got = await this.deviceShare(client, host, share)
+      if (fresh(got.cx1)) yield {cx1: got.cx1, key: got.key, share}
+    }
+  }
+
+  // A device proof, checked against the key it must be by, over the digest
+  // this wallet builds itself for the domain the request goes to: a device
+  // answering for another key, name or mint is caught here, not by the mint.
+  private checkDeviceProof(
+    sig: string,
+    key: Uint8Array,
+    action: 'register' | 'update' | 'unregister',
+    server: string,
+    name: string,
+    cx1?: string
+  ): void {
+    let valid = false
+    try {
+      valid = schnorr.verify(hexToBytes(sig), addressProofDigest(action, spendDomainOf(server), name, cx1), key)
+    } catch {
+      valid = false
+    }
+    if (!valid) {
+      throw new HeartwoodError(`The device's ${action} proof does not verify for ${name} at ${spendDomainOf(server)}, so it is not sent.`)
+    }
+  }
+
+  // Whether `name` at the mint pays keys already: a LUD-26 mint only
+  // advertises notes (withdrawLink) for a name with a cx1 on file.
+  private async namePaysKeys(server: string, name: string): Promise<boolean> {
+    try {
+      const payee = await fetchPayRequest(new URL(`/.well-known/lnurlp/${encodeURIComponent(name)}`, server).toString(), this.opts)
+      return Boolean(payee.withdrawLink)
+    } catch {
+      return false
+    }
+  }
+
+  // Points a lightning address the device's key owns at a share of the
+  // device's own (LUD-26), or at a moneyer back to notes sealed to its npub.
+  // Only the device can spend what the name is paid after this: the share
+  // comes from its identity key, not from these words. Payments already
+  // made are not touched.
+  //
+  // A name with a cx1 on file (a share, or a whole branch from before
+  // LUD-26) moves with LUD-26's PUT: one card, on which the device signs
+  // both the key on file's agreement and the new share's. A name paying no
+  // key yet takes a share at moneyer's POST /names, as its NIP-98 owner (a
+  // card for the proof, a second to sign the request), or at another mint
+  // with LUD-26's POST; a fee that mint asks is handed back as an invoice.
   async heartwoodNameToKeys(
     transport: NostrTransport,
     name: string,
     options: {toKeys?: boolean; mintHost?: string} = {}
-  ): Promise<{address: string; toKeys: boolean}> {
+  ): Promise<{address: string; toKeys: boolean; feeInvoice?: string}> {
     const toKeys = options.toKeys ?? true
     const wanted = name.trim().toLowerCase()
     if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(wanted)) throw new WalletUsageError(`${name} is not a name a mint hands out.`)
-    // A mint now takes only a LUD-26 share, and heartwood firmware still
-    // hands out its whole branch, whose cx1 let anyone who fetched the
-    // payRequest watch every note on it. Nothing is asked of the device.
-    if (toKeys) {
-      throw new HeartwoodError(
-        "Registering a name to the device's keys needs firmware that hands out a LUD-26 share; this one hands out its whole branch, which mints refuse now."
-      )
-    }
     const entry = this.mintEntry(options.mintHost)
     const client = this.heartwoodClient(transport)
-    const device = await this.deviceBranch(client, entry.host)
     const address = `${wanted}@${entry.host}`
+    const server = this.addressServer(entry)
     const discovery = await this.discoveryDocument(entry.host)
-    if (!discovery || (typeof discovery.body.namePriceMsat !== 'number' && !(await this.namesDoor(discovery.url)))) {
-      throw new WalletUsageError(
-        `${entry.host} pays a name only to its share; \`heartwood address unregister\` releases it instead.`
-      )
+    const moneyer = discovery !== null && (typeof discovery.body.namePriceMsat === 'number' || (await this.namesDoor(discovery.url)))
+
+    if (!toKeys) {
+      // At moneyer, LUD-26's DELETE leaves a name its Nostr key owns with
+      // that key, paying gift-wrapped notes again. Anywhere else it frees
+      // the name, which is what unregister says it does.
+      if (!moneyer) {
+        throw new WalletUsageError(`${entry.host} pays a name only to its share; \`heartwood address unregister\` releases it instead.`)
+      }
+      await this.deviceRelease(client, entry.host, server, wanted, address)
+      return {address, toKeys: false}
     }
 
-    const url = new URL('/names', discovery.url).toString()
-    // A name that pays the device's branch is cleared on the branch's
-    // unregister proof, signed on the device; one that pays no key needs
-    // none. Asked before the NIP-98 request is signed, so the body that
-    // request commits to already carries it.
-    const sig = await this.deviceUnregisterProof(client, entry.host, discovery.url, wanted, device.cx1)
-    const body = JSON.stringify({name: wanted, cx1: null, sig})
-    // Signed with the time it is asked for, and the mint allows sixty
-    // seconds, so a hold that takes longer is refused and simply re-asked.
+    if (await this.namePaysKeys(server, wanted)) {
+      await this.deviceMove(client, entry.host, server, wanted, address)
+      return {address, toKeys: true}
+    }
+    for (let attempt = 1; ; attempt++) {
+      const share = await this.deviceShare(client, entry.host, this.nextDeviceShare(client, entry.host))
+      try {
+        const {sig} = await client.addressProof(entry.host, wanted, {action: 'register', share: share.share, cx1: share.cx1})
+        this.checkDeviceProof(sig, share.key, 'register', server, wanted, share.cx1)
+        let feeInvoice: string | undefined
+        if (moneyer) {
+          const answer = await this.postNameAsDevice(client, discovery!.url, address, {name: wanted, cx1: share.cx1, sig})
+          if (answer.cx1 !== share.cx1) throw new WalletUsageError(`${entry.host} does not pay names to keys yet.`)
+        } else {
+          feeInvoice = (await registerAddressWithProof(server, wanted, share.cx1, sig, this.opts)).pr
+        }
+        this.spendDeviceShare(client, entry.host, share.share)
+        await this.recordDeviceName(address, share.cx1, share.share)
+        return {address, toKeys: true, ...(feeInvoice ? {feeInvoice} : {})}
+      } catch (err) {
+        // A cx1 on file after all: move it, as any LUD-26 mint does.
+        if (/already registered/i.test(reasonOf(err))) {
+          await this.deviceMove(client, entry.host, server, wanted, address)
+          return {address, toKeys: true}
+        }
+        // A share some other wallet on this device's key handed out.
+        if (!/cx1 already used/i.test(reasonOf(err)) || attempt >= SHARE_GAP) throw err
+        this.spendDeviceShare(client, entry.host, share.share)
+        await this.persist()
+      }
+    }
+  }
+
+  // moneyer's POST /names as the device's npub: the device signs the NIP-98
+  // request on a card. Signed with the time it is asked for, and the mint
+  // allows sixty seconds, so a hold that takes longer is refused and simply
+  // re-asked.
+  private async postNameAsDevice(
+    client: HeartwoodClient,
+    discoveryUrl: string,
+    address: string,
+    fields: Record<string, unknown>
+  ): Promise<NameAnswer> {
+    const url = new URL('/names', discoveryUrl).toString()
+    const body = JSON.stringify(fields)
     const signed = await client.signEvent(nip98Template(url, 'POST', body))
     const fetchImpl = this.opts.fetch ?? fetch
     const response = await fetchImpl(url, {
@@ -3281,19 +3427,94 @@ export class Wallet {
       body,
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000)
     })
-    const answer = (await response.json().catch(() => ({}))) as {status?: string; reason?: string; cx1?: string | null}
+    const answer = (await response.json().catch(() => ({}))) as NameAnswer
     if (!response.ok || answer.status === 'ERROR') {
-      const reason = answer.reason ?? `${entry.host} refused (${response.status}).`
+      const reason = answer.reason ?? `${new URL(url).host} refused (${response.status}).`
       if (WRONG_KEY.test(reason)) {
         throw new WalletUsageError(`${reason} ${address} pays a key the device does not hold, so it cannot prove the change.`)
       }
       throw new WalletUsageError(reason)
     }
-    return {address, toKeys: false}
+    return answer
   }
 
-  // Releases a name the device's branch holds, with LUD-26's DELETE and the
-  // branch's unregister proof, signed on the device.
+  // LUD-26's PUT off whichever key on file the mint holds, onto the
+  // device's next share. A key the mint refuses as not the one on file is
+  // passed over for the next; nothing else is retried.
+  private async deviceMove(client: HeartwoodClient, host: string, server: string, name: string, address: string): Promise<void> {
+    let refused: unknown = null
+    for await (const onFile of this.deviceKeysOnFile(client, host, address)) {
+      for (let attempt = 1; ; attempt++) {
+        const share = await this.deviceShare(client, host, this.nextDeviceShare(client, host))
+        if (share.cx1 === onFile.cx1) {
+          // never a move onto the share already on file
+          this.spendDeviceShare(client, host, share.share)
+          continue
+        }
+        try {
+          const {sig, newsig} = await client.addressProof(host, name, {
+            action: 'update',
+            share: share.share,
+            cx1: share.cx1,
+            onFile: onFile.cx1,
+            ...(onFile.share !== undefined ? {onFileShare: onFile.share} : {})
+          })
+          this.checkDeviceProof(sig, onFile.key, 'update', server, name, share.cx1)
+          this.checkDeviceProof(newsig!, share.key, 'register', server, name, share.cx1)
+          await updateAddressWithProofs(server, name, share.cx1, sig, newsig!, this.opts)
+          this.spendDeviceShare(client, host, share.share)
+          await this.recordDeviceName(address, share.cx1, share.share)
+          return
+        } catch (err) {
+          const reason = reasonOf(err)
+          if (WRONG_KEY.test(reason)) {
+            refused ??= err
+            break
+          }
+          if (!/cx1 already used/i.test(reason) || attempt >= SHARE_GAP) throw err
+          this.spendDeviceShare(client, host, share.share)
+          await this.persist()
+        }
+      }
+    }
+    throw new WalletUsageError(
+      `${address} pays a key the device does not hold${refused ? ` (${reasonOf(refused)})` : ''}, so it cannot prove the change.`
+    )
+  }
+
+  // LUD-26's DELETE, proven by whichever key on file the mint holds.
+  private async deviceRelease(client: HeartwoodClient, host: string, server: string, name: string, address: string): Promise<void> {
+    if (!(await this.namePaysKeys(server, name))) {
+      throw new WalletUsageError(`${address} pays no keys, so there is nothing for the device to release.`)
+    }
+    let refused: unknown = null
+    for await (const onFile of this.deviceKeysOnFile(client, host, address)) {
+      const {sig} = await client.addressProof(host, name, {
+        action: 'unregister',
+        onFile: onFile.cx1,
+        ...(onFile.share !== undefined ? {onFileShare: onFile.share} : {})
+      })
+      this.checkDeviceProof(sig, onFile.key, 'unregister', server, name)
+      try {
+        await unregisterAddressWithProof(server, name, sig, this.opts)
+      } catch (err) {
+        if (WRONG_KEY.test(reasonOf(err))) {
+          refused ??= err
+          continue
+        }
+        throw err
+      }
+      await this.recordDeviceName(address, null)
+      return
+    }
+    throw new WalletUsageError(
+      `${address} pays a key the device does not hold${refused ? ` (${reasonOf(refused)})` : ''}, so it cannot release it.`
+    )
+  }
+
+  // Releases a name on one of the device's keys with LUD-26's DELETE, on
+  // the device's proof: one card. At moneyer a name the device's npub owns
+  // stays its, paying gift-wrapped notes again; anywhere else it is freed.
   async heartwoodUnregisterName(
     transport: NostrTransport,
     name: string,
@@ -3303,57 +3524,25 @@ export class Wallet {
     if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(wanted)) throw new WalletUsageError(`${name} is not a name a mint hands out.`)
     const entry = this.mintEntry(options.mintHost)
     const client = this.heartwoodClient(transport)
-    const device = await this.deviceBranch(client, entry.host)
     const address = `${wanted}@${entry.host}`
-    const server = this.addressServer(entry)
-    const proof = await this.deviceUnregisterProof(client, entry.host, server, wanted, device.cx1)
-    try {
-      await unregisterAddressWithProof(server, wanted, proof, this.opts)
-    } catch (err) {
-      if (WRONG_KEY.test(reasonOf(err))) {
-        throw new WalletUsageError(`${reasonOf(err)} ${address} pays a key the device does not hold, so it cannot release it.`)
-      }
-      throw err
-    }
+    await this.deviceRelease(client, entry.host, this.addressServer(entry), wanted, address)
     return {address}
   }
 
-  // The device's watch-only branch at `host`. It belongs to whichever
-  // identity the link serves as, and that has to be the npub the name
-  // belongs to: the mint signs off on the NIP-98 key, and the wraps name it.
-  private async deviceBranch(
-    client: HeartwoodClient,
-    host: string
-  ): Promise<{client: HeartwoodClient; cx1: string; pubkey: string}> {
-    const branch = await client.cashAddress(host)
-    if (branch.pubkey !== client.link.devicePubkey) {
-      throw new HeartwoodError(
-        `The device answered for ${npubOf(branch.pubkey)}, not the linked ${npubOf(client.link.devicePubkey)}.`
-      )
-    }
-    return {client, cx1: branch.cx1, pubkey: branch.pubkey}
-  }
-
-  // Walks the device's branch at a mint for payments whose gift wrap never
+  // Walks the device's keys at a mint for payments whose gift wrap never
   // reached it, and has the device keep each one. The mint credits a
   // payment whether or not its wrap lands, so the note is there either way,
   // on the key it was paid to. This machine only works out where to look,
-  // from the watch-only cx1; the device derives each key and checks it.
+  // from watch-only cx1s; the device derives each key and checks it.
   //
-  // A mint pays a name on the Lightning Address purpose, or on the single
-  // ladder before purposes, so both are walked, each with its own gap. The
-  // claim names the key (`p`) and its purpose, and the device derives it on
-  // its current branch or, for a name registered before LUD-25 50d740a, the
-  // superseded m/139'/1' one. A device that cannot derive the key refuses
-  // it: firmware from before purposes for a purpose-2 key, and firmware
-  // since (0.18.0-beta.24) for one on the old ladder, which it no longer
-  // derives. Such a note is reported as `waiting`, safe at the mint where the
-  // device's nsec reaches it (recoverHeartwoodNotes), and the walk goes on.
-  //
-  // A name registered before firmware 0.18.0-beta.24 still points at the
-  // superseded branch, which this machine cannot derive and which no mint
-  // publishes any more (LUD-26 dropped text/cpub). Its notes are found from
-  // the device's nsec instead, by recoverHeartwoodNotes.
+  // The device's shares come first, BIP-44 style: every one handed out
+  // here, then on until five in a row have nothing. Then the whole branches
+  // names were paid on before LUD-26, each on the Lightning Address purpose
+  // and on the ladder from before purposes. Firmware from before shares
+  // hands out only its whole branch, which is walked alone. A key the
+  // device cannot derive is reported as `waiting`, safe at the mint where
+  // the device's nsec reaches it (recoverHeartwoodNotes), and the walk goes
+  // on.
   async heartwoodScanAddress(
     transport: NostrTransport,
     host?: string,
@@ -3371,40 +3560,45 @@ export class Wallet {
       baseUrl = fromLud17(pay.withdrawLink)
       entry.baseUrl = baseUrl
     }
+    const lookupUrl = baseUrl
     const client = this.heartwoodClient(transport)
-    const current = (await client.cashAddress(entry.host)).cx1
-    const branch = decodeLegacyCx1(current)
-    if (!branch) throw new HeartwoodError('The device answered with something that is not a cx1.')
     const inventory = await client.listNotes()
     this.rememberHeartwoodHeld(inventory)
     const held = new Set(inventory.flatMap(note => (note.p ? [note.p] : [])))
     // The device keeps a note's withdraw endpoint without its scheme.
-    const noteHost = baseUrl.replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '')
+    const noteHost = lookupUrl.replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '')
     const gap = options.gap ?? 20
     const claimed: {id: string; index: number; amountMsat: number}[] = []
     const waiting: {index: number; amountMsat: number}[] = []
     let scanned = 0
-    for (const purpose of ADDRESS_PURPOSES) {
+
+    // One chain of keys, by x-only pubkey; whether any key on it was paid.
+    const walk = async (pubkeyAt: (index: number) => Uint8Array | null, on: {share?: number; purpose?: number}): Promise<boolean> => {
+      let used = false
       let quiet = 0
       let index = 0
       while (quiet < gap) {
         const at = index
         index += 1
-        const cp1 = encodeCp1(deriveLegacyNotePubkey(branch.pubkeyXOnly, branch.chainCode, purpose, at))
+        const pubkey = pubkeyAt(at)
+        if (!pubkey) continue
+        const cp1 = encodeCp1(pubkey)
         let info: Awaited<ReturnType<typeof fetchNoteInfoByHash>>
         try {
-          info = await fetchNoteInfoByPubkey(baseUrl, cp1, this.opts)
+          info = await this.askPatiently(() => fetchNoteInfoByPubkey(lookupUrl, cp1, this.opts))
         } catch (err) {
           if (err instanceof NoteUnknownError) {
             quiet += 1
             continue
           }
           if (err instanceof NoteSpentError || err instanceof PendingNoteError) {
+            used = true
             quiet = 0
             continue
           }
           throw err
         }
+        used = true
         quiet = 0
         if (held.has(cp1)) continue
         let kept: {id: string}
@@ -3414,7 +3608,7 @@ export class Wallet {
             index: at,
             amountMsat: info.maxWithdrawable,
             p: cp1,
-            ...(purpose !== null ? {purpose} : {}),
+            ...on,
             ...(info.c ? {c: info.c} : {})
           })
         } catch (err) {
@@ -3424,18 +3618,53 @@ export class Wallet {
           }
           throw err
         }
+        held.add(cp1)
         claimed.push({id: kept.id, index: at, amountMsat: info.maxWithdrawable})
-        inventory.push({
-          id: kept.id,
-          state: 'confirmed',
-          amount_msat: info.maxWithdrawable,
-          host: noteHost,
-          label: '',
-          p: cp1,
-          index: at
-        })
+        inventory.push({id: kept.id, state: 'confirmed', amount_msat: info.maxWithdrawable, host: noteHost, label: '', p: cp1, index: at})
       }
       scanned += index
+      return used
+    }
+
+    let branches: string[]
+    try {
+      let quietShares = 0
+      for (let share = 0; share < DEVICE_SHARE_LIMIT; share++) {
+        if (share >= this.nextDeviceShare(client, entry.host) && quietShares >= SHARE_GAP) break
+        const {node} = await this.deviceShare(client, entry.host, share)
+        const used = await walk(index => {
+          try {
+            return node.deriveChild(index).publicKey!.slice(1)
+          } catch {
+            return null
+          }
+        }, {share})
+        if (used) {
+          quietShares = 0
+          this.spendDeviceShare(client, entry.host, share)
+        } else {
+          quietShares += 1
+        }
+      }
+      branches = []
+      for (const kind of DEVICE_BRANCHES) {
+        const got = await client.cashBranch(entry.host, kind)
+        this.checkDeviceIdentity(client, got.pubkey)
+        branches.push(got.cx1)
+      }
+    } catch (err) {
+      if (!(err instanceof HeartwoodError) || err.message !== OLD_FIRMWARE) throw err
+      branches = [(await client.wholeBranch(entry.host)).cx1]
+    }
+    for (const cx1 of branches) {
+      const branch = decodeLegacyCx1(cx1)
+      if (!branch) throw new HeartwoodError('The device answered with something that is not a cx1.')
+      for (const purpose of ADDRESS_PURPOSES) {
+        await walk(
+          index => deriveLegacyNotePubkey(branch.pubkeyXOnly, branch.chainCode, purpose, index),
+          purpose !== null ? {purpose} : {}
+        )
+      }
     }
     // A scan puts notes ON the device, so the reading taken before the walk
     // is already short by exactly these. Recorded again here, and persisted:

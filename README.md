@@ -259,7 +259,8 @@ notecase heartwood inbox               # publishes the device's inbox relays (ki
 notecase heartwood trust <npub|nip05>  # the device stores notes from this sender without a hold (a mint's zap key)
 notecase heartwood pair [label]        # mints a bunker URI for another wallet, one hold; first pairing needs the cable
 notecase heartwood collect [<id>...]   # brings in what arrived at the device (or just the notes named)
-notecase heartwood address custodial <name> # a name the DEVICE's key owns, taken off its keys; two holds
+notecase heartwood address keys <name> # a name the DEVICE's key owns, onto a share of its own keys
+notecase heartwood address custodial <name> # taken off its keys, back to notes sealed to its npub; one hold
 notecase heartwood address scan        # payments to the device's keys whose wrap never reached it
 notecase heartwood recover             # a lost heartwood's notes, from its master's nsec or BIP-39 phrase
 notecase backup shares --threshold 2 --count 3
@@ -600,31 +601,30 @@ into a known one, and it is what you show a mint to say what existed.
 `heartwood notes` falls back to it, marked as a past reading and dated, when
 the device does not answer.
 
-A name whose owner is the device's npub, registered before LUD-26 to the
-device's own branch, goes on being paid to the device's keys (LUD-25 Part
-2): the mint mints each payment to the device's next key, and the wrap
-carries no secret at all, only where to look. Only the device can spend
-those notes - this wallet's words cannot - and the device's recovery phrase
-brings them back. `heartwood address scan` walks the branch for payments
-whose wrap never arrived and has the device keep them; `heartwood collect`
-takes them, as it takes wraps.
+A name whose owner is the device's npub can be paid to the device's own
+keys: `heartwood address keys <name>` puts it on a LUD-26 share the device
+derives from its identity key (firmware with shares, heartwood-esp32 G24).
+The mint mints each payment to the share's next key, and the wrap carries no
+secret at all, only where to look. Only the device can spend those notes -
+this wallet's words cannot - and the device's recovery phrase brings them
+back. `heartwood address scan` walks the device's shares, and the whole
+branches names had before LUD-26, for payments whose wrap never arrived, and
+has the device keep them; `heartwood collect` takes them, as it takes wraps.
 
-Mints now take only a LUD-26 share, and heartwood firmware still hands out
-its whole branch, so `heartwood address keys <name>` is refused until the
-firmware hands out shares. `heartwood address custodial <name>` takes a
-Moneyer name off the device's keys, and `heartwood address unregister
-<name>` releases one with LUD-26's `DELETE`. Each asks the device for the
-branch's unregister proof (`heartwood_note_address_proof`) on a hold behind
-a card naming the action, the name and the mint, and Notecase checks it
-before sending it on: it has to come from the branch expected and verify
-over the mint's own domain, or nothing is sent. Moneyer also has the device
-sign the request, on a second hold. Firmware from before the method is told
-to update rather than failing obscurely. A name registered before heartwood
-0.18.0-beta.24 still points at the branch older firmware handed out
-(`m/139'/1'`), which no mint publishes any more: `heartwood recover` finds
-what was paid there.
+A name already on a key (a share, or the device's whole branch from before
+LUD-26) moves with LUD-26's `PUT` on one hold. A name that pays no key yet
+is registered at Moneyer's `/names` as the device's npub, on two holds (the
+proof, then the request), or with LUD-26's `POST` elsewhere.
+`heartwood address custodial <name>` takes a Moneyer name off the device's
+keys, and `heartwood address unregister <name>` releases one; both are
+LUD-26's `DELETE`, on one hold. Each proof is signed on the device behind a
+card naming the action, the name, the mint and the share, and Notecase
+checks it before sending it on: it has to verify against the key it must be
+by, over the mint's own domain, or nothing is sent. The device keeps no
+count of its shares, so Notecase records which share each name is on.
+Firmware from before shares is told to update.
 
-If the heartwood itself is lost, `heartwood recover` rebuilds that branch
+If the heartwood itself is lost, `heartwood recover` rebuilds its shares and branches
 from the master's nsec, or the BIP-39 phrase it was made from, prompted for
 and checked against the master's npub before anything is derived, then takes
 every live note on it into this wallet. A wallet with no recovery words gets

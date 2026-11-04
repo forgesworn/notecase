@@ -1331,19 +1331,31 @@ const main = async (): Promise<void> => {
           // only the device can spend what arrives, and its recovery phrase
           // brings it back.
           if (!third) throw new WalletUsageError(`heartwood address ${arg} <name> [--mint <host>]`)
-          if (arg === 'custodial') console.log('  hold the device button twice: once for the proof that clears its key, once to sign the request')
+          console.log(
+            arg === 'custodial'
+              ? '  hold the device button to sign the release'
+              : "  hold the device button for each card: one to move a name off its keys, or two to register one (the proof, then the request)"
+          )
           const moved = await wallet.heartwoodNameToKeys(transport, third, {
             toKeys: arg === 'keys',
             ...(values.mint ? {mintHost: values.mint} : {})
           })
+          if (moved.feeInvoice) {
+            // LUD-26's address fee: the device holds no notes to pay it from
+            // here, so it is handed over, and paying it from anywhere
+            // activates the name.
+            console.log(`${moved.address} is held for the device. Pay its registration fee to activate it:`)
+            console.log(moved.feeInvoice)
+            return
+          }
           console.log(
             moved.toKeys
-              ? `${moved.address} now pays to the device's own keys. Payments already made are unchanged.`
+              ? `${moved.address} now pays to a share of the device's own keys. Payments already made are unchanged.`
               : `${moved.address} now pays as notes sealed to the device's npub.`
           )
         } else if (sub === 'address' && arg === 'unregister') {
-          // A name on the device's branch, released with LUD-26's DELETE on
-          // the branch's own proof: one hold on the device.
+          // A name on one of the device's keys, released with LUD-26's
+          // DELETE on that key's proof: one hold on the device.
           if (!third) throw new WalletUsageError('heartwood address unregister <name> [--mint <host>]')
           console.log('  hold the device button to sign the release')
           const released = await wallet.heartwoodUnregisterName(transport, third, {

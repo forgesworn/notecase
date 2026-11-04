@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+Heartwood names on LUD-26 shares, for heartwood-esp32 firmware that hands
+them out (G24). Earlier firmware is told to update.
+
+- `heartwood address keys <name>` puts a name the device's npub owns on a
+  share of the device's own keys. A name on a key already, including the
+  whole branch a device's names were registered to before LUD-26, moves
+  with LUD-26's `PUT` on one hold, signed on the device by the key on file
+  and by the new share. A name paying no key is registered at Moneyer's
+  `/names` as the device's npub, or with LUD-26's `POST` elsewhere, where an
+  address fee is handed back as an invoice.
+- `heartwood address custodial` and `unregister` are LUD-26's `DELETE` on
+  one hold, proven by whichever key the name is on.
+- The device keeps no share counter, so the next share and the share each
+  name is on are recorded (`settings.heartwoodShares`,
+  `settings.heartwoodNames`).
+- Every device proof is checked against the key it has to be by, over the
+  mint's domain, before it is sent.
+- `heartwood address scan` walks the device's shares, then both whole
+  branches, so a name still on the superseded branch is found without the
+  nsec. `heartwood recover` walks the shares too.
+
 ## 0.26.0 - 2026-11-04
 
 LUD-26 as it now stands (luds `lnurlcash` `92e430f`), on @lnurlcash/kit
