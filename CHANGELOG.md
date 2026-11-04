@@ -16,7 +16,12 @@ them out (G24). Earlier firmware is told to update.
   one hold, proven by whichever key the name is on.
 - The device keeps no share counter, so the next share and the share each
   name is on are recorded (`settings.heartwoodShares`,
-  `settings.heartwoodNames`).
+  `settings.heartwoodNames`). The device has twenty shares per mint for
+  life: a mint never takes a share key twice, so every register and every
+  move spends one. A share is recorded before its request is sent, so one
+  whose answer was lost is still moved on from.
+- Whether a name pays keys is no longer read as "no" when the mint is
+  rate-limiting or cannot be reached.
 - Every device proof is checked against the key it has to be by, over the
   mint's domain, before it is sent.
 - `heartwood address scan` walks the device's shares, then both whole

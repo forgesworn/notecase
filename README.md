@@ -604,7 +604,8 @@ the device does not answer.
 A name whose owner is the device's npub can be paid to the device's own
 keys: `heartwood address keys <name>` puts it on a LUD-26 share the device
 derives from its identity key (firmware with shares, heartwood-esp32 G24).
-The mint mints each payment to the share's next key, and the wrap carries no
+The device has twenty shares per mint for life, as a mint never takes a share
+key twice: every register and every move spends one. The mint mints each payment to the share's next key, and the wrap carries no
 secret at all, only where to look. Only the device can spend those notes -
 this wallet's words cannot - and the device's recovery phrase brings them
 back. `heartwood address scan` walks the device's shares, and the whole
