@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- An address fee whose melt went out but whose answer was lost is no longer
+  reported as paid. `registerName` returns `ambiguous: true` with `paidMsat`
+  0 and no `feeInvoice`, since the mint may be paying it and paying the
+  invoice elsewhere could pay it twice. `address claim` and the web wallet
+  say the name is held and point to reconcile.
+
 ## 0.27.0 - 2026-11-05
 
 Heartwood names on LUD-26 shares, for heartwood-esp32 firmware that hands

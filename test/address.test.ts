@@ -320,6 +320,35 @@ describe('registering at the address itself', () => {
     expect(mint.state.registrations.get('donkey')!.paid).toBe(true)
   })
 
+  it('reports an address fee whose melt answer was lost as ambiguous, not paid, and hands back no invoice', async () => {
+    mint = await createMockMint({addressFeeMsat: 21_000})
+    const theMint = mint
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      const url = String(input instanceof Request ? input.url : input)
+      // the melt goes out, and its answer never comes back
+      if (new URL(url).searchParams.has('pr')) throw new TypeError('fetch failed')
+      const response = await fetch(input, init)
+      if (init?.method !== 'POST' || !url.includes('/.well-known/lnurlp/')) return response
+      const body = (await response.json()) as {status: string; pr?: string}
+      const held = theMint.state.registrations.get('donkey')
+      if (!body.pr || !held?.paymentHash) return Response.json(body)
+      return Response.json({...body, pr: fakeBolt11({amountMsat: 21_000, paymentHashHex: held.paymentHash})})
+    }
+    const {wallet, data} = makeWallet({fetch: fetchImpl})
+    data.seedHex = freshK1()
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    await wallet.receive(fund(mint, 100_000))
+
+    const claimed = await wallet.registerName({name: 'donkey'})
+    expect(claimed).toEqual({address: `donkey@${hostOf(mint)}`, paidMsat: 0, toKeys: true, ambiguous: true})
+    // the melt is reconcile's to settle, and the share it was claimed on is on file
+    expect(wallet.data.melts).toHaveLength(1)
+    expect(wallet.data.melts[0]!.state).toBe('in-flight')
+    expect(wallet.needsReconcile()).toBe(true)
+    expect(data.settings.nameKeys?.[`donkey@${hostOf(mint)}`]).toBe(data.settings.lightningAddressCx1)
+    expect(mint.state.registrations.get('donkey')!.paid).toBe(false)
+  })
+
   it('hands back an invoice over the fee advertised, and pays nothing', async () => {
     mint = await createMockMint({addressFeeMsat: 21_000, addressFeeChargedMsat: 50_000})
     const {wallet, data} = makeWallet()

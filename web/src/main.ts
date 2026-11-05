@@ -4108,6 +4108,15 @@ const viewSettings = (): void => {
                 priceArea.append(held, invoice)
                 return
               }
+              if (got.ambiguous) {
+                // The fee's melt went out but its answer did not come back:
+                // the mint may be paying it, so no invoice is shown to pay twice.
+                priceArea.replaceChildren()
+                const held = el('<p class="warn" style="text-align:left"></p>')
+                held.textContent = `${got.address} is held for you. Its registration fee may still be paying - tap "unresolved outcomes" on the home screen to settle it, and do not pay the fee from another wallet meanwhile.`
+                priceArea.append(held)
+                return
+              }
               toast(
                 got.toKeys
                   ? `${got.address} is yours, paid to your own keys - the mint never holds what arrives.`

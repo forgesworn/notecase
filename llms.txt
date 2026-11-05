@@ -275,7 +275,7 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
       close(): void
     The CLI builds one from nostr-tools' SimplePool with poolTransport() (also
     not exported); a library user writes the same thin wrapper
-  namePriceMsat(host?), registerName({name, mintHost?}) -> {address, paidMsat, toKeys, feeInvoice?},
+  namePriceMsat(host?), registerName({name, mintHost?}) -> {address, paidMsat, toKeys, feeInvoice?, ambiguous?},
   lightningAddress(), payNameToKeys(toKeys?, {name?, mintHost?}), unregisterName({name?, mintHost?}), addressCx1(host), scanAddress(host?, {gap?}),
   payAddressInternally(address, amountMsat) -> {note, host, ambiguous} | null
   - a name is registered to a LUD-26 share: S/0'/2/n' below the mint's root S =
@@ -288,7 +288,9 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     note?, cx1, sig}; custodial sends cx1: null with an unregister proof by the key on
     file. Any other mint: LUD-26 POST /.well-known/lnurlp/<name> (no npub: it
     would be published for NIP-05); an address fee's pr is melted from a note of that mint only if it is no
-    more than the advertised third Mint fees value, else handed back as feeInvoice
+    more than the advertised third Mint fees value, else handed back as feeInvoice;
+    a fee melt whose answer was lost returns ambiguous: true, paidMsat 0 and no
+    feeInvoice (reconcile settles it; paying elsewhere could pay twice)
   - a cx1 on file is never overwritten: payNameToKeys moves with PUT (sig by the key
     on file, newsig by the new share), unregisterName uses DELETE. The key on file is
     the recorded settings.lightningAddressCx1, else whichever share or old whole branch
