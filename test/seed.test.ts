@@ -157,6 +157,15 @@ describe('the seed', () => {
     const held = data.notes.filter(note => note.state !== 'live' && note.state !== 'spent')
     expect(held.map(note => [note.scheme, note.index])).toContainEqual(['wallet', 1])
     cutTheWire = false
+
+    // reconcile finds it never landed: the input is the holder's again and
+    // the key is free, so the next request names it, as LUD-26 asks
+    await wallet.reconcile()
+    const live = wallet.liveNotes()
+    expect(live.map(note => [note.scheme, note.index])).toEqual([['wallet', 0]])
+    const again = await wallet.rotateLive(live[0]!)
+    expect([again.scheme, again.index]).toEqual(['wallet', 1])
+    expect(wallet.chainCounterFor(host, 'wallet')).toBe(2)
   })
 
   it('persists the bearer counter before the hash goes on the wire', async () => {

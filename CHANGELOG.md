@@ -17,6 +17,9 @@
   again with a bearer note, and once that is taken it gets bearer notes
   from then on (mint.forgesworn.dev's lnurl-mint 0.3.1 is one). Locker
   devices keep minting on the bearer ladder and are unaffected.
+- A key note's URL is longer: about 308 bytes with its certificate, against
+  209 for a bearer note. A QR takes it easily; an NFC tag needs NTAG215
+  (504 bytes) or larger, which bearer notes already needed.
 - `adopt`, and the web wallet's recovery screen, also offer to move notes on
   the old bearer ladder onto the wallet chain, for free. Nothing moves them
   unasked; notecase still finds them from the words either way.
