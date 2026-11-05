@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- A seeded wallet's own notes are now LUD-26 key notes: everything it mints,
+  rotates or merges into, and a split's amount, goes on the wallet chain
+  `S/0'/0/i`, and a split's change on the change chain `S/0'/1/i`, each
+  named to the mint by its cp1 and spent with a ck1. Any LUD-26 wallet given
+  the same words finds them, which none did with notecase's bearer ladder.
+  Restore walks both chains by key first, then the bearer ladders as
+  before.
+- A key note's counter moves only once the mint credits it (LUD-26), and a
+  request the mint refused names the same keys next time, so no unused
+  index is left behind. A key some other device on the same words already
+  used is skipped. The counters sync between devices with the others.
+- A mint that refuses a key note the first time it is offered one is asked
+  again with a bearer note, and once that is taken it gets bearer notes
+  from then on (mint.forgesworn.dev's lnurl-mint 0.3.1 is one). Locker
+  devices keep minting on the bearer ladder and are unaffected.
+- `adopt`, and the web wallet's recovery screen, also offer to move notes on
+  the old bearer ladder onto the wallet chain, for free. Nothing moves them
+  unasked; notecase still finds them from the words either way.
 - The web wallet pays a LUD-26 name at a mint it holds notes at inside that
   mint, free, with a note of exactly the amount, as `melt <sats> --to` already
   does. Notes ticked by hand still go over Lightning. A transfer the mint did

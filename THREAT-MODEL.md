@@ -22,6 +22,16 @@ hashes are disclosed; uncertain outcomes are parked as `staged`/
 `ambiguous`/`melting` states that reconcile resolves by probing. There is
 no code path where a disclosed secret exists only in memory.
 
+A seeded wallet's own notes are key notes on LUD-26's wallet and change
+chains, named to the mint by a cp1. Their staged records are still written
+before the request, but their counter is not: it moves only once the mint
+credits the note, as LUD-26 asks. A cp1 is public, the key behind it comes
+back from the words, and the staged record holds its index while the
+outcome is open, so a crash costs nothing and a refused request leaves no
+unused index for a restore's gap limit to trip on. Bearer notes (at a mint
+that takes no key notes, or on a wallet without words) keep the older
+order: counter and secret in one write, before the hash goes out.
+
 **A lying or hostile mint.** The URL's own `amount` is treated as a claim;
 `maxWithdrawable` from the informational GET is authoritative (a mismatch
 is surfaced). A mint echoing a different k1 is a hard protocol error and

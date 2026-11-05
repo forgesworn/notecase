@@ -33,6 +33,8 @@ import {
   decodeCx1,
   deriveServiceRoot,
   deriveShareNode,
+  CHAIN_WALLET,
+  CHAIN_CHANGE,
   encodeCx1,
   encodeLegacyCx1,
   isRegisteredAddress,
@@ -96,7 +98,7 @@ import {schnorr} from '@noble/curves/secp256k1.js'
 import {tryDecodeBolt11} from 'farrier-kit/bolt11'
 import {verifyPreimage} from 'farrier-kit/preimage'
 import {MAX_HEARTWOOD_INVENTORY} from './types.ts'
-import type {HeartwoodInventoryNote, MeltRecord, MintEntry, MintInfo, NoteOrigin, NoteRecord, PaymentRequestRecord, PendingMint, WalletData} from './types.ts'
+import type {HeartwoodInventoryNote, MeltRecord, MintEntry, MintInfo, NoteChain, NoteLadder, NoteOrigin, NoteRecord, PaymentRequestRecord, PendingMint, WalletData} from './types.ts'
 import {newConnection, type NwcConnection} from './nwcservice.ts'
 import {
   buildMintBackup,
@@ -230,6 +232,9 @@ const ADDRESS_PURPOSES: readonly NotePurpose[] = [LEGACY_NOTE_PURPOSE_LIGHTNING_
 
 // The account every share is made on, as most wallets only ever use one.
 const ADDRESS_ACCOUNT = 0
+// The account this wallet's own notes are on, LUD-26's S/a'/0|1/i.
+const WALLET_ACCOUNT = 0
+const HARDENED_INDEX = 0x80000000
 // LUD-26's discovery gap for shares: past five in a row with nothing paid,
 // a share is lost to recovery, so none is made further out than that.
 const SHARE_GAP = 5
@@ -905,6 +910,108 @@ export class Wallet {
     return seed ? deriveCashRoot(hexToBytes(seed)) : null
   }
 
+  // ---- LUD-26's wallet and change chains ----
+  //
+  // Where this wallet's own notes go: S/0'/0/i for what it mints, rotates or
+  // merges into and a split's amount, S/0'/1/i for a split's change. Each
+  // is a key note, named to the mint by its cp1 and spent by a ck1, so any
+  // LUD-26 wallet finds it again from the words and the mint's name. Off the
+  // words only: a wallet without them makes random bearer notes, as it
+  // always has, and a mint that takes no key notes gets bearer notes off
+  // S/i' (`keyNotes` on its entry).
+
+  // Whether the next notes made at `host` are key notes.
+  private makesKeyNotesAt(host: string): boolean {
+    if (!this.data.seedHex || this.opts.randomSecret !== undefined) return false
+    return this.data.mints.find(mint => mint.host === host)?.keyNotes !== false
+  }
+
+  // A refusal that may be a mint turning down the key note itself, so the
+  // same request is worth making once more with a bearer note. Only where
+  // the mint has never yet taken a key note from this wallet: once it has,
+  // a refusal is about something else, and a mint that is merely refusing
+  // a split (a sunset, a dust floor) is never marked as one without them.
+  private mayRefuseKeyNotes(host: string, err: unknown): boolean {
+    if (!(err instanceof ServiceRejectedError)) return false
+    return !this.data.notes.some(note => note.mintHost === host && (note.scheme === 'wallet' || note.scheme === 'change'))
+  }
+
+  // Only once the bearer note was taken in the key note's place.
+  private markNoKeyNotes(host: string): void {
+    const entry = this.data.mints.find(mint => mint.host === host)
+    if (entry) entry.keyNotes = false
+  }
+
+  // S/0'/0 or S/0'/1 at `host`.
+  private chainNode(host: string, chain: NoteChain): HDKey {
+    const root = this.cashRoot()
+    if (!root) throw new WalletUsageError('This wallet has no recovery words, so it has no key chains.')
+    const service = deriveServiceRoot(new HDKey({privateKey: root.privateKey, chainCode: root.chainCode}), host)
+    return service.deriveChild(WALLET_ACCOUNT + HARDENED_INDEX).deriveChild(chain === 'wallet' ? CHAIN_WALLET : CHAIN_CHANGE)
+  }
+
+  // The key note at `index` on a chain: its spend, a deterministic ck1, and
+  // the cp1 that names it. Null at the index BIP-32 derives no key for,
+  // which a mint skips too.
+  private chainNote(node: HDKey, index: number, domain: string): {ck1: string; cp1: string} | null {
+    const key = shareNoteKey(node, index)
+    if (!key) return null
+    try {
+      return this.keyNoteFor(key, domain)
+    } finally {
+      key.fill(0)
+    }
+  }
+
+  // The next unused index on `chain` at `host`, and its note.
+  private drawChainNote(
+    host: string,
+    chain: NoteChain,
+    node: HDKey,
+    from: number,
+    domain: string
+  ): {index: number; ck1: string; cp1: string} {
+    for (let index = from; ; index++) {
+      const note = this.chainNote(node, index, domain)
+      if (note) return {index, ...note}
+    }
+  }
+
+  chainCounterFor(host: string, chain: NoteChain): number {
+    return this.data.chainCounters?.[host]?.[chain] ?? 0
+  }
+
+  // Past every index the mint has credited, and past every one an output
+  // still in flight holds: a staged or ambiguous record, or a mint invoice
+  // not yet paid or claimed. A refused output's record is dropped, so its
+  // index is free for the next request, as LUD-26 asks.
+  private nextChainIndex(host: string, chain: NoteChain): number {
+    let next = this.chainCounterFor(host, chain)
+    for (const note of this.data.notes) {
+      if (note.mintHost === host && note.scheme === chain && note.index !== undefined) next = Math.max(next, note.index + 1)
+    }
+    if (chain === 'wallet') {
+      for (const pending of this.data.pendingMints) {
+        if (
+          pending.mintHost === host &&
+          pending.namedChain === 'wallet' &&
+          pending.namedIndex !== undefined &&
+          (pending.state === 'awaiting' || pending.state === 'claimed')
+        ) {
+          next = Math.max(next, pending.namedIndex + 1)
+        }
+      }
+    }
+    return next
+  }
+
+  // The mint has credited a note at this index, or holds one there already.
+  private creditChainIndex(host: string, chain: NoteChain, index: number): void {
+    this.data.chainCounters ??= {}
+    const at = (this.data.chainCounters[host] ??= {})
+    at[chain] = Math.max(at[chain] ?? 0, index + 1)
+  }
+
   // The whole branches a name was registered to before LUD-26, kept for
   // receiving and for moving a name off them, never handed out again. The
   // spec's m/139'/d1..d4 (from the words, or from the Nostr key exactly as a
@@ -1241,13 +1348,19 @@ export class Wallet {
     const deviceId = await this.deviceId()
     const counters = {...(this.data.counters ?? {})}
     const cashCounters = {...(this.data.cashCounters ?? {})}
-    const countersFingerprint = JSON.stringify([counters, cashCounters])
-    const anyCounters = Object.keys(counters).length > 0 || Object.keys(cashCounters).length > 0
+    const chainCounters = structuredClone(this.data.chainCounters ?? {})
+    // The chains join the fingerprint only once they exist, so a wallet
+    // with none does not republish counters that have not moved.
+    const countersFingerprint = JSON.stringify(
+      Object.keys(chainCounters).length ? [counters, cashCounters, chainCounters] : [counters, cashCounters]
+    )
+    const anyCounters =
+      Object.keys(counters).length > 0 || Object.keys(cashCounters).length > 0 || Object.keys(chainCounters).length > 0
     if (anyCounters && pushed[Wallet.COUNTERS_SLOT] !== countersFingerprint) {
       const result = await publishEvent(
         transport,
         relays,
-        encodeCounters(key, deviceId, counters, cashCounters)
+        encodeCounters(key, deviceId, counters, cashCounters, chainCounters)
       )
       if (result.ok.length > 0) {
         pushed[Wallet.COUNTERS_SLOT] = countersFingerprint
@@ -1340,6 +1453,14 @@ export class Wallet {
       this.data.cashCounters[host] = value
       countersMoved += 1
     }
+    for (const [host, value] of Object.entries(merged.chainCounters)) {
+      for (const chain of ['wallet', 'change'] as const) {
+        const index = value[chain]
+        if (index === undefined || this.chainCounterFor(host, chain) >= index) continue
+        this.creditChainIndex(host, chain, index - 1)
+        countersMoved += 1
+      }
+    }
 
     await this.persist()
     return {
@@ -1385,13 +1506,30 @@ export class Wallet {
     return this.liveNotes().filter(note => note.index === undefined)
   }
 
+  // Live notes these words do find again, but only on a bearer ladder from
+  // before LUD-26's chains: S/i', or the kit's scheme before that. This
+  // wallet walks those forever, but another LUD-26 wallet given the same
+  // words does not, so they are worth moving where the mint takes key
+  // notes. Never moved unasked: each move is a request to the mint.
+  oldLadderNotes(): NoteRecord[] {
+    if (!this.data.seedHex) return []
+    return this.liveNotes().filter(
+      note =>
+        note.index !== undefined &&
+        note.scheme !== 'wallet' &&
+        note.scheme !== 'change' &&
+        this.makesKeyNotesAt(note.mintHost)
+    )
+  }
+
   // One rotate each, which a mint charges nothing for, and every one of
-  // them is on the seed afterwards. Safe to re-run: whatever succeeded is
-  // no longer legacy.
+  // them is on the seed afterwards, on LUD-26's wallet chain where the mint
+  // takes key notes. Safe to re-run: whatever succeeded is no longer
+  // legacy, nor on an old ladder.
   async adoptLegacyNotes(): Promise<{adopted: NoteRecord[]; failed: Array<{note: NoteRecord; reason: string}>}> {
     const adopted: NoteRecord[] = []
     const failed: Array<{note: NoteRecord; reason: string}> = []
-    for (const note of this.legacyNotes()) {
+    for (const note of [...this.legacyNotes(), ...this.oldLadderNotes()]) {
       if (!note.callback) {
         failed.push({note, reason: 'it has not met its mint yet - reconcile first'})
         continue
@@ -1443,18 +1581,34 @@ export class Wallet {
     // one that collides has already unwound: the inputs are live and the
     // staged secrets are gone, so a give-up here leaves the money exactly
     // where it started.
+    const host = inputs[0]!.mintHost
+    let outputs: 'key' | 'bearer' = this.makesKeyNotesAt(host) ? 'key' : 'bearer'
+    let fellBack = false
     const attempts = 4
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.mutateOnce(inputs, plan)
+        const made = await this.mutateOnce(inputs, plan, outputs)
+        if (fellBack) {
+          this.markNoKeyNotes(host)
+          await this.persist()
+        }
+        return made
       } catch (err) {
+        // A definitive refusal of a key note at a mint that has never taken
+        // one: asked once more with a bearer note, which every mint reads.
+        // The refusal unwound the staged records, so nothing is lost by it.
+        if (outputs === 'key' && !fellBack && this.mayRefuseKeyNotes(host, err)) {
+          outputs = 'bearer'
+          fellBack = true
+          continue
+        }
         if ((err as {cause?: unknown})?.cause !== Wallet.OUTPUT_COLLISION) throw err
         // A mint that refuses every secret this wallet can derive is not
         // describing a stale counter any more, and the holder should hear
         // that rather than a guess repeated four times.
         if (attempt >= attempts) {
           throw new WalletUsageError(
-            `${inputs[0]!.mintHost} refused ${attempts} different secrets this wallet derived, so this is not a stale derivation counter. Your notes are untouched.`
+            `${host} refused ${attempts} different secrets this wallet derived, so this is not a stale derivation counter. Your notes are untouched.`
           )
         }
       }
@@ -1463,7 +1617,8 @@ export class Wallet {
 
   private async mutateOnce(
     inputs: NoteRecord[],
-    plan: {kind: 'rotate'} | {kind: 'merge'} | {kind: 'split'; amountMsat: number}
+    plan: {kind: 'rotate'} | {kind: 'merge'} | {kind: 'split'; amountMsat: number},
+    outputs: 'key' | 'bearer'
   ): Promise<NoteRecord[]> {
     const totalMsat = inputs.reduce((sum, note) => sum + note.amountMsat, 0)
     const template = inputs[0]!
@@ -1492,38 +1647,72 @@ export class Wallet {
     }
     const mergedMsat = totalMsat + (inputs.length - 1) * baseFeeMsat
 
-    // Where the replacement secrets come from. On a seeded wallet that is
-    // the mint's own ladder, so twelve words and the mint's name are
-    // enough to find these notes again; the source advances as it is
-    // drawn from, and a split draws twice.
-    const root = this.cashRoot()
-    const startIndex = this.cashCounterFor(template.mintHost)
-    const source = root
-      ? cashSecretSource(root, template.mintHost, startIndex)
-      : (this.opts.randomSecret ?? defaultRandomSecret)
-    const derived = root !== null && this.opts.randomSecret === undefined
-    const nextSecret = derived ? (source as ReturnType<typeof cashSecretSource>) : (source as () => string)
-
-    const cut = (amountMsat: number, noteOrigin: NoteOrigin, offset: number): NoteRecord => {
-      const record = this.record(template, nextSecret(), amountMsat, noteOrigin, inputIds)
-      if (derived) {
-        record.index = startIndex + offset
-        record.scheme = 'bip32'
+    // Where the replacement secrets come from. Key notes go on LUD-26's
+    // chains: a split's amount, or the one output of a rotate or merge, on
+    // the wallet chain and a split's change on the change chain, each named
+    // by its cp1. Bearer notes come off the mint's S/i' ladder on a seeded
+    // wallet, which advances as it is drawn from, or are random on one
+    // without words. Either way twelve words and the mint's name find the
+    // derived ones again.
+    const host = template.mintHost
+    // What names each output to the mint: a key note's cp1, else the hash.
+    const refs = new Map<NoteRecord, string>()
+    let cut: (amountMsat: number, noteOrigin: NoteOrigin, chain: NoteChain) => NoteRecord
+    let bearerNext: number | null = null
+    if (outputs === 'key') {
+      const nodes = {wallet: this.chainNode(host, 'wallet'), change: this.chainNode(host, 'change')}
+      const from = {wallet: this.nextChainIndex(host, 'wallet'), change: this.nextChainIndex(host, 'change')}
+      cut = (amountMsat, noteOrigin, chain) => {
+        const note = this.drawChainNote(host, chain, nodes[chain], from[chain], template.baseUrl)
+        from[chain] = note.index + 1
+        const record = this.record(template, note.ck1, amountMsat, noteOrigin, inputIds)
+        record.index = note.index
+        record.scheme = chain
+        refs.set(record, note.cp1)
+        return record
       }
-      return record
+    } else {
+      const root = this.cashRoot()
+      const startIndex = this.cashCounterFor(host)
+      const source = root ? cashSecretSource(root, host, startIndex) : (this.opts.randomSecret ?? defaultRandomSecret)
+      const derived = root !== null && this.opts.randomSecret === undefined
+      const nextSecret = derived ? (source as ReturnType<typeof cashSecretSource>) : (source as () => string)
+      let drawn = 0
+      cut = (amountMsat, noteOrigin) => {
+        const record = this.record(template, nextSecret(), amountMsat, noteOrigin, inputIds)
+        if (derived) {
+          record.index = startIndex + drawn
+          record.scheme = 'bip32'
+        }
+        drawn += 1
+        bearerNext = derived ? startIndex + drawn : null
+        return record
+      }
     }
     const staged: NoteRecord[] =
       plan.kind === 'split'
-        ? [cut(plan.amountMsat, 'split', 0), cut(changeMsat, 'change', 1)]
-        : [cut(mergedMsat, origin, 0)]
+        ? [cut(plan.amountMsat, 'split', 'wallet'), cut(changeMsat, 'change', 'change')]
+        : [cut(mergedMsat, origin, 'wallet')]
+    const refOf = (note: NoteRecord): string => refs.get(note) ?? hashK1(note.k1)
+    // Every key note staged here, once the mint holds a note at its index.
+    const credit = (): void => {
+      for (const note of staged) {
+        if ((note.scheme === 'wallet' || note.scheme === 'change') && note.index !== undefined) {
+          this.creditChainIndex(host, note.scheme, note.index)
+        }
+      }
+    }
 
-    // The hashes are about to be disclosed: the secrets go to disk first,
-    // and the counter goes with them in the SAME write. A crash here
-    // wastes an index and costs nothing; the other order would hand a
-    // secret to a mint the wallet could not find its way back to.
-    if (derived) {
+    // The outputs are about to be named to the mint: the secrets go to disk
+    // first. A bearer ladder's counter goes with them in the SAME write,
+    // since a crash there wastes an index and costs nothing, and the other
+    // order would hand a hash to a mint the wallet could not find its way
+    // back to. A key note's counter waits for the mint to credit it: a cp1
+    // gives nothing away, its key comes back from the words, and its staged
+    // record holds the index meanwhile.
+    if (bearerNext !== null) {
       this.data.cashCounters ??= {}
-      this.data.cashCounters[template.mintHost] = startIndex + staged.length
+      this.data.cashCounters[host] = bearerNext
     }
     this.data.notes.push(...staged)
     await this.persist()
@@ -1539,19 +1728,20 @@ export class Wallet {
           template.callback,
           k1s,
           plan.amountMsat,
-          hashK1(staged[0]!.k1),
-          hashK1(staged[1]!.k1),
+          refOf(staged[0]!),
+          refOf(staged[1]!),
           this.opts
         )
         signatures = [result.signature, result.changeSignature]
       } else if (plan.kind === 'merge') {
-        const result = await mergeNotesWithHash(template.callback, k1s, hashK1(staged[0]!.k1), this.opts)
+        const result = await mergeNotesWithHash(template.callback, k1s, refOf(staged[0]!), this.opts)
         signatures = [result.signature]
       } else {
-        const result = await rotateNoteWithHash(template.callback, k1s[0]!, hashK1(staged[0]!.k1), this.opts)
+        const result = await rotateNoteWithHash(template.callback, k1s[0]!, refOf(staged[0]!), this.opts)
         signatures = [result.signature]
       }
       for (const input of inputs) this.touch(input, 'spent')
+      credit()
       staged.forEach((note, index) => {
         const signature = signatures[index]
         if (signature) note.signature = signature
@@ -1610,6 +1800,9 @@ export class Wallet {
       // ambiguous and making the holder run reconcile to get it back.
       if (mayHaveLanded && (await this.inputsStillLive(inputs))) {
         this.data.notes = this.data.notes.filter(note => !staged.includes(note))
+        // The mint holds a note at these indices already, so they are used:
+        // the next attempt draws past them.
+        credit()
         await this.persist()
         throw Object.assign(
           new WalletUsageError(
@@ -1645,6 +1838,16 @@ export class Wallet {
   async receive(
     input: string,
     options: {acceptBadSignature?: boolean; approveKeyRotation?: boolean} = {}
+  ): Promise<ReceiveResult> {
+    return this.receiveNote(input, options)
+  }
+
+  // `derived` is set only for a note this wallet named itself at a mint
+  // quote: which ladder and index its secret is at.
+  private async receiveNote(
+    input: string,
+    options: {acceptBadSignature?: boolean; approveKeyRotation?: boolean},
+    derived?: {index: number; scheme: NoteLadder}
   ): Promise<ReceiveResult> {
     const url = resolveNoteInput(input)
     if (!url) throw new WalletUsageError('That does not look like an LNURLcash note.')
@@ -1717,8 +1920,13 @@ export class Wallet {
       ...(signature ? {signature} : {}),
       state: 'live',
       origin: 'receive',
+      ...(derived ? {index: derived.index, scheme: derived.scheme} : {}),
       createdAt: now(),
       updatedAt: now()
+    }
+    // The mint answered for it, so a key note's index is used.
+    if (derived && (derived.scheme === 'wallet' || derived.scheme === 'change')) {
+      this.creditChainIndex(mintHost, derived.scheme, derived.index)
     }
     // Persisted before the rotate: from here on the wallet cannot lose it.
     this.data.notes = this.data.notes.filter(note => note.id !== received.id)
@@ -3967,6 +4175,70 @@ export class Wallet {
 
   // ---- minting ----
 
+  // A quote naming a note this wallet chose. A key note at a mint that has
+  // never taken one may be refused for being one, so it is asked once more
+  // with a bearer note, and the mint is marked only once that is taken. A
+  // key note the mint already holds a note at (a second device on these
+  // words, or a quote the mint still remembers) is an index to skip.
+  private async quoteNamed(
+    host: string,
+    baseUrl: string,
+    callback: string,
+    grossMsat: number
+  ): Promise<{
+    named: {k1: string; index?: number; chain?: 'wallet'}
+    invoice: Awaited<ReturnType<typeof requestInvoice>>
+  }> {
+    if (this.makesKeyNotesAt(host)) {
+      const node = this.chainNode(host, 'wallet')
+      let from = this.nextChainIndex(host, 'wallet')
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        const note = this.drawChainNote(host, 'wallet', node, from, baseUrl)
+        try {
+          const invoice = await requestInvoice(callback, grossMsat, {...this.opts, h: note.cp1})
+          return {named: {k1: note.ck1, index: note.index, chain: 'wallet'}, invoice}
+        } catch (err) {
+          if (err instanceof ServiceRejectedError && /already in use/i.test(err.reason)) {
+            this.creditChainIndex(host, 'wallet', note.index)
+            await this.persist()
+            from = note.index + 1
+            continue
+          }
+          if (!this.mayRefuseKeyNotes(host, err)) throw err
+          const fallback = await this.quoteBearer(host, callback, grossMsat)
+          this.markNoKeyNotes(host)
+          await this.persist()
+          return fallback
+        }
+      }
+      throw new WalletUsageError(
+        `${host} already holds notes at the next 4 keys this wallet derived, so this is not a stale counter. Nothing was paid.`
+      )
+    }
+    return this.quoteBearer(host, callback, grossMsat)
+  }
+
+  private async quoteBearer(
+    host: string,
+    callback: string,
+    grossMsat: number
+  ): Promise<{named: {k1: string; index?: number}; invoice: Awaited<ReturnType<typeof requestInvoice>>}> {
+    const root = this.cashRoot()
+    if (root !== null && this.opts.randomSecret === undefined) {
+      const index = this.cashCounterFor(host)
+      const k1 = deriveCashSecret(root, host, index)
+      // The hash is about to be disclosed, so the counter goes to disk
+      // first - the same order the split path uses, and for the same
+      // reason. A crash here wastes an index and costs nothing.
+      this.data.cashCounters ??= {}
+      this.data.cashCounters[host] = index + 1
+      await this.persist()
+      return {named: {k1, index}, invoice: await requestInvoice(callback, grossMsat, {...this.opts, h: hashK1(k1)})}
+    }
+    const k1 = (this.opts.randomSecret ?? defaultRandomSecret)()
+    return {named: {k1}, invoice: await requestInvoice(callback, grossMsat, {...this.opts, h: hashK1(k1)})}
+  }
+
   async startMint(grossMsat: number, mintHost?: string): Promise<{pending: PendingMint; fee: MintFee | null}> {
     const entry = this.mintEntry(mintHost)
     const pay = await fetchPayRequest(entry.payUrl, this.opts)
@@ -3984,32 +4256,17 @@ export class Wallet {
     // wallet's comment commitment. The secret is drawn here and never
     // leaves; the payment preimage remains ordinary settlement proof.
     //
-    // A seeded wallet takes the secret off the mint's own ladder, so twelve
+    // A seeded wallet names a key note on its wallet chain where the mint
+    // takes them, else a bearer note off the mint's S/i' ladder, so twelve
     // words find this note again; an unseeded one draws it at random, the
-    // same way a split's outputs are drawn. Neither needs to persist it
-    // before the request: the invoice this returns has not been shown to
-    // anybody yet, so a crash before the pending record lands leaves an
-    // unpaid invoice and no note, rather than a note with no secret.
-    let namedK1: string
-    let namedIndex: number | undefined
-    const root = this.cashRoot()
-    if (root !== null && this.opts.randomSecret === undefined) {
-      namedIndex = this.cashCounterFor(entry.host)
-      namedK1 = deriveCashSecret(root, entry.host, namedIndex)
-      // The hash is about to be disclosed, so the counter goes to disk
-      // first - the same order the split path uses, and for the same
-      // reason. A crash here wastes an index and costs nothing.
-      this.data.cashCounters ??= {}
-      this.data.cashCounters[entry.host] = namedIndex + 1
-      await this.persist()
-    } else {
-      namedK1 = (this.opts.randomSecret ?? defaultRandomSecret)()
-    }
-    const invoice = await requestInvoice(
-      pay.callback,
-      grossMsat,
-      {...this.opts, h: hashK1(namedK1)}
-    )
+    // same way a split's outputs are drawn. None needs persisting before
+    // the request: the invoice this returns has not been shown to anybody
+    // yet, so a crash before the pending record lands leaves an unpaid
+    // invoice and no note, rather than a note with no secret.
+    const baseUrl = fromLud17(pay.withdrawLink)
+    const {named, invoice} = await this.quoteNamed(entry.host, baseUrl, pay.callback, grossMsat)
+    const namedK1 = named.k1
+    const namedIndex = named.index
     const decoded = tryDecodeBolt11(invoice.pr)
     if (!decoded) throw new WalletUsageError('The mint returned an invoice this wallet cannot decode.')
     // A mint that binds a quote only by `h` says so on the quote itself.
@@ -4023,10 +4280,11 @@ export class Wallet {
     const pending: PendingMint = {
       id: decoded.paymentHashHex,
       mintHost: entry.host,
-      baseUrl: fromLud17(pay.withdrawLink),
+      baseUrl,
       pr: invoice.pr,
       namedK1,
       ...(namedIndex !== undefined ? {namedIndex} : {}),
+      ...(named.chain ? {namedChain: named.chain} : {}),
       ...(invoice.verify ? {verifyUrl: invoice.verify} : {}),
       grossMsat,
       expectedNetMsat: fee ? mintFeeBand(grossMsat, fee).maxNetMsat : grossMsat,
@@ -4075,14 +4333,15 @@ export class Wallet {
     // only make receive() warn about our own guess.
     const floor = pending.minNetMsat ?? pending.expectedNetMsat
     const declared = floor === pending.expectedNetMsat ? pending.expectedNetMsat : undefined
-    const result = await this.receive(buildNoteUrl(pending.baseUrl, k1, declared))
+    // Bookkeeping the split path already keeps: which rung of which ladder
+    // the note came off, stamped on the minted note itself rather than on
+    // what the receive rotated it into, which carries its own.
+    const derived =
+      pending.namedIndex === undefined
+        ? undefined
+        : {index: pending.namedIndex, scheme: pending.namedChain ?? ('bip32' as const)}
+    const result = await this.receiveNote(buildNoteUrl(pending.baseUrl, k1, declared), {}, derived)
     delete pending.preimageHex
-    // Bookkeeping the split path already keeps: which rung of the mint's
-    // ladder this note came off.
-    if (pending.namedIndex !== undefined) {
-      result.note.index = pending.namedIndex
-      result.note.scheme = 'bip32'
-    }
     pending.updatedAt = now()
     await this.persist()
     if (result.note.amountMsat > pending.expectedNetMsat || result.note.amountMsat < floor) {
@@ -4663,11 +4922,17 @@ export class Wallet {
       entry.baseUrl = baseUrl
     }
 
-    let result
+    // LUD-26's wallet and change chains first, by cp1: nothing secret goes
+    // on the wire, whatever the caller allowed.
+    const chains = await this.restoreChains(entry.host, baseUrl, options.gap ?? 20)
+
+    let result: Pick<Awaited<ReturnType<typeof restoreFromSeed>>, 'found' | 'unresolved' | 'next'>
     try {
-      // Both ladders, in one walk. Notes minted before LUD-25 specified a
-      // derivation are still money, and walking only the current scheme
-      // would leave them at a mint this wallet can no longer name.
+      // Then the bearer ladders, in one walk: S/i', which this wallet minted
+      // on before the chains and a locker device still mints on, and the
+      // kit's scheme from before LUD-25 specified one. Notes on them are
+      // still money, and walking only the chains would leave them at a mint
+      // this wallet can no longer name.
       result = await restoreFromSeed(
         baseUrl,
         hexToBytes(seedHex),
@@ -4680,7 +4945,11 @@ export class Wallet {
         this.opts
       )
     } catch (err) {
-      if (err instanceof HashLookupUnsupportedError) {
+      // A mint that answered for a key on the chains answers `?p=` lookups,
+      // which is the same lookup a bearer walk makes by hash, so its silence
+      // on the bearer ladders is an empty answer, not an unsupported one.
+      if (!(err instanceof HashLookupUnsupportedError)) throw err
+      if (!chains.answered) {
         // Not "you have no notes here". The mint answered every private
         // lookup the way it answers one for a note it has never issued, so
         // an empty result would be a guess dressed as a fact.
@@ -4688,7 +4957,7 @@ export class Wallet {
           `${entry.host} does not answer lookups by hash, so a restore there cannot tell an empty wallet from a mint that only takes raw secrets. Retry allowing disclosure to walk by secret instead - the mint, and anything logging its requests, will see every secret this wallet derives up to the gap.`
         )
       }
-      throw err
+      result = {found: [], unresolved: [], next: {bip32: 0, hmac: 0}}
     }
     const found: NoteRecord[] = []
     for (const restored of result.found) {
@@ -4718,6 +4987,11 @@ export class Wallet {
       this.data.notes.push(record)
       found.push(record)
     }
+    for (const record of chains.found) {
+      if (this.data.notes.some(note => note.id === record.id)) continue
+      this.data.notes.push(record)
+      found.push(record)
+    }
     // Never downwards. A walk that found nothing says nothing about what
     // this wallet has already minted, and a counter that went backwards
     // would re-derive a secret the mint has already issued a note at.
@@ -4731,6 +5005,88 @@ export class Wallet {
     // Not notes, and not recoverable here, but the caller should be able to
     // say so rather than report a clean restore over the top of them.
     return {found, next: this.cashCounterFor(entry.host), unresolved: result.unresolved.length}
+  }
+
+  // Walks the wallet and change chains at a mint by cp1, as LUD-26's
+  // recovery does, until `gap` keys in a row are unknown there. A key the
+  // mint answers for with a note, "already in use" (a burned note) or
+  // "pending" is used, and its counter moves past it; any other refusal
+  // stops the restore rather than reading as the end of the chain, except
+  // on a chain's very first key at a mint that took no key note from this
+  // wallet yet, which is a mint that never took up key notes. `answered`
+  // says the mint answered a `?p=` lookup with something only a real lookup
+  // can say - a note, a burned one or a pending one - since "unknown" is
+  // what a mint with no lookups says to everything.
+  private async restoreChains(
+    host: string,
+    baseUrl: string,
+    gap: number
+  ): Promise<{found: NoteRecord[]; answered: boolean}> {
+    const found: NoteRecord[] = []
+    let answered = false
+    if (!this.data.seedHex) return {found, answered}
+    for (const chain of ['wallet', 'change'] as const) {
+      const node = this.chainNode(host, chain)
+      let quiet = 0
+      let asked = 0
+      for (let index = 0; quiet < gap; index++) {
+        const note = this.chainNote(node, index, baseUrl)
+        if (!note) continue
+        let info: Awaited<ReturnType<typeof fetchNoteInfoByPubkey>>
+        try {
+          info = await this.askPatiently(() => fetchNoteInfoByPubkey(baseUrl, note.cp1, this.opts))
+        } catch (err) {
+          // Not an answer: a mint with no lookup by key says this about
+          // every key there is.
+          if (err instanceof NoteUnknownError) {
+            quiet += 1
+            asked += 1
+            continue
+          }
+          if (err instanceof NoteSpentError || err instanceof PendingNoteError) {
+            answered = true
+            quiet = 0
+            asked += 1
+            this.creditChainIndex(host, chain, index)
+            if (err instanceof PendingNoteError) found.push(this.recoveredChainNote(host, baseUrl, chain, index, note.ck1, null))
+            continue
+          }
+          if (asked === 0 && this.mayRefuseKeyNotes(host, err)) break
+          throw err
+        }
+        answered = true
+        quiet = 0
+        asked += 1
+        this.creditChainIndex(host, chain, index)
+        found.push(this.recoveredChainNote(host, baseUrl, chain, index, note.ck1, info))
+      }
+    }
+    return {found, answered}
+  }
+
+  private recoveredChainNote(
+    host: string,
+    baseUrl: string,
+    chain: NoteChain,
+    index: number,
+    ck1: string,
+    info: {callback: string; maxWithdrawable: number} | null
+  ): NoteRecord {
+    return {
+      id: noteId(ck1),
+      k1: ck1,
+      amountMsat: info?.maxWithdrawable ?? 0,
+      baseUrl,
+      callback: info?.callback ?? '',
+      mintHost: host,
+      index,
+      scheme: chain,
+      // a melt is in flight on it: the note may yet come back, and may not
+      state: info ? 'live' : 'ambiguous',
+      origin: 'recovered',
+      createdAt: now(),
+      updatedAt: now()
+    }
   }
 
   async restoreAll(

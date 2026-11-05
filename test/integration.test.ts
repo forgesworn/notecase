@@ -375,3 +375,44 @@ describe('naming every note being minted', () => {
     expect(host).toBeTruthy()
   })
 })
+
+describe("a seeded wallet's own notes at moneyer", () => {
+  // LUD-26's wallet and change chains against the mint moneyer.dev runs:
+  // a quote named by cp1, a split into a cp1 pair, and the words finding it
+  // all again by key alone.
+  it('mints, splits and restores on the wallet and change chains', async () => {
+    const {moneyer, backend} = await startMint()
+    const host = new URL(moneyer.url).host
+    const seedHex = bytesToHex(randomBytes(64))
+    const first = makeWallet()
+    first.data.seedHex = seedHex
+    await first.wallet.addMint(`mint@${host}`)
+
+    const {pending} = await first.wallet.startMint(21_000)
+    expect(pending.namedChain).toBe('wallet')
+    expect(pending.namedIndex).toBe(0)
+    const paymentHash = bolt11PaymentHash(pending.pr!)!
+    backend.control.settleInvoice(paymentHash)
+    const minted = await first.wallet.claimMint(pending)
+    // the minted note is on key 0, and the receive rotated it onto key 1
+    expect([minted.note.scheme, minted.note.index]).toEqual(['wallet', 1])
+    expect(first.data.notes.find(note => note.index === 0 && note.scheme === 'wallet')?.state).toBe('spent')
+    expect(minted.note.signature).toBeDefined()
+
+    const sent = await first.wallet.send(5_000)
+    expect([sent.scheme, sent.index]).toEqual(['wallet', 2])
+    const change = first.wallet.liveNotes()[0]!
+    expect([change.scheme, change.index]).toEqual(['change', 0])
+    expect(first.wallet.chainCounterFor(host, 'wallet')).toBe(3)
+    expect(first.data.mints[0]!.keyNotes).toBeUndefined()
+
+    const fresh = makeWallet()
+    fresh.data.seedHex = seedHex
+    await fresh.wallet.addMint(`mint@${host}`)
+    await fresh.wallet.restoreFromMint(host)
+    // the change, and the note handed over, which nobody has taken yet
+    expect(fresh.wallet.balanceMsat()).toBe(21_000)
+    expect(fresh.wallet.chainCounterFor(host, 'wallet')).toBe(3)
+    expect(fresh.wallet.chainCounterFor(host, 'change')).toBe(1)
+  })
+})

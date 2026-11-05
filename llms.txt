@@ -122,14 +122,27 @@ enough to find the money:
 
   (d1, d2, d3, d4) = HMAC-SHA256(key = m/139'/0, msg = "<mint host>")[0..16]
                      read big-endian as 4 uint32
-  k1[i]            = m/139'/d1/d2/d3/d4/i'
+  S                = m/139'/d1/d2/d3/d4
+  wallet note i    = S/0'/0/i   (mint, rotate, merge, a split's amount)
+  change note i    = S/0'/1/i   (a split's change)
+  bearer k1[i]     = S/i'       (only at a mint that takes no key notes, and on
+                                 locker devices; this wallet's own ladder before the chains)
 
-LUD-25's own scheme. d1..d4 are RAW uint32 used exactly as they fall: BIP-32
+LUD-26's chains, as every LUD-26 wallet derives them: each wallet or change
+note is a key note, named to the mint by cp1<Q> and spent with a ck1 (its
+k1 in the store). Their counters (chainCounterFor(host, chain)) move only
+once the mint credits a note there; a refused request names the same keys
+again, and a key the mint already holds (another device on these words) is
+skipped. A mint that refuses the first key note it is offered is asked again
+with a bearer note, and marked keyNotes: false once that is taken.
+
+The bearer ladder is LUD-25's older scheme. d1..d4 are RAW uint32 used exactly as they fall: BIP-32
 reads >= 2^31 as hardened, so which levels are hardened depends on the host
 name. Never mask the top bit, never harden all four - either derives a
 different tree. host is the exact lowercase host[:port]; i is decimal from 0,
-one counter per mint. Restore walks i upward and stops after 20 consecutive
-unknowns, and walks the pre-spec HMAC scheme (key "lnurlcash-note-v1", msg
+one counter per mint. Restore walks both chains by cp1 first, then i upward
+on the bearer ladder, each stopping after 20 consecutive unknowns, and walks
+the pre-spec HMAC scheme (key "lnurlcash-note-v1", msg
 "<host>:<i>") alongside it for notes minted before LUD-25 specified one.
 
 The counter is half the backup, not an optimisation: a mint answers a
@@ -355,8 +368,10 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   - recoverHeartwoodNotes reads a heartwood master's secret from an nsec or BIP-39 phrase
     with the internal identityCandidates (see "Not exported"); typed recovery words are
     not read yet
-  hasSeed(), counterFor(host), restoreFromMint(host), restoreAll(),
-  legacyNotes(), adoptLegacyNotes(),
+  hasSeed(), counterFor(host), chainCounterFor(host, 'wallet' | 'change'),
+  restoreFromMint(host), restoreAll(),
+  legacyNotes() (not on the words), oldLadderNotes() (on a bearer ladder at a mint
+  that takes key notes), adoptLegacyNotes() (rotates both kinds, free; never run unasked),
   awaitMeltProof(melt, {timeoutMs?, intervalMs?}) -> MeltRecord | null (LUD-21 proof),
   nwcGrants(), nwcGrant(idOrName), grantNwc({name, relays?, methods?, budgetMsat?, maxPaymentMsat?}),
   revokeNwc(idOrName), refillNwc(idOrName, budgetMsat?),

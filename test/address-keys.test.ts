@@ -132,8 +132,13 @@ describe('a name paid to this wallet\'s keys', () => {
     expect(got.skipped).toEqual([])
     expect(got.received).toHaveLength(1)
     expect(got.received[0]!.note.amountMsat).toBe(21_000)
-    // rotated onto a secret of its own at once: no ck1 is held
-    expect(wallet.liveNotes().some(note => isCk1(note.k1))).toBe(false)
+    // rotated onto a key of its own at once, on its wallet chain: the
+    // share's key, which the mint holding the cx1 can derive, is spent
+    const live = wallet.liveNotes()
+    expect(live).toHaveLength(1)
+    expect(live[0]!.scheme).toBe('wallet')
+    expect(live[0]!.index).toBe(0)
+    expect(isCk1(live[0]!.k1)).toBe(true)
     expect(wallet.balanceMsat()).toBe(21_000)
   })
 

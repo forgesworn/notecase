@@ -15,6 +15,11 @@
 //   spent      burned at the mint; kept for history
 
 import type {NoteScheme} from './lnurlcash.js'
+
+// LUD-26's two chains a wallet makes its own notes on, below a mint's S.
+export type NoteChain = 'wallet' | 'change'
+// Every ladder a note's index can be on.
+export type NoteLadder = NoteScheme | NoteChain
 import type {NwcConnection} from './nwcservice.ts'
 
 export type NoteState = 'live' | 'staged' | 'ambiguous' | 'melting' | 'sent' | 'spent'
@@ -45,11 +50,15 @@ export type NoteRecord = {
   // host in the seed's ladder. A note without one predates the seed (or
   // came from somewhere else) and restore cannot find it again.
   index?: number
-  // Which ladder that index belongs to. 'bip32' is LUD-25's own m/139'
-  // scheme, which is what this wallet mints under now. Absent means 'hmac',
-  // the kit's pre-spec scheme, because every record written before this
-  // field existed came off that one - so no stored wallet needs rewriting.
-  scheme?: NoteScheme
+  // Which ladder that index belongs to. 'wallet' and 'change' are LUD-26's
+  // key-path chains, S/0'/0/i and S/0'/1/i, which is what this wallet makes
+  // its notes on now at any mint that takes them: the note's k1 is then a
+  // ck1 for the key there. 'bip32' is the bearer ladder before that, S/i',
+  // still made at a mint that takes no key notes and still what a locker
+  // device mints on. Absent means 'hmac', the kit's pre-spec scheme,
+  // because every record written before this field existed came off that
+  // one - so no stored wallet needs rewriting.
+  scheme?: NoteLadder
   // Nostr provenance: the pubkey this note was gift-wrapped to, or came
   // from. A note with either is never wrapped again.
   sentTo?: string
@@ -111,6 +120,9 @@ export type PendingMint = {
   // claim loses an index rather than the note.
   namedK1?: string
   namedIndex?: number
+  // Which ladder namedIndex is on: 'wallet' for a key-path note named by
+  // its cp1 (namedK1 is then its ck1), absent for the bearer ladder.
+  namedChain?: 'wallet'
   createdAt: number
   updatedAt: number
 }
@@ -152,6 +164,11 @@ export type MintEntry = {
   // the holder deserves to hear about it from the next reconcile.
   keyRotatedAt?: number
   keyRotationReported?: boolean
+  // False once this mint has refused a key-path output (a cp1) and then
+  // taken a bearer one in its place: a mint that never took up LUD-25's
+  // key notes, so notes here stay on the bearer ladder. Absent means try
+  // the key note first.
+  keyNotes?: false
   // What the mint says about itself on its discovery endpoint: who runs
   // it, how to reach them, the terms, and whatever the operator wants
   // holders to know today. Every field is optional and an absent one is
@@ -256,7 +273,9 @@ export type WalletData = {
   // synced: it is where a restore starts looking for notes minted before
   // LUD-25 specified a derivation, and moving it backwards would lose them.
   counters?: Record<string, number>
-  // The same, for LUD-25's m/139' ladder - the one this wallet mints under.
+  // The same, for LUD-25's m/139' bearer ladder, S/i'. This wallet makes
+  // notes on it only at a mint that takes no key notes, and a locker device
+  // mints on it; everywhere else its notes are on the chains below.
   // Deliberately a second map rather than a reinterpretation of the first:
   // an existing wallet's counters count hmac indices, and reading them as
   // m/139' indices would claim positions on a ladder nothing has used.
@@ -264,6 +283,14 @@ export type WalletData = {
   // BEFORE its hash goes on the wire: a crash there wastes an index, and
   // the other order loses a note.
   cashCounters?: Record<string, number>
+  // LUD-26's wallet and change chains: the next index on each, per mint.
+  // Unlike the two above, these move only once the mint has credited a
+  // note at the index (LUD-26 "Seed & derivation"): what goes on the wire
+  // is a cp1, which is public, and the key behind it comes back from the
+  // words, so nothing is lost by a crash before the counter moves. An
+  // output still in flight holds its index through its own staged or
+  // pending record, and one the mint refused frees it for the next try.
+  chainCounters?: Record<string, {wallet?: number; change?: number}>
   settings: {
     defaultMintHost?: string
     // A spending capability - the store holding this must stay encrypted.
