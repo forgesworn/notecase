@@ -1108,6 +1108,14 @@ const main = async (): Promise<void> => {
           console.log(claimed.feeInvoice)
           return
         }
+        if (claimed.ambiguous) {
+          // The fee's melt went out but its answer did not come back: the
+          // mint may be paying it. Paying the invoice elsewhere could pay twice.
+          console.log(
+            `${claimed.address} is held for you. Its registration fee may still be paying - \`notecase reconcile\` settles it; do not pay the fee from another wallet meanwhile.`
+          )
+          return
+        }
         console.log(
           claimed.toKeys
             ? `${claimed.address} is yours. Payments to it go to your own keys, which the mint never holds - \`notecase address scan\` finds any whose notification did not arrive.`

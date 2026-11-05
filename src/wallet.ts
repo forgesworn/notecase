@@ -2569,11 +2569,13 @@ export class Wallet {
   // by the share alone. An address fee comes back as an invoice, paid here
   // by melting a note of the same mint once it is checked against the fee
   // the mint advertises. Until it settles the mint only holds the name, and
-  // an invoice this wallet would not or could not pay is handed back.
+  // an invoice this wallet would not or could not pay is handed back. A
+  // melt whose answer was lost is neither: the mint may be paying it, so it
+  // is reported as `ambiguous`, with no invoice to pay a second time.
   async registerName(options: {
     name: string
     mintHost?: string
-  }): Promise<{address: string; paidMsat: number; toKeys: boolean; feeInvoice?: string}> {
+  }): Promise<{address: string; paidMsat: number; toKeys: boolean; feeInvoice?: string; ambiguous?: true}> {
     const name = options.name.trim().toLowerCase()
     if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(name)) {
       throw new WalletUsageError(
@@ -2719,7 +2721,7 @@ export class Wallet {
   private async registerAtAddress(
     entry: MintEntry,
     name: string
-  ): Promise<{address: string; paidMsat: number; toKeys: boolean; feeInvoice?: string}> {
+  ): Promise<{address: string; paidMsat: number; toKeys: boolean; feeInvoice?: string; ambiguous?: true}> {
     const address = `${name}@${entry.host}`
     const server = this.addressServer(entry)
     const feeMsat = await this.addressFeeMsat(entry)
@@ -2735,13 +2737,18 @@ export class Wallet {
     if (asked === null || asked > feeMsat) {
       return {address, paidMsat: 0, toKeys: true, feeInvoice: result.pr}
     }
+    let ambiguous: boolean
     try {
-      await this.melt(result.pr, `the address fee for ${address}`, entry.host)
+      ;({ambiguous} = await this.melt(result.pr, `the address fee for ${address}`, entry.host))
     } catch {
       // nothing was burned (melt says so by throwing): the name stays held
       // until the invoice expires, and it can be paid from anywhere
       return {address, paidMsat: 0, toKeys: true, feeInvoice: result.pr}
     }
+    // The mint's answer was lost or said pending: it may be paying the fee
+    // now. Not reported as paid, and the invoice is not handed back, as
+    // paying it elsewhere could pay it twice. `reconcile` settles the note.
+    if (ambiguous) return {address, paidMsat: 0, toKeys: true, ambiguous: true}
     return {address, paidMsat: asked, toKeys: true}
   }
 
