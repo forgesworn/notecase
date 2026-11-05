@@ -243,6 +243,10 @@ const RATE_LIMIT_TRIES = 6
 // A mint's "slow down": LUD-26's own wording, or the reverse proxy in front of
 // it answering 429 "Too many requests", as moneyer.dev's Caddy does.
 const RATE_LIMITED = /rate.?limit|too many requests/i
+// How long past its fee invoice's expiry a held name the mint now serves is
+// still taken as this wallet's: the mint may register it a little after the
+// fee settles. Beyond that the name may have been released and taken.
+const HELD_NAME_GRACE_MS = 10 * 60_000
 const NO_ADDRESS_KEYS = 'This wallet has no recovery words and no Nostr key, so it has no keys to be paid to.'
 // A mint refusing a proof because it is not by the key on file: dni's
 // reference mint's words ("Invalid ownership signature."), conformance's
@@ -3006,9 +3010,13 @@ export class Wallet {
     const {share, result} = await this.withFreshShare(entry.host, share =>
       registerAddress(server, name, share.cx1, share.key, this.opts)
     )
-    this.data.settings.lightningAddress = address
-    await this.recordName(address, share.encoded)
-    if (!result.pr) return {address, paidMsat: 0, toKeys: true}
+    if (!result.pr) {
+      await this.activateName(address, share.encoded)
+      return {address, paidMsat: 0, toKeys: true}
+    }
+    // Held, not published, until the fee settles: on file so a scan and
+    // `address keys` find its share, but not yet this wallet's address.
+    await this.holdName(address, share.encoded, result.pr)
     // LUD-26: never pay more than the fee the mint advertised, so an
     // invoice over it, or for no stated amount, is handed back unpaid.
     const asked = decodeBolt11AmountMsat(result.pr)
@@ -3027,7 +3035,76 @@ export class Wallet {
     // now. Not reported as paid, and the invoice is not handed back, as
     // paying it elsewhere could pay it twice. `reconcile` settles the note.
     if (ambiguous) return {address, paidMsat: 0, toKeys: true, ambiguous: true}
+    await this.activateName(address, share.encoded)
     return {address, paidMsat: asked, toKeys: true}
+  }
+
+  // A name held for its address fee, kept apart from the wallet's address.
+  private async holdName(address: string, cx1: string, pr: string): Promise<void> {
+    const decoded = tryDecodeBolt11(pr)
+    const expiresAt = decoded ? (decoded.timestamp + decoded.expirySeconds) * 1000 : Date.now() + 3_600_000
+    ;(this.data.settings.heldNames ??= {})[address] = {cx1, expiresAt}
+    ;(this.data.settings.nameKeys ??= {})[address] = cx1
+    await this.persist()
+  }
+
+  // A name the mint now serves becomes this wallet's address.
+  private async activateName(address: string, cx1: string): Promise<void> {
+    this.dropHeldName(address)
+    this.data.settings.lightningAddress = address
+    await this.recordName(address, cx1)
+  }
+
+  private dropHeldName(address: string): void {
+    const held = this.data.settings.heldNames
+    if (!held) return
+    delete held[address]
+    if (!Object.keys(held).length) delete this.data.settings.heldNames
+  }
+
+  // Names held here for an address fee, as name@host.
+  heldNames(): string[] {
+    return Object.keys(this.data.settings.heldNames ?? {})
+  }
+
+  // Asks each mint about the names held here for an address fee. LUD-26
+  // has the mint publish one once its fee settles, and release it if the
+  // invoice expires unpaid. One the mint now serves becomes this wallet's
+  // address; one it still does not know, well after its invoice expired,
+  // is forgotten. One served only after that may be somebody else's by
+  // now, so it stays held and is reported as unsure: `address keys <name>`
+  // settles it, as only the key on file can move the name.
+  //
+  // A mint that cannot be asked, or answers anything but "unknown user",
+  // leaves the name held for next time.
+  async settleHeldNames(): Promise<{active: string[]; released: string[]; unsure: string[]}> {
+    const outcome = {active: [] as string[], released: [] as string[], unsure: [] as string[]}
+    const now = Date.now()
+    for (const [address, {cx1, expiresAt}] of Object.entries(this.data.settings.heldNames ?? {})) {
+      const lapsed = now > expiresAt + HELD_NAME_GRACE_MS
+      const payUrl = resolveMintInput(address)
+      if (!payUrl) continue
+      let served: boolean
+      try {
+        await fetchPayRequest(payUrl, this.opts)
+        served = true
+      } catch (err) {
+        if (!(err instanceof ServiceRejectedError) || !/unknown user/i.test(err.reason)) continue
+        served = false
+      }
+      if (served && !lapsed) {
+        await this.activateName(address, cx1)
+        outcome.active.push(address)
+      } else if (served) {
+        outcome.unsure.push(address)
+      } else if (lapsed) {
+        this.dropHeldName(address)
+        if (this.data.settings.nameKeys?.[address] === cx1) delete this.data.settings.nameKeys[address]
+        await this.persist()
+        outcome.released.push(address)
+      }
+    }
+    return outcome
   }
 
   // The name and mint a name call is about: the one given, or the address
@@ -3115,7 +3192,10 @@ export class Wallet {
       )
       return share
     })
-    await this.recordName(address, moved.encoded)
+    // Only the key on file can move a name, so a held one that moved is
+    // this wallet's, and now its address.
+    if (this.data.settings.heldNames?.[address]) await this.activateName(address, moved.encoded)
+    else await this.recordName(address, moved.encoded)
     return {address, toKeys: true}
   }
 
@@ -3130,6 +3210,7 @@ export class Wallet {
     const server = this.addressServer(entry)
     await this.withKeyOnFile(entry.host, address, onFile => unregisterAddress(server, name, onFile.key, this.opts))
     if (this.data.settings.nameKeys) delete this.data.settings.nameKeys[address]
+    this.dropHeldName(address)
     if (this.data.settings.lightningAddress === address) {
       delete this.data.settings.lightningAddress
       delete this.data.settings.lightningAddressCx1
