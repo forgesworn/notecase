@@ -197,18 +197,46 @@ describe('the crash window', () => {
   // the mint already holds a note under, and is told "already spent" about
   // a note that is fine. Before this it parked the whole balance as
   // ambiguous, showed zero, and failed again identically forever.
+  it('walks past keys a second device on the same words already used', async () => {
+    const theMint = await start()
+    const first = makeWallet()
+    first.data.seedHex = 'be'.repeat(32)
+    const kept = await first.wallet.receive(fund(theMint, 100_000).url)
+    expect(kept.note.scheme).toBe('wallet')
+    expect(kept.note.index).toBe(0)
+
+    // The same words on another device, whose counter knows nothing of that:
+    // its first key is one the mint already holds a note at.
+    const second = makeWallet()
+    second.data.seedHex = 'be'.repeat(32)
+    const received = await second.wallet.receive(fund(theMint, 50_000).url)
+
+    // It got there, and it did not call the holder's money spent on the way.
+    expect(received.note.state).toBe('live')
+    expect(received.note.scheme).toBe('wallet')
+    expect(received.note.index).toBe(1)
+    expect(second.data.notes.some(note => note.state === 'ambiguous')).toBe(false)
+    // and the counter is past the collision, so the next one is clean
+    expect(second.wallet.chainCounterFor(received.note.mintHost, 'wallet')).toBe(2)
+    expect(first.wallet.balanceMsat()).toBe(100_000)
+  })
+
   it('walks past indexes the mint has already seen instead of calling them spent', async () => {
     const theMint = await start()
     const {wallet, data} = makeWallet()
     data.seedHex = 'be'.repeat(32)
+    // A mint that takes no key notes, so its notes are on the bearer ladder,
+    // whose counter moves before anything is disclosed.
+    const host = new URL(theMint.url).host
+    data.mints.push({input: theMint.url, host, payUrl: `${theMint.url}/.well-known/lnurlp/mint`, addedAt: 1, keyNotes: false})
     const received = await wallet.receive(fund(theMint, 100_000).url)
+    expect(received.note.scheme).toBe('bip32')
     expect(received.note.index).toBeDefined()
     expect(wallet.balanceMsat()).toBe(100_000)
 
     // Rewind the ladder, the way a restore or a second device on the same
     // seed leaves it: the next secrets this wallet derives are ones the
     // mint has already minted notes under.
-    const host = received.note.mintHost
     data.cashCounters![host] = 0
 
     const target = await wallet.prepareExact(40_000)

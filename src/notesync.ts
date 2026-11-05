@@ -49,11 +49,17 @@ export type NotePayload = {v: 1; note: SyncedNote}
 // m/139' ladder either, so it cannot collide with one that does. A v1 payload
 // arriving here simply carries no cash counters, which reads as 0 - correct,
 // since its author never used that ladder.
+// `chainCounters`, LUD-26's wallet and change chains, rides on v2 as one more
+// optional field: a device that predates it ignores it, and since every
+// device skips a key the mint already holds a note at, a missed counter
+// costs a request, never a note.
+export type ChainCounters = Record<string, {wallet?: number; change?: number}>
 export type CounterPayload = {
   v: 1 | 2
   device: string
   counters: Record<string, number>
   cashCounters?: Record<string, number>
+  chainCounters?: ChainCounters
   updatedAt: number
 }
 
@@ -111,7 +117,8 @@ export const encodeCounters = (
   key: MintBackupKey,
   deviceId: string,
   counters: Record<string, number>,
-  cashCounters: Record<string, number> = {}
+  cashCounters: Record<string, number> = {},
+  chainCounters: ChainCounters = {}
 ): Event =>
   finalizeEvent(
     {
@@ -124,6 +131,7 @@ export const encodeCounters = (
           device: deviceId,
           counters,
           cashCounters,
+          chainCounters,
           updatedAt: Date.now()
         } satisfies CounterPayload),
         selfKey(key)
@@ -131,6 +139,22 @@ export const encodeCounters = (
     },
     key.secret
   )
+
+const isIndex = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 0
+
+const saneChains = (from: unknown): ChainCounters => {
+  const out: ChainCounters = {}
+  if (typeof from !== 'object' || from === null) return out
+  for (const [host, value] of Object.entries(from as Record<string, unknown>)) {
+    if (typeof value !== 'object' || value === null) continue
+    const {wallet, change} = value as {wallet?: unknown; change?: unknown}
+    const kept: {wallet?: number; change?: number} = {}
+    if (isIndex(wallet)) kept.wallet = wallet
+    if (isIndex(change)) kept.change = change
+    if (kept.wallet !== undefined || kept.change !== undefined) out[host] = kept
+  }
+  return out
+}
 
 export const decodeCounters = (key: MintBackupKey, event: Event): CounterPayload | null => {
   try {
@@ -150,6 +174,7 @@ export const decodeCounters = (key: MintBackupKey, event: Event): CounterPayload
       // A v1 device wrote no cash counters, and never minted on that ladder
       // either, so an empty map here is the truth rather than a gap.
       cashCounters: sane(parsed.cashCounters),
+      chainCounters: saneChains(parsed.chainCounters),
       updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0
     }
   } catch {
@@ -211,9 +236,10 @@ export const fetchStore = async (
 // it would collide with one that is already money.
 export const mergeCounters = (
   payloads: CounterPayload[]
-): {counters: Record<string, number>; cashCounters: Record<string, number>} => {
+): {counters: Record<string, number>; cashCounters: Record<string, number>; chainCounters: ChainCounters} => {
   const counters: Record<string, number> = {}
   const cashCounters: Record<string, number> = {}
+  const chainCounters: ChainCounters = {}
   for (const payload of payloads) {
     for (const [host, value] of Object.entries(payload.counters)) {
       counters[host] = Math.max(counters[host] ?? 0, value)
@@ -221,6 +247,13 @@ export const mergeCounters = (
     for (const [host, value] of Object.entries(payload.cashCounters ?? {})) {
       cashCounters[host] = Math.max(cashCounters[host] ?? 0, value)
     }
+    for (const [host, value] of Object.entries(payload.chainCounters ?? {})) {
+      const at = (chainCounters[host] ??= {})
+      for (const chain of ['wallet', 'change'] as const) {
+        const index = value[chain]
+        if (index !== undefined) at[chain] = Math.max(at[chain] ?? 0, index)
+      }
+    }
   }
-  return {counters, cashCounters}
+  return {counters, cashCounters, chainCounters}
 }

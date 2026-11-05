@@ -203,6 +203,33 @@ describe('taking a note offline', () => {
     expect(sender.wallet.balanceMsat()).toBe(0)
   })
 
+  it('hands a key note over and takes it offline on its signature, a ck1 end to end', async () => {
+    // A seeded wallet's notes are key notes now: their k1 is a ck1, and the
+    // mint certifies their Q. Nothing about the offline path may assume a
+    // 64-hex preimage.
+    const theMint = await start()
+    const sender = makeWallet()
+    sender.data.seedHex = 'be'.repeat(32)
+    await sender.wallet.receive(fund(theMint, 50_000))
+    expect(sender.wallet.liveNotes()[0]!.scheme).toBe('wallet')
+    const handed = await sender.wallet.sendOffline(50_000)
+    expect(new URL(handed.urls[0]!).searchParams.get('k1')).toMatch(/^ck1/)
+
+    const taker = makeWallet()
+    taker.data.seedHex = 'ca'.repeat(32)
+    await taker.wallet.receive(fund(theMint, 1_000))
+    const taken = await taker.wallet.receiveOffline(handed.urls[0]!)
+    expect(taken.note.amountMsat).toBe(50_000)
+    expect(taken.note.unrotated).toBe(true)
+
+    // the rotate on reconcile puts it on the taker's own wallet chain
+    const events = await taker.wallet.reconcile()
+    expect(events.some(event => event.kind === 'offline-note-rotated')).toBe(true)
+    expect(taker.wallet.liveNotes().every(note => note.scheme === 'wallet')).toBe(true)
+    expect(taker.wallet.balanceMsat()).toBe(51_000)
+    await expect(sender.wallet.reclaim(handed.notes[0]!)).rejects.toThrow(NoteSpentError)
+  })
+
   it('stops counting an offline note the giver spent first, and settles it', async () => {
     const theMint = await start()
     const sender = makeWallet()

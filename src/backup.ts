@@ -142,6 +142,15 @@ const isWalletData = (data: unknown): data is WalletData => {
       return false
     }
   }
+  if (data.chainCounters !== undefined) {
+    if (!isRecord(data.chainCounters)) return false
+    for (const at of Object.values(data.chainCounters)) {
+      if (!isRecord(at)) return false
+      for (const value of [at.wallet, at.change]) {
+        if (value !== undefined && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)) return false
+      }
+    }
+  }
   if (!isRecord(data.settings)) return false
   if (data.settings.defaultMintHost !== undefined && typeof data.settings.defaultMintHost !== 'string') return false
   if (data.settings.nwcUri !== undefined && typeof data.settings.nwcUri !== 'string') return false

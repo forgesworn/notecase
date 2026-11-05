@@ -584,11 +584,16 @@ const main = async (): Promise<void> => {
 
     case 'adopt': {
       const legacy = wallet.legacyNotes()
-      if (!legacy.length) {
-        console.log('Every note here is already on your recovery words.')
+      const older = wallet.oldLadderNotes()
+      if (!legacy.length && !older.length) {
+        console.log('Every note here is already on your recovery words, where any LUD-26 wallet finds it.')
         return
       }
-      console.log(`${legacy.length} note(s) are not covered by your words yet. Rotating them costs nothing.`)
+      if (legacy.length) console.log(`${legacy.length} note(s) are not covered by your words yet.`)
+      if (older.length) {
+        console.log(`${older.length} note(s) are on notecase's older key ladder, which other LNURLcash wallets do not search.`)
+      }
+      console.log('Rotating them costs nothing.')
       const result = await wallet.adoptLegacyNotes()
       for (const note of result.adopted) console.log(`  adopted ${sats(note.amountMsat)} (${shortId(note)})`)
       for (const failure of result.failed) console.log(`  ${shortId(failure.note)}: ${failure.reason}`)
@@ -622,6 +627,12 @@ const main = async (): Promise<void> => {
       if (legacy.length) {
         console.log(
           `${legacy.length} note(s) are not covered by your recovery words - \`notecase adopt\` fixes that for free.`
+        )
+      }
+      const older = wallet.oldLadderNotes()
+      if (older.length) {
+        console.log(
+          `${older.length} note(s) are on notecase's older key ladder, which other LNURLcash wallets do not search - \`notecase adopt\` moves them for free.`
         )
       }
       const unrotated = wallet.unrotatedMsat()

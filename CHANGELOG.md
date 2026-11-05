@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- A seeded wallet's own notes are now LUD-26 key notes: everything it mints,
+  rotates or merges into, and a split's amount, goes on the wallet chain
+  `S/0'/0/i`, and a split's change on the change chain `S/0'/1/i`, each
+  named to the mint by its cp1 and spent with a ck1. Any LUD-26 wallet given
+  the same words finds them, which none did with notecase's bearer ladder.
+  Restore walks both chains by key first, then the bearer ladders as
+  before.
+- A key note's counter moves only once the mint credits it (LUD-26), and a
+  request the mint refused names the same keys next time, so no unused
+  index is left behind. A key some other device on the same words already
+  used is skipped. The counters sync between devices with the others.
+- A mint that refuses a key note, where none has been taken yet, is asked
+  again with a bearer note. It is marked as one without key notes only if
+  it answers no `?p=` lookup at all, as lnurl-mint 0.3.1 at
+  mint.forgesworn.dev does, so a passing refusal never switches a mint off
+  them; re-adding a mint clears the mark. A mint quote names a key only at
+  a mint that has already taken a key note, since an old mint may ignore a
+  cp1 comment and key the note to the payment preimage; the first quote at
+  a mint names a bearer note, and claiming it rotates it onto the wallet
+  chain. Locker devices keep minting on the bearer ladder and are
+  unaffected.
+- A key note's URL is longer: about 308 bytes with its certificate, against
+  209 for a bearer note. A QR takes it easily; an NFC tag needs NTAG215
+  (504 bytes) or larger, which bearer notes already needed.
+- `adopt`, and the web wallet's recovery screen, also offer to move notes on
+  the old bearer ladder onto the wallet chain, for free. Nothing moves them
+  unasked; notecase still finds them from the words either way.
 - The web wallet pays a LUD-26 name at a mint it holds notes at inside that
   mint, free, with a note of exactly the amount, as `melt <sats> --to` already
   does. Notes ticked by hand still go over Lightning. A transfer the mint did

@@ -4191,9 +4191,22 @@ const viewSettings = (): void => {
       )
     }
     const legacy = w.legacyNotes()
-    if (legacy.length && w.hasSeed()) {
+    const older = w.oldLadderNotes()
+    if ((legacy.length || older.length) && w.hasSeed()) {
       const uncovered = el('<p class="warn" style="text-align:left"></p>')
-      uncovered.textContent = `${legacy.length} note${legacy.length === 1 ? '' : 's'} here came from somewhere else and your words cannot find ${legacy.length === 1 ? 'it' : 'them'} again. Moving ${legacy.length === 1 ? 'it' : 'them'} onto your words costs nothing.`
+      const lines: string[] = []
+      if (legacy.length) {
+        lines.push(
+          `${legacy.length} note${legacy.length === 1 ? '' : 's'} here came from somewhere else and your words cannot find ${legacy.length === 1 ? 'it' : 'them'} again.`
+        )
+      }
+      if (older.length) {
+        lines.push(
+          `${older.length} note${older.length === 1 ? ' is' : 's are'} on notecase's older key ladder, which other LNURLcash wallets do not search.`
+        )
+      }
+      lines.push('Moving them onto your words costs nothing.')
+      uncovered.textContent = lines.join(' ')
       const adopt = el(`<button class="btn">${icons.check}<span>Move them onto my words</span></button>`)
       adopt.addEventListener('click', () =>
         busy(adopt as HTMLButtonElement, async () => {
