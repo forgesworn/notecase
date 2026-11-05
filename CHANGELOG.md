@@ -13,10 +13,16 @@
   request the mint refused names the same keys next time, so no unused
   index is left behind. A key some other device on the same words already
   used is skipped. The counters sync between devices with the others.
-- A mint that refuses a key note the first time it is offered one is asked
-  again with a bearer note, and once that is taken it gets bearer notes
-  from then on (mint.forgesworn.dev's lnurl-mint 0.3.1 is one). Locker
-  devices keep minting on the bearer ladder and are unaffected.
+- A mint that refuses a key note, where none has been taken yet, is asked
+  again with a bearer note. It is marked as one without key notes only if
+  it answers no `?p=` lookup at all, as lnurl-mint 0.3.1 at
+  mint.forgesworn.dev does, so a passing refusal never switches a mint off
+  them; re-adding a mint clears the mark. A mint quote names a key only at
+  a mint that has already taken a key note, since an old mint may ignore a
+  cp1 comment and key the note to the payment preimage; the first quote at
+  a mint names a bearer note, and claiming it rotates it onto the wallet
+  chain. Locker devices keep minting on the bearer ladder and are
+  unaffected.
 - A key note's URL is longer: about 308 bytes with its certificate, against
   209 for a bearer note. A QR takes it easily; an NFC tag needs NTAG215
   (504 bytes) or larger, which bearer notes already needed.

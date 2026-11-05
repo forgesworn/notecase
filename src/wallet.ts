@@ -926,20 +926,49 @@ export class Wallet {
     return this.data.mints.find(mint => mint.host === host)?.keyNotes !== false
   }
 
-  // A refusal that may be a mint turning down the key note itself, so the
-  // same request is worth making once more with a bearer note. Only where
-  // the mint has never yet taken a key note from this wallet: once it has,
-  // a refusal is about something else, and a mint that is merely refusing
-  // a split (a sunset, a dust floor) is never marked as one without them.
-  private mayRefuseKeyNotes(host: string, err: unknown): boolean {
-    if (!(err instanceof ServiceRejectedError)) return false
-    return !this.data.notes.some(note => note.mintHost === host && (note.scheme === 'wallet' || note.scheme === 'change'))
+  // Whether this mint has taken a key note from this wallet: one is on
+  // file, or a chain counter here has moved (a credit, a collision, a
+  // restore or another device's count).
+  private tookKeyNotesAt(host: string): boolean {
+    if (this.data.notes.some(note => note.mintHost === host && (note.scheme === 'wallet' || note.scheme === 'change'))) {
+      return true
+    }
+    const at = this.data.chainCounters?.[host]
+    return (at?.wallet ?? 0) > 0 || (at?.change ?? 0) > 0
   }
 
-  // Only once the bearer note was taken in the key note's place.
-  private markNoKeyNotes(host: string): void {
+  // A refusal that may be a mint turning down the key note itself, so the
+  // same request is worth making once more with a bearer note. Never at a
+  // mint that has taken one, and never for "slow down", which says nothing
+  // about the note.
+  private mayRefuseKeyNotes(host: string, err: unknown): boolean {
+    if (!(err instanceof ServiceRejectedError) || RATE_LIMITED.test(err.reason)) return false
+    return !this.tookKeyNotesAt(host)
+  }
+
+  // Whether the mint answers `?p=` lookups at all, asked about a random h
+  // nobody holds. A mint that takes key notes must (LUD-25), so one that
+  // refuses the lookup outright is a mint from before them, like lnurl-mint
+  // 0.3.1. Null when the answer says neither (rate limited, unreachable).
+  private async answersLookups(baseUrl: string): Promise<boolean | null> {
+    try {
+      await fetchNoteInfoByHash(baseUrl, bytesToHex(randomBytes(32)), this.opts)
+      return true
+    } catch (err) {
+      if (err instanceof NoteUnknownError || err instanceof NoteSpentError || err instanceof PendingNoteError) return true
+      if (err instanceof ServiceRejectedError && !RATE_LIMITED.test(err.reason)) return false
+      return null
+    }
+  }
+
+  // Marked only on that evidence: a single refusal that a bearer note then
+  // got past may be a passing failure at a mint that takes key notes, and
+  // marking it would stop this wallet's notes there being found by any
+  // other LUD-26 wallet, for good.
+  private async markIfNoKeyNotes(host: string, baseUrl: string): Promise<void> {
     const entry = this.data.mints.find(mint => mint.host === host)
-    if (entry) entry.keyNotes = false
+    if (!entry || (await this.answersLookups(baseUrl)) !== false) return
+    entry.keyNotes = false
   }
 
   // S/0'/0 or S/0'/1 at `host`.
@@ -1589,7 +1618,7 @@ export class Wallet {
       try {
         const made = await this.mutateOnce(inputs, plan, outputs)
         if (fellBack) {
-          this.markNoKeyNotes(host)
+          await this.markIfNoKeyNotes(host, inputs[0]!.baseUrl)
           await this.persist()
         }
         return made
@@ -4175,11 +4204,14 @@ export class Wallet {
 
   // ---- minting ----
 
-  // A quote naming a note this wallet chose. A key note at a mint that has
-  // never taken one may be refused for being one, so it is asked once more
-  // with a bearer note, and the mint is marked only once that is taken. A
-  // key note the mint already holds a note at (a second device on these
-  // words, or a quote the mint still remembers) is an index to skip.
+  // A quote naming a note this wallet chose. A key note only at a mint that
+  // has already taken one from this wallet: a mint from before key notes
+  // may not refuse a cp1 comment but ignore it, and key the note to the
+  // payment preimage, which only the payer holds (lnurl-mint 0.3.1 does
+  // exactly that). A mutation cannot fail that way, so the proof comes from
+  // one, and every claimed mint is rotated straight onto the wallet chain
+  // anyway. A key note the mint already holds a note at (a second device on
+  // these words, or a quote it still remembers) is an index to skip.
   private async quoteNamed(
     host: string,
     baseUrl: string,
@@ -4189,7 +4221,7 @@ export class Wallet {
     named: {k1: string; index?: number; chain?: 'wallet'}
     invoice: Awaited<ReturnType<typeof requestInvoice>>
   }> {
-    if (this.makesKeyNotesAt(host)) {
+    if (this.makesKeyNotesAt(host) && this.tookKeyNotesAt(host)) {
       const node = this.chainNode(host, 'wallet')
       let from = this.nextChainIndex(host, 'wallet')
       for (let attempt = 1; attempt <= 4; attempt++) {
@@ -4204,11 +4236,7 @@ export class Wallet {
             from = note.index + 1
             continue
           }
-          if (!this.mayRefuseKeyNotes(host, err)) throw err
-          const fallback = await this.quoteBearer(host, callback, grossMsat)
-          this.markNoKeyNotes(host)
-          await this.persist()
-          return fallback
+          throw err
         }
       }
       throw new WalletUsageError(
@@ -4740,6 +4768,9 @@ export class Wallet {
             const info = await fetchNoteInfo(buildNoteUrl(output.baseUrl, output.k1), this.opts)
             output.amountMsat = info.maxWithdrawable
             this.touch(output, 'live')
+            if ((output.scheme === 'wallet' || output.scheme === 'change') && output.index !== undefined) {
+              this.creditChainIndex(output.mintHost, output.scheme, output.index)
+            }
             events.push({kind: 'output-recovered', detail: `${info.maxWithdrawable} msat at ${output.mintHost}`})
           } catch (err) {
             if (err instanceof NoteSpentError) {
@@ -5012,8 +5043,8 @@ export class Wallet {
   // mint answers for with a note, "already in use" (a burned note) or
   // "pending" is used, and its counter moves past it; any other refusal
   // stops the restore rather than reading as the end of the chain, except
-  // on a chain's very first key at a mint that took no key note from this
-  // wallet yet, which is a mint that never took up key notes. `answered`
+  // on a chain's very first key at a mint that answers no `?p=` lookup at
+  // all, which is a mint that never took up key notes. `answered`
   // says the mint answered a `?p=` lookup with something only a real lookup
   // can say - a note, a burned one or a pending one - since "unknown" is
   // what a mint with no lookups says to everything.
@@ -5051,7 +5082,13 @@ export class Wallet {
             if (err instanceof PendingNoteError) found.push(this.recoveredChainNote(host, baseUrl, chain, index, note.ck1, null))
             continue
           }
-          if (asked === 0 && this.mayRefuseKeyNotes(host, err)) break
+          // Only a mint with no `?p=` lookups at all is one without key
+          // notes. A refusal anywhere else is not the end of the chain
+          // (LUD-26: "any other error is retried, never counted as
+          // unused"), so the restore stops rather than miss what follows.
+          if (asked === 0 && !answered && err instanceof ServiceRejectedError && (await this.answersLookups(baseUrl)) === false) {
+            break
+          }
           throw err
         }
         answered = true

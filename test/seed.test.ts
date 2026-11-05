@@ -399,7 +399,7 @@ describe('restoring from the words', () => {
     expect(data.counters?.[host] ?? 0).toBe(0)
   })
 
-  it('falls back to bearer notes, for good, at a mint that refuses key notes', async () => {
+  it('falls back to a bearer note at a mint that refuses key notes', async () => {
     const theMint = await start({refusesCp1Outputs: true})
     const {wallet, data} = seeded(WORDS)
     const host = hostOf(theMint)
@@ -408,13 +408,73 @@ describe('restoring from the words', () => {
     const received = await wallet.receive(fund(theMint, 21_000))
     expect(received.note.state).toBe('live')
     expect(received.note.scheme).toBe('bip32')
-    expect(data.mints.find(mint => mint.host === host)?.keyNotes).toBe(false)
     expect(wallet.chainCounterFor(host, 'wallet')).toBe(0)
-
-    // and the next one goes straight to the bearer ladder
+    // it answers lookups, as a mint taking key notes must, so this may be
+    // a passing refusal: it is not marked, and the next request asks again
+    expect(data.mints.find(mint => mint.host === host)?.keyNotes).toBeUndefined()
     const next = await wallet.send(9_000)
     expect(next.scheme).toBe('bip32')
     expect(wallet.balanceMsat()).toBe(12_000)
+  })
+
+  // lnurl-mint 0.3.1's answer to any `?p=`, as mint.forgesworn.dev gives it.
+  const noLookups = (refuseOnce?: {path: string; armed: boolean}): typeof globalThis.fetch => async (input, init) => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
+    const refuse = (reason: string) =>
+      new Response(JSON.stringify({status: 'ERROR', reason}), {headers: {'content-type': 'application/json'}})
+    if (!refuseOnce && url.pathname === '/w' && url.searchParams.has('p')) {
+      return refuse('Request validation error: Field required `k1`.')
+    }
+    if (refuseOnce?.armed && url.pathname === refuseOnce.path && (refuseOnce.path !== '/w' || url.searchParams.has('p'))) {
+      refuseOnce.armed = false
+      return refuse('Temporarily unable to issue an invoice.')
+    }
+    return fetch(input, init)
+  }
+
+  it('marks a mint with no lookups at all as one without key notes, once a bearer note gets through', async () => {
+    const theMint = await start({refusesCp1Outputs: true})
+    const {wallet, data} = seeded(WORDS, {fetch: noLookups()})
+    const host = hostOf(theMint)
+    await wallet.addMint(`mint@${host}`)
+    const received = await wallet.receive(fund(theMint, 21_000))
+    expect(received.note.scheme).toBe('bip32')
+    expect(data.mints.find(mint => mint.host === host)?.keyNotes).toBe(false)
+    // and re-adding the mint is how a holder asks again
+    await wallet.addMint(`mint@${host}`)
+    expect(data.mints.find(mint => mint.host === host)?.keyNotes).toBeUndefined()
+  })
+
+  it('never marks a mint that takes key notes for one passing refusal', async () => {
+    const theMint = await start()
+    const once = {path: '/w/cb', armed: true}
+    const {wallet, data} = seeded(WORDS, {fetch: noLookups(once)})
+    const host = hostOf(theMint)
+    await wallet.addMint(`mint@${host}`)
+    const received = await wallet.receive(fund(theMint, 21_000))
+    // the refused key note was asked again as a bearer one, and went through
+    expect(received.note.scheme).toBe('bip32')
+    expect(data.mints.find(mint => mint.host === host)?.keyNotes).toBeUndefined()
+    // the next request names a key again
+    const next = await wallet.send(9_000)
+    expect(next.scheme).toBe('wallet')
+  })
+
+  it('stops rather than miss a chain when the mint refuses one of its keys', async () => {
+    const theMint = await start()
+    const host = hostOf(theMint)
+    const original = seeded(WORDS)
+    await original.wallet.addMint(`mint@${host}`)
+    await original.wallet.receive(fund(theMint, 100_000))
+
+    const once = {path: '/w', armed: true}
+    const fresh = seeded(WORDS, {fetch: noLookups(once)})
+    await fresh.wallet.addMint(`mint@${host}`)
+    await expect(fresh.wallet.restoreFromMint(host)).rejects.toThrow(/Temporarily unable/)
+    expect(fresh.wallet.balanceMsat()).toBe(0)
+    // and asked again, it finds the note
+    await fresh.wallet.restoreFromMint(host)
+    expect(fresh.wallet.balanceMsat()).toBe(100_000)
   })
 
   it('refuses when there is no seed to walk', async () => {

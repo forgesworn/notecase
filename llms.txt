@@ -133,8 +133,10 @@ note is a key note, named to the mint by cp1<Q> and spent with a ck1 (its
 k1 in the store). Their counters (chainCounterFor(host, chain)) move only
 once the mint credits a note there; a refused request names the same keys
 again, and a key the mint already holds (another device on these words) is
-skipped. A mint that refuses the first key note it is offered is asked again
-with a bearer note, and marked keyNotes: false once that is taken.
+skipped. A key note refused where none was taken yet is asked again as a
+bearer note; the mint is marked keyNotes: false only if it answers no ?p=
+lookup at all. A mint quote names a cp1 only once the mint has taken a key
+note, as an old mint may ignore one and key the note to the preimage.
 
 The bearer ladder is LUD-25's older scheme. d1..d4 are RAW uint32 used exactly as they fall: BIP-32
 reads >= 2^31 as hardened, so which levels are hardened depends on the host

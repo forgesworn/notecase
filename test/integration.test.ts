@@ -388,31 +388,42 @@ describe("a seeded wallet's own notes at moneyer", () => {
     first.data.seedHex = seedHex
     await first.wallet.addMint(`mint@${host}`)
 
+    const settle = async (pending: Awaited<ReturnType<typeof first.wallet.startMint>>['pending']) => {
+      backend.control.settleInvoice(bolt11PaymentHash(pending.pr!)!)
+      return first.wallet.claimMint(pending)
+    }
+
+    // the first quote names a bearer note: no key until the mint has taken one
+    const opening = await first.wallet.startMint(21_000)
+    expect(opening.pending.namedChain).toBeUndefined()
+    const one = await settle(opening.pending)
+    // and the receive rotated it straight onto the wallet chain
+    expect([one.note.scheme, one.note.index]).toEqual(['wallet', 0])
+
+    // from then on, quotes name keys
     const {pending} = await first.wallet.startMint(21_000)
-    expect(pending.namedChain).toBe('wallet')
-    expect(pending.namedIndex).toBe(0)
-    const paymentHash = bolt11PaymentHash(pending.pr!)!
-    backend.control.settleInvoice(paymentHash)
-    const minted = await first.wallet.claimMint(pending)
-    // the minted note is on key 0, and the receive rotated it onto key 1
-    expect([minted.note.scheme, minted.note.index]).toEqual(['wallet', 1])
-    expect(first.data.notes.find(note => note.index === 0 && note.scheme === 'wallet')?.state).toBe('spent')
+    expect([pending.namedChain, pending.namedIndex]).toEqual(['wallet', 1])
+    const minted = await settle(pending)
+    // the minted note is on key 1, and the receive rotated it onto key 2
+    expect([minted.note.scheme, minted.note.index]).toEqual(['wallet', 2])
+    expect(first.data.notes.find(note => note.index === 1 && note.scheme === 'wallet')?.state).toBe('spent')
     expect(minted.note.signature).toBeDefined()
 
     const sent = await first.wallet.send(5_000)
-    expect([sent.scheme, sent.index]).toEqual(['wallet', 2])
-    const change = first.wallet.liveNotes()[0]!
-    expect([change.scheme, change.index]).toEqual(['change', 0])
-    expect(first.wallet.chainCounterFor(host, 'wallet')).toBe(3)
+    expect([sent.scheme, sent.index]).toEqual(['wallet', 3])
+    const change = first.wallet.liveNotes().find(note => note.scheme === 'change')!
+    expect([change.index, change.amountMsat]).toEqual([0, 16_000])
+    expect(first.wallet.chainCounterFor(host, 'wallet')).toBe(4)
     expect(first.data.mints[0]!.keyNotes).toBeUndefined()
 
     const fresh = makeWallet()
     fresh.data.seedHex = seedHex
     await fresh.wallet.addMint(`mint@${host}`)
     await fresh.wallet.restoreFromMint(host)
-    // the change, and the note handed over, which nobody has taken yet
-    expect(fresh.wallet.balanceMsat()).toBe(21_000)
-    expect(fresh.wallet.chainCounterFor(host, 'wallet')).toBe(3)
+    // the first note, the change, and the note handed over, which nobody
+    // has taken yet
+    expect(fresh.wallet.balanceMsat()).toBe(42_000)
+    expect(fresh.wallet.chainCounterFor(host, 'wallet')).toBe(4)
     expect(fresh.wallet.chainCounterFor(host, 'change')).toBe(1)
   })
 })
