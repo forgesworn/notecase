@@ -682,6 +682,8 @@ export class Wallet {
     if (!root) throw new WalletUsageError(NO_ADDRESS_KEYS)
     for (let attempt = 1; ; attempt++) {
       const share = this.shareOn(root, this.nextShare(host))
+      // before `send`, which may hand a note over
+      await this.assertShareFindable(host, root, share.share)
       try {
         const result = await send(share)
         this.spendShare(host, share.share)
@@ -694,6 +696,45 @@ export class Wallet {
         if (attempt >= SHARE_GAP) throw err
       }
     }
+  }
+
+  // LUD-26: recovery from the words stops after five shares in a row with
+  // nothing paid, so a wallet SHOULD NOT make a share while the five before
+  // it are all empty. The mint credits a share's first index that is
+  // neither outstanding nor burned, so a share is empty exactly when its
+  // first key is unknown there. Asked at the mint each time, so it holds
+  // across devices on one seed whatever each one's counter says.
+  private async assertShareFindable(host: string, root: HDKey, share: number): Promise<void> {
+    if (share < SHARE_GAP) return
+    const baseUrl = await this.withdrawBase(this.mintEntry(host))
+    for (let before = share - 1; before >= share - SHARE_GAP; before--) {
+      if (await this.sharePaid(baseUrl, this.shareOn(root, before).node)) return
+    }
+    throw new WalletUsageError(
+      `None of the last ${SHARE_GAP} keys this wallet gave ${serviceDomainOf(host)} for names has been paid yet. ` +
+        'LUD-26 has a wallet stop here: recovery from your words stops looking after that many empty ones, so a payment to another would be found only from a wallet backup. ' +
+        'Have one of your names there paid first, then try again.'
+    )
+  }
+
+  // Whether a share's first key was ever paid, live or spent. Anything but
+  // the mint's "unknown" counts as paid or is thrown, never read as empty.
+  private async sharePaid(baseUrl: string, node: HDKey): Promise<boolean> {
+    for (let index = 0; index < 4; index++) {
+      const secret = shareNoteKey(node, index)
+      // an index BIP-32 derives no key for is skipped, as a mint skips it
+      if (!secret) continue
+      const {cp1} = this.keyNoteFor(secret, baseUrl)
+      try {
+        await this.askPatiently(() => fetchNoteInfoByPubkey(baseUrl, cp1, this.opts))
+        return true
+      } catch (err) {
+        if (err instanceof NoteUnknownError) return false
+        if (err instanceof NoteSpentError || err instanceof PendingNoteError) return true
+        throw err
+      }
+    }
+    return false
   }
 
   // Every key this wallet could have registered a name to at `host`, as the

@@ -383,6 +383,83 @@ const specVectors = createRequire(import.meta.url)('lnurlcash-conformance/vector
   }
 }
 
+// Pays `name` over Lightning at the mock, which credits the share it is on.
+const payName = async (theMint: Mint, name: string, amountMsat: number): Promise<void> => {
+  const pay = (await (await fetch(`${theMint.url}/.well-known/lnurlp/${name}`)).json()) as {callback: string}
+  const cb = new URL(pay.callback)
+  cb.searchParams.set('amount', String(amountMsat))
+  await fetch(cb)
+  // the mock's invoices carry only their amount, so its own record says which
+  const [hash] = [...theMint.state.invoices].find(([, invoice]) => invoice.share === name && !invoice.settled)!
+  theMint.state.settle(hash)
+}
+
+describe("LUD-26's share gap", () => {
+  const claimFive = async (wallet: ReturnType<typeof makeWallet>['wallet']) => {
+    for (const name of ['one', 'two', 'three', 'four', 'five']) await wallet.registerName({name})
+  }
+
+  it('makes no share while the five before it are all unpaid', async () => {
+    mint = await createMockMint()
+    const {wallet, data} = makeWallet()
+    data.seedHex = freshK1()
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    await claimFive(wallet)
+
+    await expect(wallet.registerName({name: 'six'})).rejects.toThrow(/None of the last 5 keys/)
+    expect(mint.state.registrations.has('six')).toBe(false)
+    expect(data.settings.addressShares).toEqual({[domainOf(mint)]: 5})
+  })
+
+  it('makes the next share once one of the five has been paid', async () => {
+    mint = await createMockMint()
+    const {wallet, data} = makeWallet()
+    data.seedHex = freshK1()
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    await claimFive(wallet)
+    await payName(mint, 'one', 5_000)
+
+    await expect(wallet.registerName({name: 'six'})).resolves.toMatchObject({address: `six@${hostOf(mint)}`})
+    expect(data.settings.addressShares).toEqual({[domainOf(mint)]: 6})
+  })
+
+  it('refuses a claim it cannot check, rather than reading the share as paid or empty', async () => {
+    mint = await createMockMint()
+    let failLookups = false
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      const url = new URL(String(input instanceof Request ? input.url : input))
+      if (failLookups && url.searchParams.has('p')) return Response.json({status: 'ERROR', reason: 'Database unavailable.'}, {status: 500})
+      return fetch(input, init)
+    }
+    const {wallet, data} = makeWallet({fetch: fetchImpl})
+    data.seedHex = freshK1()
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    await claimFive(wallet)
+
+    failLookups = true
+    await expect(wallet.registerName({name: 'six'})).rejects.toThrow()
+    expect(mint.state.registrations.has('six')).toBe(false)
+    expect(data.settings.addressShares).toEqual({[domainOf(mint)]: 5})
+  })
+
+  it('cuts no note for a priced name it will not make a share for', async () => {
+    mint = await createMockMint()
+    const stub = sellingNames(mint, {priceMsat: 21_000})
+    const {wallet, data} = makeWallet({fetch: stub.fetchImpl})
+    data.seedHex = freshK1()
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    await wallet.receive(fund(mint, 200_000))
+    for (const name of ['one', 'two', 'three', 'four', 'five']) await wallet.registerName({name})
+    const balance = wallet.balanceMsat()
+    const sent = wallet.sentNotes().length
+
+    await expect(wallet.registerName({name: 'six'})).rejects.toThrow(/None of the last 5 keys/)
+    expect(wallet.balanceMsat()).toBe(balance)
+    expect(wallet.sentNotes()).toHaveLength(sent)
+    expect(stub.seen.map(r => r.name)).not.toContain('six')
+  })
+})
+
 describe("LUD-26's vectors, through the wallet", () => {
   it('registers, moves and releases alice with exactly the proofs the spec prints', async () => {
     const vectors = specVectors.lud26

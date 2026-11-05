@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- No name is claimed or moved onto a share while the five shares before it
+  have all gone unpaid, as LUD-26 says a wallet SHOULD NOT: recovery from
+  the words stops looking after five empty shares, so a payment to one
+  further out would be found only from a wallet backup. The mint is asked
+  about each share's first key before the request goes out, so no note is
+  cut for a refused claim, and the check holds across devices on one seed
+  whatever each device's counter says.
 - An address fee whose melt went out but whose answer was lost is no longer
   reported as paid. `registerName` returns `ambiguous: true` with `paidMsat`
   0 and no `feeInvoice`, since the mint may be paying it and paying the

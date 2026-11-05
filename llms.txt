@@ -282,7 +282,9 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     m/139'/d1..d4 (domain without port), from the words or, without, from the Nostr
     key's seed; cx1 = chaincode || P, 65 bytes. One share per name, counted per domain
     in settings.addressShares; "cx1 already used" skips to the next. addressCx1 is the
-    next share to hand out
+    next share to hand out. LUD-26's gap: no share n >= 5 is made (claim or move) while
+    shares n-5..n-1 all have an unpaid first key at the mint (asked there, so it holds
+    across devices); a lookup error refuses the claim rather than guessing
   - moneyer (namePriceMsat in its discovery document, or an unsigned POST /names
     answered with its NIP-98 refusal): POST /names, NIP-98 by the Nostr key, {name,
     note?, cx1, sig}; custodial sends cx1: null with an unregister proof by the key on
