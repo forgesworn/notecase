@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.30.0 - 2026-11-05
+
+A name held for its address fee is not the wallet's address until the mint serves it.
 
 - A name this wallet claims at a LUD-26 mint whose address fee has not settled is now
   held, not made the wallet's address: the mint serves it only once the fee
