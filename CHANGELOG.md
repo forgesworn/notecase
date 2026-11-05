@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.28.0 - 2026-11-05
+
+Two fixes from the LUD-26 review: an address-fee melt with an unknown outcome, and LUD-26's share gap.
 
 - No name is claimed or moved onto a share while the five shares before it
   have all gone unpaid, as LUD-26 says a wallet SHOULD NOT: recovery from
