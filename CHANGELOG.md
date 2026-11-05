@@ -1,9 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.27.0 - 2026-11-05
 
 Heartwood names on LUD-26 shares, for heartwood-esp32 firmware that hands
-them out (G24). Earlier firmware is told to update.
+them out (G24, v0.18.0-beta.30). Earlier firmware is told to update, and
+notecase 0.26.0 cannot scan or move names on a device running it, so update
+both together. Bench-run on a T-Display: two live names moved, and a payment
+to one opened on the device's share.
 
 - `heartwood address keys <name>` puts a name the device's npub owns on a
   share of the device's own keys. A name on a key already, including the
@@ -22,6 +25,9 @@ them out (G24). Earlier firmware is told to update.
   whose answer was lost is still moved on from.
 - Whether a name pays keys is no longer read as "no" when the mint is
   rate-limiting or cannot be reached.
+- A mint's rate limit is waited out with doubling pauses that span a
+  minute, as moneyer.dev's proxy counts 120 requests a minute and a scan
+  of the device's shares can spend that in seconds.
 - Every device proof is checked against the key it has to be by, over the
   mint's domain, before it is sent.
 - `heartwood address scan` walks the device's shares, then both whole
