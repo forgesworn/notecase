@@ -23,8 +23,14 @@ import {
   encodeCp1,
   encodeLegacyCx1,
   isCs1WithAmount,
-  signNoteOwnership
+  signNoteOwnership,
+  decodeCx1,
+  deriveServiceRoot,
+  deriveShareNode,
+  encodeCx1,
+  shareCx1
 } from '../src/lnurlcash.js'
+import {HDKey} from '@scure/bip32'
 import {NIP46_KIND, type DeviceNote} from '../src/heartwood.ts'
 import type {NostrTransport} from '../src/nostr.ts'
 import {legacyEcdsaCk1, makeWallet} from './helpers.ts'
@@ -47,14 +53,32 @@ const fakeHeartwood = (relay: string) => {
   const root = () => deriveCashRoot(hmac(sha256, secret, utf8ToBytes(NOSTR_SEED_LABEL)))
   const currentBranch = (host: string) => deriveCashAddressNode(root(), host)
   const supersededBranch = (host: string) => deriveLegacyCashAddressNode(root(), host)
-  // The branch the device hands out: the spec's since beta.24, the
-  // superseded one before.
-  const branchFor = (host: string) => (firmware === 'purposes' ? currentBranch(host) : supersededBranch(host))
+  // The whole branch firmware from before shares hands out: the spec's
+  // since beta.24, the superseded one before. Firmware with shares hands
+  // out either on request, to move a name off it.
+  const branchFor = (host: string) => (firmware === 'prePurpose' ? supersededBranch(host) : currentBranch(host))
+  // LUD-26 share n: S/0'/2/n' below the mint's root, the domain without
+  // its port.
+  const shareNode = (host: string, n: number) => {
+    const r = root()
+    return deriveShareNode(deriveServiceRoot(new HDKey({privateKey: r.privateKey, chainCode: r.chainCode}), host), 0, n)
+  }
+  const shareCx1Of = (host: string, n: number) => encodeCx1(shareCx1(shareNode(host, n)))
+  const legacyCx1Of = (node: ReturnType<typeof currentBranch>) => encodeLegacyCx1(cashNodeToCx1(node))
+  // The signing key behind a cx1 on file that is the device's own: a
+  // share's p, or a whole branch's own key, x(P).
+  const keyOnFile = (host: string, cx1: string): Uint8Array | null => {
+    for (let n = 0; n < 20; n++) if (shareCx1Of(host, n) === cx1) return shareNode(host, n).privateKey!
+    for (const node of [currentBranch(host), supersededBranch(host)]) if (legacyCx1Of(node) === cx1) return node.privateKey
+    return null
+  }
   const notes: Held[] = []
   const bound = new Set<string>()
   const log: string[] = []
   // What each heartwood_note_claim was sent.
   const claims: Record<string, unknown>[] = []
+  // What each heartwood_note_address_proof was sent, on firmware with shares.
+  const proofs: Record<string, unknown>[] = []
   const subs: {filter: Filter; onEvent: (e: Event) => void}[] = []
   let nextId = 1
   // Who the address answer says the branch belongs to: a link served as a
@@ -69,7 +93,12 @@ const fakeHeartwood = (relay: string) => {
   // as a ck1 bound to its mint. Before it ('prePurpose'): the superseded
   // branch only, the ladder before purposes only, `sig`, and the 65-byte
   // ECDSA ck1.
-  let firmware: 'purposes' | 'prePurpose' = 'purposes'
+  //
+  // 'shares' is firmware with LUD-26 shares (G24): it hands out share n, or
+  // a whole branch by name, signs register, update and unregister proofs by
+  // the share or the key on file, and finds a claim's key on any of its
+  // shares before the whole branches.
+  let firmware: 'shares' | 'purposes' | 'prePurpose' = 'shares'
   // The firmware's address_proof: the branch cash_address hands out for
   // `host` signs sha256("LNURLcash:<action>:<domain>:<name>") with its
   // purpose-0 index-0 key (firmware from before purposes signs with its
@@ -97,21 +126,47 @@ const fakeHeartwood = (relay: string) => {
   const noteCmd = (method: string, fields: Record<string, unknown>): {result?: unknown; error?: string} => {
     switch (method) {
       case 'heartwood_note_address': {
-        const {pubkeyXOnly, chainCode} = cashNodeToCx1(branchFor(String(fields.host)))
-        return ok({host: fields.host, cx1: encodeLegacyCx1({pubkeyXOnly: pubkeyXOnly, chainCode: chainCode}), pubkey: answerAs})
+        const host = String(fields.host)
+        if (firmware !== 'shares') return ok({host, cx1: legacyCx1Of(branchFor(host)), pubkey: answerAs})
+        if (fields.branch === 'legacy' || fields.branch === 'superseded') {
+          const node = fields.branch === 'legacy' ? currentBranch(host) : supersededBranch(host)
+          return ok({host, branch: fields.branch, cx1: legacyCx1Of(node), pubkey: answerAs})
+        }
+        const n = Number(fields.share)
+        if (!Number.isInteger(n) || n < 0 || n > 19) return {result: JSON.stringify({ok: false, error: 'bad_request', message: 'a share is 0 to 19'})}
+        return ok({host, share: n, cx1: shareCx1Of(host, n), pubkey: answerAs})
       }
       case 'heartwood_note_address_proof': {
         const host = String(fields.host)
         const name = String(fields.name)
         const action = String(fields.action)
         if (proofMode === 'unknown') return {error: 'unknown note method'}
-        const signed =
-          proofMode === 'wrongBranch'
-            ? proofFor('other.example', name, action)
-            : proofMode === 'wrongDomain'
-              ? proofFor(host, name, action, 'other.example')
-              : proofFor(host, name, action)
-        return ok({host, domain: signed.domain, name, action, cx1: signed.cx1, sig: signed.sig})
+        if (firmware !== 'shares') {
+          const signed = proofFor(host, name, action)
+          return ok({host, domain: signed.domain, name, action, cx1: signed.cx1, sig: signed.sig})
+        }
+        const domain = proofMode === 'wrongDomain' ? 'other.example' : host.replace(/:\d+$/, '').toLowerCase()
+        const sign = (key: Uint8Array, act: string, cx1?: string) => {
+          const signer = proofMode === 'wrongBranch' ? shareNode('other.example', 0).privateKey! : key
+          const message = `LNURLcash:${act}:${domain}:${name}${cx1 ? `:${cx1}` : ''}`
+          return {sig: bytesToHex(schnorr.sign(sha256(utf8ToBytes(message)), signer, new Uint8Array(32))), pubkey: bytesToHex(schnorr.getPublicKey(signer))}
+        }
+        const refuse = (message: string) => ({result: JSON.stringify({ok: false, error: 'bad_request', message})})
+        proofs.push(fields)
+        if (action === 'register') {
+          const n = Number(fields.share)
+          if (fields.cx1 !== shareCx1Of(host, n)) return refuse('that cx1 is not the share named')
+          const signed = sign(shareNode(host, n).privateKey!, 'register', String(fields.cx1))
+          return ok({share: n, cx1: fields.cx1, ...signed})
+        }
+        const onFile = keyOnFile(host, String(fields.on_file))
+        if (!onFile) return refuse('that cx1 is not one of this device\'s')
+        if (action === 'unregister') return ok(sign(onFile, 'unregister'))
+        const n = Number(fields.share)
+        if (fields.cx1 !== shareCx1Of(host, n) || fields.cx1 === fields.on_file) return refuse('that cx1 is not the share named')
+        const signed = sign(onFile, 'update', String(fields.cx1))
+        const fresh = sign(shareNode(host, n).privateKey!, 'register', String(fields.cx1))
+        return ok({share: n, cx1: fields.cx1, ...signed, newsig: fresh.sig, newpubkey: fresh.pubkey})
       }
       case 'heartwood_note_claim': {
         // The firmware's claim_key_note: derive the key at `index` of the
@@ -120,9 +175,14 @@ const fakeHeartwood = (relay: string) => {
         const host = String(fields.host)
         const mintHost = host.split('/')[0]!
         const index = Number(fields.index)
-        const purpose: NotePurpose = firmware === 'purposes' ? ((fields.purpose as NotePurpose | undefined) ?? LEGACY_NOTE_PURPOSE_LIGHTNING_ADDRESS) : null
-        const nodes = firmware === 'purposes' ? [currentBranch(mintHost), supersededBranch(mintHost)] : [supersededBranch(mintHost)]
-        const keys = nodes.map(node => deriveLegacyNoteSecretKey(node.privateKey, node.chainCode, purpose, index))
+        const purpose: NotePurpose = firmware !== 'prePurpose' ? ((fields.purpose as NotePurpose | undefined) ?? LEGACY_NOTE_PURPOSE_LIGHTNING_ADDRESS) : null
+        const nodes = firmware !== 'prePurpose' ? [currentBranch(mintHost), supersededBranch(mintHost)] : [supersededBranch(mintHost)]
+        const keys = [
+          ...(firmware === 'shares'
+            ? Array.from({length: 20}, (_, n) => shareNode(mintHost, n).deriveChild(index).privateKey!)
+            : []),
+          ...nodes.map(node => deriveLegacyNoteSecretKey(node.privateKey, node.chainCode, purpose, index))
+        ]
         const key = fields.p === undefined ? keys[0]! : keys.find(k => encodeCp1(hexToBytes(getPublicKey(k))) === fields.p)
         if (!key) {
           return {result: JSON.stringify({ok: false, error: 'bad_request', message: 'that note is paid to a key this device does not hold'})}
@@ -131,7 +191,7 @@ const fakeHeartwood = (relay: string) => {
         const existing = notes.find(n => n.p === p)
         if (existing) return ok({id: existing.id, created: false, p})
         const id = String(nextId++).padStart(8, '0')
-        const certificate = firmware === 'purposes' ? (fields.c ?? fields.sig) : fields.sig
+        const certificate = firmware !== 'prePurpose' ? (fields.c ?? fields.sig) : fields.sig
         claims.push(fields)
         notes.push({
           id,
@@ -215,6 +275,9 @@ const fakeHeartwood = (relay: string) => {
     notes,
     log,
     claims,
+    proofs,
+    shareCx1Of,
+    supersededBranch,
     pubkey,
     // What the owner wrote down for this master: it is a bunker master, so
     // its nsec.
@@ -322,8 +385,18 @@ const setUp = async () => {
   // it, and the forms LUD-26's DELETE carried.
   const bodies: Array<{name: string; cx1: string | null; sig?: string}> = []
   const deletes: Array<{name: string; sig: string}> = []
+  // Faults to put in the way: lookups of a name answered as moneyer.dev's
+  // Caddy slows a client down, lookups that never reach the mint, and a
+  // change the mint makes whose answer never comes back.
+  const faults = {lookupsTooMany: 0, lookupsUnreachable: false, loseNextAnswer: false}
   const fetchImpl: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input : input.url)
+    const lookup = /^\/\.well-known\/lnurlp\/[^/]+$/.test(url.pathname) && (init?.method ?? 'GET') === 'GET'
+    if (lookup && faults.lookupsUnreachable) throw new TypeError('fetch failed')
+    if (lookup && faults.lookupsTooMany > 0) {
+      faults.lookupsTooMany--
+      return new Response(JSON.stringify({status: 'ERROR', reason: 'Too many requests - wait a moment and try again.'}), {status: 429})
+    }
     // a signed request, not the unsigned look at whether the route exists
     if (url.pathname === '/names' && init?.method === 'POST' && new Headers(init.headers).has('authorization')) {
       bodies.push(JSON.parse(String(init.body)))
@@ -332,17 +405,23 @@ const setUp = async () => {
     if (address && init?.method === 'DELETE') {
       deletes.push({name: address[1]!, sig: new URLSearchParams(String(init.body ?? '')).get('sig') ?? ''})
     }
+    const changes = (url.pathname === '/names' && new Headers(init?.headers).has('authorization')) || (address && init?.method === 'PUT')
+    if (changes && faults.loseNextAnswer) {
+      faults.loseNextAnswer = false
+      await fetch(input, init)
+      throw new TypeError('fetch failed')
+    }
     return fetch(input, init)
   }
-  const {wallet} = makeWallet({fetch: fetchImpl})
+  const {wallet} = makeWallet({fetch: fetchImpl, rateLimitBackoffMs: 1})
   await wallet.addMint(`mint@${theMint.host}`)
   await wallet.linkHeartwood(device.transport, device.uri)
   theMint.moneyer.store.putOperatorZapName('donkey', device.pubkey)
-  return {theMint, device, wallet, bodies, deletes}
+  return {theMint, device, wallet, bodies, deletes, faults}
 }
 
 // The device's whole branch at the mint, as a name registered before
-// LUD-26 has it on file: heartwood firmware still hands out nothing else.
+// LUD-26 has it on file, as the live heartwood names at moneyer.dev do.
 const deviceCx1 = (theMint: Mint, device: ReturnType<typeof fakeHeartwood>): string =>
   encodeLegacyCx1(cashNodeToCx1(device.branchFor(theMint.host)))
 const onDeviceBranch = (theMint: Mint, device: ReturnType<typeof fakeHeartwood>): string => {
@@ -351,76 +430,121 @@ const onDeviceBranch = (theMint: Mint, device: ReturnType<typeof fakeHeartwood>)
   return cx1
 }
 
-// What moneyer checks of a whole branch's proof: by the branch's index-0
-// key (or its own), over the domain-bound digest.
-const provenBy = (cx1: string, action: string, name: string, domain: string, sig: string): boolean => {
-  const branch = decodeLegacyCx1(cx1)!
-  const pk0 = deriveLegacyNotePubkey(branch.pubkeyXOnly, branch.chainCode, LEGACY_NOTE_PURPOSE_WALLET, 0)
-  return schnorr.verify(hexToBytes(sig), sha256(utf8ToBytes(`LNURLcash:${action}:${domain}:${name}`)), pk0)
-}
+// The x-only key a cx1's proofs are by, as moneyer reads one: a share's
+// x(P), a whole branch's own key.
+const proofKey = (cx1: string): Uint8Array => decodeCx1(cx1)?.pubkey.slice(1) ?? decodeLegacyCx1(cx1)!.pubkeyXOnly
+const provenBy = (cx1: string, message: string, sig: string): boolean =>
+  schnorr.verify(hexToBytes(sig), sha256(utf8ToBytes(message)), proofKey(cx1))
 
-describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
-  it('refuses to register a name to the device\'s keys until its firmware hands out a LUD-26 share', async () => {
+// A request that never came back, in the kit's words or fetch's.
+const UNREACHABLE = /fetch failed|failed to reach the service/i
+
+describe("a name a heartwood's key owns, on the heartwood's LUD-26 shares", () => {
+  it("registers a name that pays no key yet to the device's share 0, as its npub, at moneyer", async () => {
     const {theMint, device, wallet, bodies} = await setUp()
-    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow(/LUD-26 share/)
-    // nothing was asked of the device, and nothing of the mint
-    expect(device.log).toEqual(['connect'])
-    expect(bodies).toEqual([])
-    expect(theMint.moneyer.store.zapName('donkey')?.cx1 ?? null).toBeNull()
+    const result = await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    const share0 = device.shareCx1Of(theMint.host, 0)
+    expect(result).toEqual({address: `donkey@${theMint.host}`, toKeys: true})
+    expect(theMint.moneyer.store.zapName('donkey')).toMatchObject({cx1: share0, pubkey: device.pubkey})
+    // the share is watch-only and free; one card for the proof, one for the
+    // NIP-98 request that carries it
+    expect(device.log).toEqual(['connect', 'heartwood_note_address', 'heartwood_note_address_proof', 'sign_event'])
+    expect(device.proofs).toEqual([{host: theMint.host, name: 'donkey', action: 'register', share: 0, cx1: share0}])
+    expect(bodies[0]).toMatchObject({name: 'donkey', cx1: share0})
+    expect(provenBy(share0, `LNURLcash:register:127.0.0.1:donkey:${share0}`, bodies[0]!.sig!)).toBe(true)
+    expect(wallet.data.settings.heartwoodNames).toEqual({[`donkey@${theMint.host}`]: {cx1: share0, device: device.pubkey, share: 0}})
   })
 
-  it("takes a name off the device's branch, on the branch's proof and a request the device signs", async () => {
+  it("moves a name off the device's old whole branch onto share 0, on one card, then on to share 1", async () => {
     const {theMint, device, wallet, bodies} = await setUp()
-    const cx1 = onDeviceBranch(theMint, device)
+    const branch = onDeviceBranch(theMint, device)
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    const share0 = device.shareCx1Of(theMint.host, 0)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(share0)
+    // one hold, signed by the whole branch's own key; no NIP-98 request
+    expect(device.log.filter(m => m !== 'heartwood_note_address')).toEqual(['connect', 'heartwood_note_address_proof'])
+    expect(device.proofs).toEqual([{host: theMint.host, name: 'donkey', action: 'update', share: 0, cx1: share0, on_file: branch}])
+    expect(bodies).toEqual([])
+
+    // recorded, so the next move is from share 0, named, and again one card
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    const share1 = device.shareCx1Of(theMint.host, 1)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(share1)
+    expect(device.proofs[1]).toEqual({host: theMint.host, name: 'donkey', action: 'update', share: 1, cx1: share1, on_file: share0, on_file_share: 0})
+    expect(device.proofs).toHaveLength(2)
+  })
+
+  it('tries the superseded branch when the mint refuses the newer one as not on file', async () => {
+    const {theMint, device, wallet} = await setUp()
+    const superseded = encodeLegacyCx1(cashNodeToCx1(device.supersededBranch(theMint.host)))
+    theMint.moneyer.store.setZapNameCx1('donkey', superseded)
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(device.shareCx1Of(theMint.host, 0))
+    expect(device.proofs.map(p => p.on_file)).toEqual([deviceCx1(theMint, device), superseded])
+  })
+
+  it('puts a name on a share back to notes sealed to the npub, with DELETE on one card', async () => {
+    const {theMint, device, wallet, deletes} = await setUp()
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    const share0 = device.shareCx1Of(theMint.host, 0)
     const back = await wallet.heartwoodNameToKeys(device.transport, 'donkey', {toKeys: false})
     expect(back).toEqual({address: `donkey@${theMint.host}`, toKeys: false})
-    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBeNull()
-    // The wallet's own key signed nothing: the device gave the proof, then
-    // signed the request that carries it, in the body it commits to.
-    expect(device.log).toEqual(['connect', 'heartwood_note_address', 'heartwood_note_address_proof', 'sign_event'])
-    expect(bodies[0]).toMatchObject({name: 'donkey', cx1: null})
-    expect(provenBy(cx1, 'unregister', 'donkey', '127.0.0.1', bodies[0]!.sig!)).toBe(true)
+    expect(theMint.moneyer.store.zapName('donkey')).toMatchObject({cx1: null, pubkey: device.pubkey})
+    expect(device.proofs[1]).toEqual({host: theMint.host, name: 'donkey', action: 'unregister', on_file: share0, on_file_share: 0})
+    expect(provenBy(share0, 'LNURLcash:unregister:127.0.0.1:donkey', deletes[0]!.sig)).toBe(true)
+    expect(wallet.data.settings.heartwoodNames).toEqual({})
   })
 
-  it("releases a name on the device's branch with LUD-26's DELETE, proven on the device", async () => {
+  it("releases a name on the device's old branch with LUD-26's DELETE, proven by the branch's own key", async () => {
     const {theMint, device, wallet, deletes} = await setUp()
     const cx1 = onDeviceBranch(theMint, device)
     await expect(wallet.heartwoodUnregisterName(device.transport, 'donkey')).resolves.toEqual({address: `donkey@${theMint.host}`})
     expect(deletes).toHaveLength(1)
-    expect(provenBy(cx1, 'unregister', 'donkey', '127.0.0.1', deletes[0]!.sig)).toBe(true)
-    // one hold for the proof, and nothing else signed
-    expect(device.log).toEqual(['connect', 'heartwood_note_address', 'heartwood_note_address_proof'])
+    expect(provenBy(cx1, 'LNURLcash:unregister:127.0.0.1:donkey', deletes[0]!.sig)).toBe(true)
+    expect(device.log.filter(m => m === 'heartwood_note_address_proof')).toHaveLength(1)
+    expect(device.log).not.toContain('sign_event')
     // a moneyer name stays its Nostr key's, paying gift-wrapped notes again
     expect(theMint.moneyer.store.zapName('donkey')).toMatchObject({cx1: null, pubkey: device.pubkey})
   })
 
-  it('tells the owner to update heartwood when the firmware does not know the proof method', async () => {
-    const {theMint, device, wallet, bodies, deletes} = await setUp()
-    onDeviceBranch(theMint, device)
-    device.proofMode('unknown')
-    await expect(wallet.heartwoodUnregisterName(device.transport, 'donkey')).rejects.toThrow('update heartwood to release this name')
-    expect(deletes).toEqual([])
-    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey', {toKeys: false})).rejects.toThrow('update heartwood')
-    expect(device.log).not.toContain('sign_event')
-    expect(bodies).toEqual([])
+  it('says there is nothing to release, without a card, for a name that pays no key', async () => {
+    const {device, wallet} = await setUp()
+    await expect(wallet.heartwoodUnregisterName(device.transport, 'donkey')).rejects.toThrow('pays no keys')
+    expect(device.log).toEqual(['connect'])
   })
 
-  it('refuses a proof for another branch, and sends nothing', async () => {
-    const {theMint, device, wallet, deletes} = await setUp()
+  it('tells the owner to update heartwood when the firmware has no shares, and sends nothing', async () => {
+    const {theMint, device, wallet, bodies, deletes} = await setUp()
     onDeviceBranch(theMint, device)
-    device.proofMode('wrongBranch')
-    await expect(wallet.heartwoodUnregisterName(device.transport, 'donkey')).rejects.toThrow('different branch')
+    device.firmware('purposes')
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow('update heartwood')
+    await expect(wallet.heartwoodUnregisterName(device.transport, 'donkey')).rejects.toThrow('update heartwood')
+    device.firmware('shares')
+    device.proofMode('unknown')
+    await expect(wallet.heartwoodUnregisterName(device.transport, 'donkey')).rejects.toThrow('update heartwood')
+    expect(device.log).not.toContain('sign_event')
+    expect(bodies).toEqual([])
     expect(deletes).toEqual([])
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(deviceCx1(theMint, device))
+  })
+
+  it('refuses a proof by another key, and sends nothing', async () => {
+    const {theMint, device, wallet, deletes} = await setUp()
+    const cx1 = onDeviceBranch(theMint, device)
+    device.proofMode('wrongBranch')
+    await expect(wallet.heartwoodUnregisterName(device.transport, 'donkey')).rejects.toThrow('does not verify')
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow('does not verify')
+    expect(deletes).toEqual([])
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(cx1)
   })
 
   it('refuses a proof that does not verify for this mint, and sends nothing', async () => {
     const {theMint, device, wallet, bodies} = await setUp()
-    const cx1 = onDeviceBranch(theMint, device)
     device.proofMode('wrongDomain')
-    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey', {toKeys: false})).rejects.toThrow('does not verify')
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow('does not verify')
     expect(device.log).not.toContain('sign_event')
     expect(bodies).toEqual([])
-    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(cx1)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1 ?? null).toBeNull()
   })
 
   it('finds a payment the device never saw a wrap for, has the device keep it, and collects it', async () => {
@@ -431,9 +555,10 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     const scan = await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})
     expect(scan.claimed).toEqual([{id: device.notes[0]!.id, index: 0, amountMsat: 21_000}])
     expect(scan.waiting).toEqual([])
-    // purpose 2 and the ladder before purposes, a gap of 3 on each, and the
-    // key paid on one of them
-    expect(scan.scanned).toBe(1 + 3 + 3)
+    // five empty shares, then the branch on purpose 2 (the key paid, and a
+    // gap of 3) and on the ladder before purposes, then the superseded
+    // branch on both
+    expect(scan.scanned).toBe(5 * 3 + (1 + 3) + 3 + 3 * 2)
     const kept = device.notes[0]!
     expect(kept.host).toBe(`${theMint.host}/w`)
     expect(isCs1WithAmount(kept.sig!)).toBe(true)
@@ -499,24 +624,31 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
   })
 
   // A name registered before 0.18.0-beta.24 still points at the superseded
-  // m/139'/1' branch, and moneyer pays it there on purpose 2. The updated
-  // device hands out its new branch, and no mint publishes a name's cx1 any
-  // more, so the scan cannot find it: the device's nsec does.
-  it('finds what a name still on the superseded branch is paid from the nsec, once the device has moved on', async () => {
+  // m/139'/1' branch, and moneyer pays it there on purpose 2. Firmware with
+  // shares hands that branch out by name, so the scan finds it.
+  it('finds what a name still on the superseded branch is paid, once the device has moved on', async () => {
     const {theMint, device, wallet} = await setUp()
     device.firmware('prePurpose')
     onDeviceBranch(theMint, device)
     await pay(theMint, 'donkey', 21_000)
 
-    device.firmware('purposes')
-    const blind = await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})
-    expect(blind.claimed).toEqual([])
-    expect(blind.waiting).toEqual([])
+    device.firmware('shares')
+    const scan = await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})
+    expect(scan.claimed.map(c => c.amountMsat)).toEqual([21_000])
+    expect(device.claims[0]).toMatchObject({purpose: LEGACY_NOTE_PURPOSE_LIGHTNING_ADDRESS})
+  })
 
-    const {wallet: rescuer} = makeWallet()
-    await rescuer.addMint(`mint@${theMint.host}`)
-    const result = await rescuer.recoverHeartwoodNotes(device.nsec, {expectedPubkey: device.pubkey, mintHost: theMint.host, gap: 3})
-    expect(result.received.map(r => r.note.amountMsat)).toEqual([21_000])
+  it("finds a payment to a share the device never saw a wrap for, with the share named", async () => {
+    const {theMint, device, wallet} = await setUp()
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    await pay(theMint, 'donkey', 21_000)
+    device.notes.splice(0)
+    const scan = await wallet.heartwoodScanAddress(device.transport, theMint.host, {gap: 3})
+    expect(scan.claimed.map(c => [c.index, c.amountMsat])).toEqual([[0, 21_000]])
+    expect(device.claims.at(-1)).toMatchObject({share: 0, index: 0})
+    expect(device.claims.at(-1)).not.toHaveProperty('purpose')
+    // the share is paid, then five empty, then both whole branches
+    expect(scan.scanned).toBe(1 + 3 + 5 * 3 + 2 * 2 * 3)
   })
 
   // Firmware before beta.24 exports a key note as the 65-byte ECDSA ck1,
@@ -540,7 +672,7 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     expect(device.log).not.toContain('heartwood_note_spent')
     expect(wallet.balanceMsat()).toBe(0)
 
-    device.firmware('purposes')
+    device.firmware('shares')
     const collected = await wallet.collectFromHeartwood(device.transport)
     expect(collected.failed).toEqual([])
     expect(collected.collected.map(r => r.note.amountMsat)).toEqual([21_000])
@@ -567,16 +699,40 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
     // on, then the superseded m/139'/1' one, each on the Lightning Address
     // purpose and on the ladder from before purposes: four gaps, and the two
     // keys paid
-    expect(result.scanned).toBe(2 + 3 * 4)
+    expect(result.scanned).toBe(5 * 3 + 2 + 3 * 4)
     expect(rescuer.balanceMsat()).toBe(26_000)
     // taken, so a second recovery finds the keys spent and takes nothing
     expect((await rescuer.recoverHeartwoodNotes(device.nsec, opts)).received).toEqual([])
   })
 
+  it("recovers what a lost heartwood's shares were paid from its nsec", async () => {
+    const {theMint, device, wallet} = await setUp()
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    await pay(theMint, 'donkey', 21_000)
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    await pay(theMint, 'donkey', 5_000)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(device.shareCx1Of(theMint.host, 1))
+
+    const {wallet: rescuer} = makeWallet()
+    await rescuer.addMint(`mint@${theMint.host}`)
+    const result = await rescuer.recoverHeartwoodNotes(device.nsec, {expectedPubkey: device.pubkey, mintHost: theMint.host, gap: 3})
+    expect(result.received.map(r => r.note.amountMsat).sort((a, b) => a - b)).toEqual([5_000, 21_000])
+    expect(rescuer.balanceMsat()).toBe(26_000)
+  })
+
+  it('does not try a name recorded for another heartwood on the one linked now', async () => {
+    const {theMint, device, wallet} = await setUp()
+    const branch = onDeviceBranch(theMint, device)
+    wallet.data.settings.heartwoodNames = {[`donkey@${theMint.host}`]: {cx1: device.shareCx1Of('other.example', 0), device: 'f'.repeat(64), share: 0}}
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    expect(device.proofs.map(p => p.on_file)).toEqual([branch])
+  })
+
   it('refuses a branch the device says belongs to another identity, before anything is signed', async () => {
     const {theMint, device, wallet} = await setUp()
     device.answerAs(getPublicKey(generateSecretKey()))
-    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey', {toKeys: false})).rejects.toThrow('not the linked')
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow('not the linked')
+    expect(device.log).not.toContain('heartwood_note_address_proof')
     expect(device.log).not.toContain('sign_event')
     expect(theMint.moneyer.store.zapName('donkey')?.cx1 ?? null).toBeNull()
   })
@@ -584,7 +740,57 @@ describe("a name a heartwood's key owns, paid to the heartwood's keys", () => {
   it("cannot move a name the device's key does not own", async () => {
     const {theMint, device, wallet} = await setUp()
     theMint.moneyer.store.putOperatorZapName('mule', getPublicKey(generateSecretKey()))
-    await expect(wallet.heartwoodNameToKeys(device.transport, 'mule', {toKeys: false})).rejects.toThrow('taken')
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'mule')).rejects.toThrow('taken')
     expect(theMint.moneyer.store.zapName('mule')?.cx1 ?? null).toBeNull()
+  })
+
+  it('waits out a mint slowing it down before deciding whether a name pays keys', async () => {
+    const {theMint, device, wallet, faults} = await setUp()
+    onDeviceBranch(theMint, device)
+    faults.lookupsTooMany = 2
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    // a move off the branch, not a register the mint would refuse
+    expect(device.proofs.map(p => p.action)).toEqual(['update'])
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(device.shareCx1Of(theMint.host, 0))
+  })
+
+  it('says a mint it cannot reach is unreachable, not that the name pays no keys', async () => {
+    const {theMint, device, wallet, faults} = await setUp()
+    onDeviceBranch(theMint, device)
+    faults.lookupsUnreachable = true
+    await expect(wallet.heartwoodUnregisterName(device.transport, 'donkey')).rejects.toThrow(UNREACHABLE)
+    expect(device.log).not.toContain('heartwood_note_address_proof')
+  })
+
+  it('moves on from a share whose registration reached the mint but whose answer was lost', async () => {
+    const {theMint, device, wallet, faults} = await setUp()
+    faults.loseNextAnswer = true
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow(UNREACHABLE)
+    const share0 = device.shareCx1Of(theMint.host, 0)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(share0)
+    // asked again: share 0 is among those handed out, so the name moves on
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    const share1 = device.shareCx1Of(theMint.host, 1)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(share1)
+    expect(device.proofs.at(-1)).toMatchObject({action: 'update', share: 1, on_file: share0, on_file_share: 0})
+    expect(wallet.data.settings.heartwoodNames).toEqual({[`donkey@${theMint.host}`]: {cx1: share1, device: device.pubkey, share: 1}})
+  })
+
+  it('moves on from a share a lost move answer left on file', async () => {
+    const {theMint, device, wallet, faults} = await setUp()
+    onDeviceBranch(theMint, device)
+    faults.loseNextAnswer = true
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow(UNREACHABLE)
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(device.shareCx1Of(theMint.host, 0))
+    await wallet.heartwoodNameToKeys(device.transport, 'donkey')
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1).toBe(device.shareCx1Of(theMint.host, 1))
+  })
+
+  it('hands out no share past the twenty a scan looks through', async () => {
+    const {theMint, device, wallet} = await setUp()
+    wallet.data.settings.heartwoodShares = {[`${device.pubkey}@127.0.0.1`]: 20}
+    await expect(wallet.heartwoodNameToKeys(device.transport, 'donkey')).rejects.toThrow('all 20 of its shares')
+    expect(device.log).not.toContain('heartwood_note_address_proof')
+    expect(theMint.moneyer.store.zapName('donkey')?.cx1 ?? null).toBeNull()
   })
 })

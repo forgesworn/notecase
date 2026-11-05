@@ -267,6 +267,38 @@ export const unregisterAddressWithProof = async (
   if (body?.status !== 'OK') throw new kit.ServiceError('The service did not confirm the unregistration.')
 }
 
+// A registration whose proof was signed elsewhere, by a heartwood holding
+// the share. A mint charging an address fee answers with its invoice.
+export const registerAddressWithProof = async (
+  server: string,
+  username: string,
+  cx1: string,
+  sig: string,
+  options: LnurlcashOptions = {}
+): Promise<{pr?: string}> => {
+  configure(options)
+  const url = new URL(`/.well-known/lnurlp/${encodeURIComponent(username.trim().toLowerCase())}`, server)
+  const body = await kit.lnurlFetch(url, 'POST', {cx1, sig})
+  if (body?.status !== 'OK') throw new kit.ServiceError('The service did not confirm the registration.')
+  return typeof body.pr === 'string' ? {pr: body.pr} : {}
+}
+
+// A move whose proofs were signed elsewhere: `sig` by the key on file,
+// `newsig` by the new share.
+export const updateAddressWithProofs = async (
+  server: string,
+  username: string,
+  cx1: string,
+  sig: string,
+  newsig: string,
+  options: LnurlcashOptions = {}
+): Promise<void> => {
+  configure(options)
+  const url = new URL(`/.well-known/lnurlp/${encodeURIComponent(username.trim().toLowerCase())}`, server)
+  const body = await kit.lnurlFetch(url, 'PUT', {cx1, sig, newsig})
+  if (body?.status !== 'OK') throw new kit.ServiceError('The service did not confirm the move.')
+}
+
 // LUD-26's internal transfer: the note goes to the address's own callback,
 // at its full value, and the mint credits it to the payee's share free.
 export const sendNoteToAddress = async (

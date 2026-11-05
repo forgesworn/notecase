@@ -2,6 +2,7 @@ import {finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type Event}
 import {nip44} from 'nostr-tools'
 import {bytesToHex, hexToBytes, randomBytes} from '@noble/hashes/utils.js'
 import {INBOX_RELAYS_KIND, type NostrTransport} from './nostr.ts'
+import {decodeCx1, decodeLegacyCx1} from './lnurlcash.js'
 
 // A heartwood signer as a note locker, reached over NIP-46. The device holds
 // its own bearer notes behind a button; this is the client side of the
@@ -40,6 +41,19 @@ export type DeviceNote = {
 }
 
 export class HeartwoodError extends Error {}
+
+// What firmware from before LUD-26 shares answers is not wrong, only old.
+export const OLD_FIRMWARE =
+  "This heartwood's firmware hands out its whole branch, which LUD-26 mints refuse: update heartwood to give names a share."
+
+export type DeviceBranchKind = 'legacy' | 'superseded'
+export const DEVICE_BRANCHES: readonly DeviceBranchKind[] = ['legacy', 'superseded']
+
+// What a LUD-26 address proof is asked to sign.
+export type AddressProofAsk =
+  | {action: 'register'; share: number; cx1: string}
+  | {action: 'update'; share: number; cx1: string; onFile: string; onFileShare?: number}
+  | {action: 'unregister'; onFile: string; onFileShare?: number}
 
 export const parseBunkerUri = (uri: string): {devicePubkey: string; relays: string[]; secret: string} => {
   const trimmed = uri.trim()
@@ -211,59 +225,90 @@ export class HeartwoodClient {
     return res.trusted
   }
 
-  // The device's watch-only branch at a mint, derived from the identity this
-  // link serves as: what a mint needs to mint that npub's lightning-address
-  // payments straight to the device's own keys. No hold; it spends nothing.
-  // `pubkey` is whose branch it is.
-  async cashAddress(host: string): Promise<{cx1: string; pubkey: string}> {
+  // LUD-26 share `share` of the device at a mint, watch-only: the cx1 (chain
+  // code and P) a mint pays a name to, derived from the identity this link
+  // serves as, and that identity as `pubkey`. No hold; it spends nothing.
+  // The device keeps no counter: which share a name is on is this wallet's
+  // to remember. Firmware from before shares ignores `share` and answers
+  // with its whole branch, which is caught here.
+  async cashShare(host: string, share: number): Promise<{share: number; cx1: string; pubkey: string}> {
+    const res = await this.note<{share?: number; cx1?: string; pubkey?: string}>('heartwood_note_address', {host, share})
+    if (res.share !== share || typeof res.cx1 !== 'string' || !decodeCx1(res.cx1) || typeof res.pubkey !== 'string') {
+      throw new HeartwoodError(OLD_FIRMWARE)
+    }
+    return {share, cx1: res.cx1, pubkey: res.pubkey}
+  }
+
+  // One of the whole branches a name was registered to before LUD-26, as
+  // its 64-byte cx1: `legacy` (m/139'/d1..d4, from firmware 0.18.0-beta.24)
+  // or `superseded` (m/139'/1'/d1..d4, before it). Only to move a name off
+  // it and to find what it was paid; nothing new is registered to one.
+  async cashBranch(host: string, branch: DeviceBranchKind): Promise<{cx1: string; pubkey: string}> {
+    const res = await this.note<{branch?: string; cx1?: string; pubkey?: string}>('heartwood_note_address', {host, branch})
+    if (res.branch !== branch || typeof res.cx1 !== 'string' || !decodeLegacyCx1(res.cx1) || typeof res.pubkey !== 'string') {
+      throw new HeartwoodError(OLD_FIRMWARE)
+    }
+    return {cx1: res.cx1, pubkey: res.pubkey}
+  }
+
+  // The firmware from before shares: its whole branch at a mint, which it
+  // hands out for any request. Read only to find what was paid to it.
+  async wholeBranch(host: string): Promise<{cx1: string; pubkey: string}> {
     const res = await this.note<{cx1: string; pubkey: string}>('heartwood_note_address', {host})
     return {cx1: res.cx1, pubkey: res.pubkey}
   }
 
-  // LUD-25's proof that the branch cashAddress hands out for `host` agrees
-  // to `name` being registered against it, or released from it: its index-0
-  // key over sha256("LNURLcash:<action>:<domain>:<name>"), the domain being
-  // the mint's bare hostname. It decides where a name's payments go, so the
-  // device holds it behind a card showing the action, the name and the
-  // domain. Firmware from before the method answers that it does not know
-  // it, which is worth saying in so many words: nothing is wrong except the
-  // version on the board.
-  async addressProof(
-    host: string,
-    name: string,
-    action: 'register' | 'unregister'
-  ): Promise<{host: string; domain: string; name: string; action: string; cx1: string; sig: string}> {
+  // LUD-26's proofs for `name` at a mint, signed on the device behind one
+  // card showing name@domain, the action and the share. A register is
+  // signed by the share itself; an update by the key on file, with the new
+  // share's register proof as `newsig` from the same hold; an unregister by
+  // the key on file. `onFile` is the cx1 the mint holds (a share, or a whole
+  // branch from before LUD-26), which the device refuses unless it is its
+  // own. Nothing it returns is trusted: the caller verifies each signature
+  // against the key it expects. Firmware from before shares answers in its
+  // old shape, or that it does not know the method, and either way says
+  // only that the firmware needs updating.
+  async addressProof(host: string, name: string, ask: AddressProofAsk): Promise<{sig: string; newsig?: string}> {
+    const fields: Record<string, unknown> = {host, name, action: ask.action}
+    if (ask.action !== 'unregister') {
+      fields.share = ask.share
+      fields.cx1 = ask.cx1
+    }
+    if (ask.action !== 'register') {
+      fields.on_file = ask.onFile
+      if (ask.onFileShare !== undefined) fields.on_file_share = ask.onFileShare
+    }
+    let res: {sig?: unknown; newsig?: unknown; pubkey?: unknown}
     try {
-      const res = await this.note<{host: string; domain: string; name: string; action: string; cx1: string; sig: string}>(
-        'heartwood_note_address_proof',
-        {host, name, action},
-        true
-      )
-      return {host: res.host, domain: res.domain, name: res.name, action: res.action, cx1: res.cx1, sig: res.sig}
+      res = await this.note<{sig?: unknown; newsig?: unknown; pubkey?: unknown}>('heartwood_note_address_proof', fields, true)
     } catch (err) {
-      if (err instanceof HeartwoodError && /unknown( note)? method|unsupported method|not supported/i.test(err.message)) {
-        throw new HeartwoodError(
-          `This heartwood's firmware cannot sign a lightning-address proof: update heartwood to ${action === 'register' ? 'register' : 'release'} this name.`
-        )
+      if (err instanceof HeartwoodError && /unknown( note)? method|unsupported method|method not supported/i.test(err.message)) {
+        throw new HeartwoodError(OLD_FIRMWARE)
       }
       throw err
     }
+    const hex = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{128}$/i.test(value)
+    if (!hex(res.sig) || typeof res.pubkey !== 'string' || (ask.action === 'update' && !hex(res.newsig))) {
+      throw new HeartwoodError(OLD_FIRMWARE)
+    }
+    return {sig: res.sig.toLowerCase(), ...(ask.action === 'update' ? {newsig: String(res.newsig).toLowerCase()} : {})}
   }
 
-  // Have the device keep a note a scan found on its branch. It derives the
-  // key at `index` of `purpose` itself and refuses one that is not at `p`;
-  // nothing secret crosses to this machine. No hold, as for an import.
+  // Have the device keep a note a scan found on one of its keys. It derives
+  // the key itself and refuses one that is not at `p`; nothing secret
+  // crosses to this machine. No hold, as for an import.
   //
-  // `purpose` is LUD-25's derivation purpose (2, the Lightning Address one,
-  // is what a mint pays a name on, and what the firmware assumes when none is
-  // named); left out, the device is asked as firmware from before purposes
-  // was, which derived the single ladder. `c` is the mint's certificate,
-  // LUD-25's name for what firmware before 0.18.0-beta.24 read as `sig`.
+  // `share` is the LUD-26 share the key was found on, tried first; the
+  // device also looks on its other shares and on the whole branches from
+  // before LUD-26, where `purpose` (LUD-25's derivation purpose: 2, the
+  // Lightning Address one, or left out for the ladder before purposes)
+  // says which ladder. `c` is the mint's certificate.
   async claimKeyNote(claim: {
     host: string
     index: number
     amountMsat: number
     p: string
+    share?: number
     purpose?: number
     c?: string
   }): Promise<{id: string; created: boolean}> {
@@ -272,6 +317,7 @@ export class HeartwoodClient {
       index: claim.index,
       amount_msat: claim.amountMsat,
       p: claim.p,
+      ...(claim.share !== undefined ? {share: claim.share} : {}),
       ...(claim.purpose !== undefined ? {purpose: claim.purpose} : {}),
       ...(claim.c ? {c: claim.c} : {})
     })
