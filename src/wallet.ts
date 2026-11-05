@@ -234,7 +234,7 @@ const ADDRESS_ACCOUNT = 0
 // a share is lost to recovery, so none is made further out than that.
 const SHARE_GAP = 5
 // How many times a lookup answered "rate limited" is asked again.
-const RATE_LIMIT_TRIES = 5
+const RATE_LIMIT_TRIES = 6
 // A mint's "slow down": LUD-26's own wording, or the reverse proxy in front of
 // it answering 429 "Too many requests", as moneyer.dev's Caddy does.
 const RATE_LIMITED = /rate.?limit|too many requests/i
@@ -2989,7 +2989,9 @@ export class Wallet {
         return await ask()
       } catch (err) {
         if (attempt >= RATE_LIMIT_TRIES || !RATE_LIMITED.test(reasonOf(err))) throw err
-        await new Promise(resolve => setTimeout(resolve, this.opts.rateLimitBackoffMs ?? 2_000))
+        // doubling, so the five waits (2 s to 32 s) span a minute: moneyer.dev's proxy
+        // counts 120 requests a minute, and a scan can spend that in seconds
+        await new Promise(resolve => setTimeout(resolve, (this.opts.rateLimitBackoffMs ?? 2_000) * 2 ** (attempt - 1)))
       }
     }
   }
