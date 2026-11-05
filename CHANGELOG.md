@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.29.0 - 2026-11-05
+
+A seeded wallet's own notes on LUD-26's wallet and change chains (G26), and internal transfer in the web wallet.
 
 - A seeded wallet's own notes are now LUD-26 key notes: everything it mints,
   rotates or merges into, and a split's amount, goes on the wallet chain
