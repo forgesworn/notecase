@@ -306,7 +306,8 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     host and callback are both that mint's own, is sent an exact note at
     callback?amount=&k1=; the mint credits the payee's share free. "pending", "already
     in use" or no answer leave it sent (ambiguous), for reclaim. Null means pay it by
-    invoice
+    invoice. The CLI's melt <sats> --to and the web wallet's address tab try it first,
+    unless notes were picked by hand
   - settings.nameKeys records the cx1 each name is on, so a change is signed by the
     right key first; trying keys blind shows the mint they are one wallet's
   heartwoodNameToKeys(t, name, {toKeys?, mintHost?}), heartwoodUnregisterName(t, name, {mintHost?}),

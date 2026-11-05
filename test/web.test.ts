@@ -271,6 +271,29 @@ describe('the web wallet', () => {
     plan.mockRestore()
   })
 
+  it('pays an address at a mint it holds notes at inside that mint, free', async () => {
+    const inside = vi.spyOn(Wallet.prototype, 'payAddressInternally').mockResolvedValue({
+      note: {} as never,
+      host: 'mint.example',
+      ambiguous: false
+    })
+    const melt = vi.spyOn(Wallet.prototype, 'melt')
+    document.querySelector<HTMLButtonElement>('[data-go="melt"]')!.click()
+    await until(() => document.querySelector('[data-meltgo]') !== null, 'the melt screen')
+    document.querySelector<HTMLButtonElement>('[data-tab="address"]')!.click()
+    await until(() => document.querySelector('[data-addr]') !== null, 'the address tab')
+    document.querySelector<HTMLInputElement>('[data-addr]')!.value = 'them@mint.example'
+    document.querySelector<HTMLInputElement>('[data-amount]')!.value = '5'
+    document.querySelector<HTMLButtonElement>('[data-meltgo]')!.click()
+    await until(onHome, 'the home screen')
+    expect(inside.mock.calls[0]).toEqual(['them@mint.example', 5_000])
+    // nothing goes over Lightning
+    expect(melt).not.toHaveBeenCalled()
+    expect(document.getElementById('toasts')!.textContent).toContain('inside mint.example, free')
+    inside.mockRestore()
+    melt.mockRestore()
+  })
+
   it('says plainly that this browser cannot reach a vault over USB', async () => {
     // happy-dom has no Web Serial, which is the same position Safari and
     // Firefox are in. A button that cannot work must not be offered, and

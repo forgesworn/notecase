@@ -2927,6 +2927,20 @@ const viewMelt = (prefillPr?: string): void => {
           if (tab === 'address') {
             const address = (pane.querySelector('[data-addr]') as HTMLInputElement).value.trim()
             if (!address) throw new WalletUsageError('Give a Lightning Address.')
+            // LUD-26: an address registered at a mint this wallet holds notes
+            // at is paid there, free, with a note of exactly the amount.
+            // Notes picked by hand are spent as picked, over Lightning.
+            const internal = chosen.size ? null : await w.payAddressInternally(address, amount * 1000)
+            if (internal) {
+              toast(
+                internal.ambiguous
+                  ? `Sent ${amount} sat to ${address} inside ${internal.host}, but the mint did not confirm it. The note is under "Handed over" on the home screen: take it back if the mint did not take it.`
+                  : `Sent ${amount} sat to ${address} inside ${internal.host}, free.`,
+                'ok'
+              )
+              viewHome()
+              return
+            }
             const {resolveLnurlPay} = await import('farrier-kit/lnurl')
             const resolved = await resolveLnurlPay({address, amountMsats: BigInt(amount * 1000)})
             pr = resolved.bolt11

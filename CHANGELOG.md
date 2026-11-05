@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- The web wallet pays a LUD-26 name at a mint it holds notes at inside that
+  mint, free, with a note of exactly the amount, as `melt <sats> --to` already
+  does. Notes ticked by hand still go over Lightning. A transfer the mint did
+  not confirm leaves the note under "Handed over" on the home screen, to take
+  back if the mint did not take it.
+
 ## 0.28.0 - 2026-11-05
 
 Two fixes from the LUD-26 review: an address-fee melt with an unknown outcome, and LUD-26's share gap.
