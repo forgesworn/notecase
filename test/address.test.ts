@@ -312,6 +312,9 @@ describe('registering at the address itself', () => {
     expect(await wallet.namePriceMsat()).toBe(21_000)
     const claimed = await wallet.registerName({name: 'donkey'})
     expect(claimed).toEqual({address: `donkey@${hostOf(mint)}`, paidMsat: 21_000, toKeys: true})
+    // the fee is paid, so the name is the wallet's address and held no longer
+    expect(wallet.lightningAddress()).toBe(`donkey@${hostOf(mint)}`)
+    expect(wallet.heldNames()).toEqual([])
     const melt = wallet.data.melts[0]!
     expect(melt.amountMsat).toBe(21_000)
     // held until the invoice settles, which is the mint's own to settle
@@ -345,8 +348,13 @@ describe('registering at the address itself', () => {
     expect(wallet.data.melts).toHaveLength(1)
     expect(wallet.data.melts[0]!.state).toBe('in-flight')
     expect(wallet.needsReconcile()).toBe(true)
-    expect(data.settings.nameKeys?.[`donkey@${hostOf(mint)}`]).toBe(data.settings.lightningAddressCx1)
+    expect(data.settings.heldNames?.[`donkey@${hostOf(mint)}`]?.cx1).toMatch(/^cx1/)
+    expect(data.settings.nameKeys?.[`donkey@${hostOf(mint)}`]).toBe(data.settings.heldNames?.[`donkey@${hostOf(mint)}`]?.cx1)
     expect(mint.state.registrations.get('donkey')!.paid).toBe(false)
+    // the mint does not serve the name until the fee settles, so it is not
+    // yet the wallet's address
+    expect(wallet.lightningAddress()).toBeNull()
+    expect(wallet.heldNames()).toEqual([`donkey@${hostOf(mint)}`])
   })
 
   it('hands back an invoice over the fee advertised, and pays nothing', async () => {
@@ -362,6 +370,71 @@ describe('registering at the address itself', () => {
     expect(wallet.data.melts).toEqual([])
     expect(wallet.balanceMsat()).toBe(100_000)
     expect(mint.state.registrations.get('donkey')!.paid).toBe(false)
+  })
+
+  it('makes a held name the address only once the mint serves it, keeping the old address meanwhile', async () => {
+    mint = await createMockMint({addressFeeMsat: 21_000, addressFeeChargedMsat: 50_000})
+    const {wallet, data} = makeWallet()
+    data.seedHex = freshK1()
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    data.settings.lightningAddress = 'old@elsewhere.example'
+    const address = `donkey@${hostOf(mint)}`
+
+    const claimed = await wallet.registerName({name: 'donkey'})
+    expect(claimed.feeInvoice).toMatch(/^ln/)
+    expect(wallet.lightningAddress()).toBe('old@elsewhere.example')
+    expect(wallet.heldNames()).toEqual([address])
+    // its share is on file all the same, for a scan and for `address keys`
+    expect(data.settings.nameKeys?.[address]).toBe(data.settings.heldNames?.[address]?.cx1)
+
+    // unpaid: the mint answers "unknown user", and the name stays held
+    await expect(wallet.settleHeldNames()).resolves.toEqual({active: [], released: [], unsure: []})
+    expect(wallet.heldNames()).toEqual([address])
+
+    // the fee paid from another wallet: the mint now serves the name
+    mint.state.registrations.get('donkey')!.paid = true
+    await expect(wallet.settleHeldNames()).resolves.toEqual({active: [address], released: [], unsure: []})
+    expect(wallet.lightningAddress()).toBe(address)
+    expect(data.settings.lightningAddressCx1).toBe(data.settings.nameKeys?.[address])
+    expect(wallet.heldNames()).toEqual([])
+    expect(data.settings.heldNames).toBeUndefined()
+  })
+
+  it('forgets a held name the mint released when its fee invoice expired unpaid', async () => {
+    mint = await createMockMint({addressFeeMsat: 21_000, addressFeeChargedMsat: 50_000})
+    const {wallet, data} = makeWallet()
+    data.seedHex = freshK1()
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    const address = `donkey@${hostOf(mint)}`
+    await wallet.registerName({name: 'donkey'})
+    data.settings.heldNames![address]!.expiresAt = Date.now() - 3_600_000
+    mint.state.registrations.delete('donkey')
+
+    await expect(wallet.settleHeldNames()).resolves.toEqual({active: [], released: [address], unsure: []})
+    expect(wallet.heldNames()).toEqual([])
+    expect(data.settings.nameKeys?.[address]).toBeUndefined()
+    expect(wallet.lightningAddress()).toBeNull()
+  })
+
+  it('does not take a name served only after its fee invoice expired as its own', async () => {
+    mint = await createMockMint({addressFeeMsat: 21_000, addressFeeChargedMsat: 50_000})
+    const {wallet, data} = makeWallet()
+    data.seedHex = freshK1()
+    await wallet.addMint(`mint@${hostOf(mint)}`)
+    const address = `donkey@${hostOf(mint)}`
+    await wallet.registerName({name: 'donkey'})
+    data.settings.heldNames![address]!.expiresAt = Date.now() - 3_600_000
+    // released and claimed by someone else, for all this wallet can tell
+    mint.state.registrations.get('donkey')!.paid = true
+
+    await expect(wallet.settleHeldNames()).resolves.toEqual({active: [], released: [], unsure: [address]})
+    expect(wallet.heldNames()).toEqual([address])
+    expect(wallet.lightningAddress()).toBeNull()
+
+    // only the key on file can move it, so a move proves it is this wallet's
+    await expect(wallet.payNameToKeys(true, {name: 'donkey'})).resolves.toEqual({address, toKeys: true})
+    expect(wallet.lightningAddress()).toBe(address)
+    expect(wallet.heldNames()).toEqual([])
   })
 })
 

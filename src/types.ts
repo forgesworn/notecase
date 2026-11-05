@@ -337,6 +337,12 @@ export type WalletData = {
     // change to any of them is signed by the right key first time. Trying
     // keys blind shows the mint which of them are one wallet's.
     nameKeys?: Record<string, string>
+    // LUD-26 names held at a mint for an address fee that has not settled,
+    // by address, with the share they were registered to and when the fee
+    // invoice expires (ms). The mint publishes such a name only once the
+    // fee settles and releases it if the invoice expires unpaid, so it is
+    // not this wallet's address until then.
+    heldNames?: Record<string, {cx1: string; expiresAt: number}>
     // LUD-26: the next share to hand out at each mint, by its domain. A
     // mint never accepts a share twice, so a share it took (or refused as
     // "cx1 already used", taken from another device on this seed) is never

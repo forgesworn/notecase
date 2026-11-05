@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- A name this wallet claims at a LUD-26 mint whose address fee has not settled is now
+  held, not made the wallet's address: the mint serves it only once the fee
+  settles, and releases it if the invoice expires unpaid. `notecase address`,
+  `notecase reconcile` and the web wallet's settings check held names, make
+  one the address once the mint serves it, and forget one the mint released.
+  One served only after its invoice expired may be somebody else's, so it
+  stays held until `notecase address keys <name>` proves it is this wallet's.
+  A name claimed for a linked heartwood is unchanged.
+
 ## 0.29.0 - 2026-11-05
 
 A seeded wallet's own notes on LUD-26's wallet and change chains (G26), and internal transfer in the web wallet.

@@ -1458,7 +1458,10 @@ const viewHome = (keepSelection = false): void => {
         busy(chip as HTMLButtonElement, async () => {
           const events = await w.reconcile()
           events.forEach(event => toast(`${event.kind}: ${event.detail}`, 'ok'))
-          if (events.length === 0) toast('Nothing to resolve.')
+          // an address fee whose melt this settled may have made a held name live
+          const held = await w.settleHeldNames().catch(() => null)
+          if (held) toastHeldNames(held)
+          if (events.length === 0 && !held?.active.length && !held?.released.length) toast('Nothing to resolve.')
           viewHome()
         })
       )
@@ -4037,6 +4040,25 @@ const viewSettings = (): void => {
     const address = el(`<div class="card"><h3>Lightning address</h3>
       <p class="warn" style="text-align:left;padding-top:12px">An address anyone can pay from any Lightning wallet. Where the mint accepts Part 2 keys, what arrives belongs to this wallet's derived keys. Check the address below for payments whose relay notification never arrived.</p>
     </div>`)
+    // Names held for an address fee that has not settled: not the wallet's
+    // address until the mint serves them (LUD-26), so not offered to copy.
+    for (const name of w.heldNames()) {
+      const row = el(`<div class="kv"><span>held</span><b></b></div>`)
+      row.querySelector('b')!.textContent = name
+      address.append(row)
+    }
+    if (w.heldNames().length) {
+      const checkHeld = el(`<button class="btn btn-ghost">${icons.refresh}<span>Check whether its fee has settled</span></button>`)
+      checkHeld.addEventListener('click', () =>
+        busy(checkHeld as HTMLButtonElement, async () => {
+          const held = await w.settleHeldNames()
+          toastHeldNames(held)
+          if (!held.active.length && !held.released.length && !held.unsure.length) toast('Still held: the mint has not seen the fee settle yet.')
+          viewSettings()
+        })
+      )
+      address.append(checkHeld)
+    }
     const claimed = w.lightningAddress()
     if (claimed) {
       const row = el(`<div class="kv"><span>yours</span><b></b></div>`)
@@ -4116,7 +4138,7 @@ const viewSettings = (): void => {
                 // name until the invoice is paid from anywhere, or expires.
                 priceArea.replaceChildren()
                 const held = el('<p class="warn" style="text-align:left"></p>')
-                held.textContent = `${got.address} is held for you. Pay its registration fee from any wallet to activate it:`
+                held.textContent = `${got.address} is held for you. Pay its registration fee from any wallet to activate it, then check it here; it becomes your address once the mint serves it:`
                 const invoice = el('<p class="mono" style="text-align:left;word-break:break-all"></p>')
                 invoice.textContent = got.feeInvoice
                 priceArea.append(held, invoice)
@@ -4455,3 +4477,12 @@ void (async () => {
     viewWelcome()
   }
 })()
+
+// What a check of the names held for an address fee found.
+function toastHeldNames(held: {active: string[]; released: string[]; unsure: string[]}): void {
+  for (const name of held.active) toast(`${name} is live and now your address.`, 'ok')
+  for (const name of held.released) toast(`${name} was released: its fee was not paid in time.`)
+  for (const name of held.unsure) {
+    toast(`${name} went live only after its fee invoice expired, so it may be somebody else's by now and is not made your address.`)
+  }
+}

@@ -291,7 +291,7 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     The CLI builds one from nostr-tools' SimplePool with poolTransport() (also
     not exported); a library user writes the same thin wrapper
   namePriceMsat(host?), registerName({name, mintHost?}) -> {address, paidMsat, toKeys, feeInvoice?, ambiguous?},
-  lightningAddress(), payNameToKeys(toKeys?, {name?, mintHost?}), unregisterName({name?, mintHost?}), addressCx1(host), scanAddress(host?, {gap?}),
+  lightningAddress(), heldNames(), settleHeldNames() -> {active, released, unsure}, payNameToKeys(toKeys?, {name?, mintHost?}), unregisterName({name?, mintHost?}), addressCx1(host), scanAddress(host?, {gap?}),
   payAddressInternally(address, amountMsat) -> {note, host, ambiguous} | null
   - a name is registered to a LUD-26 share: S/0'/2/n' below the mint's root S =
     m/139'/d1..d4 (domain without port), from the words or, without, from the Nostr
@@ -308,6 +308,13 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
     more than the advertised third Mint fees value, else handed back as feeInvoice;
     a fee melt whose answer was lost returns ambiguous: true, paidMsat 0 and no
     feeInvoice (reconcile settles it; paying elsewhere could pay twice)
+  - a name whose address fee has not settled (feeInvoice or ambiguous) is held, in
+    settings.heldNames with its cx1 and the invoice's expiry, not lightningAddress:
+    the mint serves it only once the fee settles. settleHeldNames GETs each one: served
+    -> active (now lightningAddress); "unknown user" more than 10 min past expiry ->
+    released and forgotten; served only past that -> unsure, left held (it may have
+    been released and taken), and a payNameToKeys move, which only the key on file can
+    make, makes it the address. The CLI's `address` and `reconcile` run it
   - a cx1 on file is never overwritten: payNameToKeys moves with PUT (sig by the key
     on file, newsig by the new share), unregisterName uses DELETE. The key on file is
     the recorded settings.lightningAddressCx1, else whichever share or old whole branch

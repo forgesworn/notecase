@@ -1084,8 +1084,11 @@ const main = async (): Promise<void> => {
 
     case 'reconcile': {
       const events = await wallet.reconcile()
-      if (events.length === 0) console.log('Nothing to resolve.')
+      // an address fee whose melt this settled may have made a held name live
+      const held = await wallet.settleHeldNames()
+      if (events.length === 0 && !held.active.length && !held.released.length) console.log('Nothing to resolve.')
       for (const event of events) console.log(`${event.kind}: ${event.detail}`)
+      printHeldNames(held)
       return
     }
 
@@ -1117,6 +1120,7 @@ const main = async (): Promise<void> => {
           // invoice expires, and paying it from anywhere activates it.
           console.log(`${claimed.address} is held for you. Pay its registration fee to activate it:`)
           console.log(claimed.feeInvoice)
+          console.log('It becomes your address once the mint serves it - `notecase address` checks.')
           return
         }
         if (claimed.ambiguous) {
@@ -1165,8 +1169,13 @@ const main = async (): Promise<void> => {
         console.log(`Checked ${result.scanned} keys; found ${result.received.length} note${result.received.length === 1 ? '' : 's'}.`)
         return
       }
+      const held = await wallet.settleHeldNames()
+      printHeldNames(held)
       const address = wallet.lightningAddress()
       console.log(address ?? 'No lightning address yet - `notecase address claim <name>`.')
+      for (const name of wallet.heldNames()) {
+        if (!held.unsure.includes(name)) console.log(`${name} is held for you until its registration fee settles.`)
+      }
       return
     }
 
@@ -1737,3 +1746,14 @@ main().catch(err => {
   console.error(`${(err as Error).name ?? 'Error'}: ${(err as Error).message}`)
   process.exitCode = 1
 })
+
+// What a check of the names held for an address fee found.
+function printHeldNames(held: {active: string[]; released: string[]; unsure: string[]}): void {
+  for (const name of held.active) console.log(`${name} is live: its registration fee settled, and it is now your address.`)
+  for (const name of held.released) console.log(`${name} was released: its registration fee was not paid in time.`)
+  for (const name of held.unsure) {
+    console.log(
+      `${name} is live, but only after its fee invoice expired, so it may be somebody else's - \`notecase address keys ${name.slice(0, name.lastIndexOf('@'))} --mint ${name.slice(name.lastIndexOf('@') + 1)}\` proves it is yours by moving it to a fresh share.`
+    )
+  }
+}
