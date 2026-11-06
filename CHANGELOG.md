@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.31.0 - 2026-11-06
+
+A mint quote is checked against the metadata its mint showed (G18).
 
 - A mint quote whose invoice commits to other metadata than the mint's
   payRequest showed (LUD-06's description hash) is refused before it is
