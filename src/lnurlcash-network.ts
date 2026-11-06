@@ -609,22 +609,33 @@ export const mergeNotesWithHash = async (
 // payment preimage instead). A current mint takes both and requires them to
 // agree. The kit's short form sets `comment`; `h` rides on the callback it
 // is handed. A cp1 goes through the kit unchanged.
-const quote = async (callback: string, amountMsat: number, outputHash: string | undefined) => {
-  if (outputHash === undefined || !HEX64.test(outputHash.trim())) return kit.requestInvoice(callback, amountMsat, outputHash)
+//
+// Given the payRequest's metadata, the kit refuses an invoice whose
+// description hash commits to anything else (LUD-06), before it is shown
+// or paid. An invoice with a plain description, as moneyer and lnurl-mint
+// issue for a mint quote, commits to nothing and passes.
+const quote = async (payRequest: QuotedPayRequest, amountMsat: number, outputHash: string | undefined) => {
+  const {callback, metadata} = typeof payRequest === 'string' ? {callback: payRequest, metadata: undefined} : payRequest
+  const asked = (url: string) => (metadata === undefined ? url : {callback: url, metadata})
+  if (outputHash === undefined || !HEX64.test(outputHash.trim())) return kit.requestInvoice(asked(callback), amountMsat, outputHash)
   const named = new URL(callback)
   named.searchParams.set('h', outputHash.trim().toLowerCase())
-  return kit.requestInvoiceShort(named.toString(), amountMsat, outputHash)
+  return kit.requestInvoiceShort(asked(named.toString()), amountMsat, outputHash)
 }
 
+// A payRequest's callback, or the callback with the metadata its invoices
+// must commit to.
+export type QuotedPayRequest = string | {callback: string; metadata?: string}
+
 export const requestInvoice = async (
-  callback: string,
+  payRequest: QuotedPayRequest,
   amountMsat: number,
   options: LnurlcashOptions | string = {}
 ) => {
   if (typeof options === 'string') {
     configure()
-    return quote(callback, amountMsat, options)
+    return quote(payRequest, amountMsat, options)
   }
   configure(options)
-  return quote(callback, amountMsat, options.h)
+  return quote(payRequest, amountMsat, options.h)
 }

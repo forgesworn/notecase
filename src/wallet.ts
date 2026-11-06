@@ -77,6 +77,7 @@ import {
   noteSignature,
   probeBurnedNote,
   requestInvoice,
+  type QuotedPayRequest,
   resolveMintInput,
   resolveNoteInput,
   restoreFromSeed,
@@ -4296,7 +4297,7 @@ export class Wallet {
   private async quoteNamed(
     host: string,
     baseUrl: string,
-    callback: string,
+    callback: QuotedPayRequest,
     grossMsat: number
   ): Promise<{
     named: {k1: string; index?: number; chain?: 'wallet'}
@@ -4329,7 +4330,7 @@ export class Wallet {
 
   private async quoteBearer(
     host: string,
-    callback: string,
+    callback: QuotedPayRequest,
     grossMsat: number
   ): Promise<{named: {k1: string; index?: number}; invoice: Awaited<ReturnType<typeof requestInvoice>>}> {
     const root = this.cashRoot()
@@ -4373,7 +4374,10 @@ export class Wallet {
     // yet, so a crash before the pending record lands leaves an unpaid
     // invoice and no note, rather than a note with no secret.
     const baseUrl = fromLud17(pay.withdrawLink)
-    const {named, invoice} = await this.quoteNamed(entry.host, baseUrl, pay.callback, grossMsat)
+    // with the metadata, so an invoice committing to other text is refused
+    // before anyone sees it (LUD-06)
+    const quoted = typeof pay.metadata === 'string' ? {callback: pay.callback, metadata: pay.metadata} : pay.callback
+    const {named, invoice} = await this.quoteNamed(entry.host, baseUrl, quoted, grossMsat)
     const namedK1 = named.k1
     const namedIndex = named.index
     const decoded = tryDecodeBolt11(invoice.pr)

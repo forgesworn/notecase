@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- A mint quote whose invoice commits to other metadata than the mint's
+  payRequest showed (LUD-06's description hash) is refused before it is
+  shown or paid (G18). An invoice with a plain description, as moneyer and
+  lnurl-mint issue for a mint quote, commits to nothing and is taken as
+  before. Paying someone's lightning address already checked this.
+
 ## 0.30.0 - 2026-11-05
 
 A name held for its address fee is not the wallet's address until the mint serves it.

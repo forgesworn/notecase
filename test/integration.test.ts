@@ -12,6 +12,8 @@ import {fetchInvoiceVerification, hashK1, isCp1} from '../src/lnurlcash.js'
 import {bytesToHex, randomBytes} from '@noble/hashes/utils.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import {hexToBytes} from '@noble/hashes/utils.js'
+import {bech32} from '@scure/base'
+import {secp256k1} from '@noble/curves/secp256k1.js'
 import {payWithNwc} from '../src/nwc.ts'
 import {createFakeNwcWallet} from './nwc-fake.ts'
 import {makeWallet} from './helpers.ts'
@@ -157,6 +159,73 @@ describe('naming the note it is about to mint', () => {
     await wallet.wallet.addMint(`mint@${new URL(moneyer.url).host}`)
     await expect(wallet.wallet.startMint(21_000)).rejects.toThrow(/did not confirm/)
     expect(wallet.data.pendingMints).toEqual([])
+  })
+})
+
+// A BOLT-11 invoice committing to a description hash rather than a memo,
+// built as moneyer's fakeBolt11 builds its own. LUD-06 has a payRequest's
+// invoice commit to sha256(metadata) this way.
+const bolt11WithDescriptionHash = (amountMsat: number, paymentHashHex: string, descriptionHashHex: string): string => {
+  const tagged = (type: number, data: number[]) => [type, data.length >> 5, data.length & 31, ...data]
+  const hrp = `lnbc${amountMsat % 100 === 0 ? `${amountMsat / 100}n` : `${amountMsat * 10}p`}`
+  const timestamp = Math.floor(Date.now() / 1000)
+  const words: number[] = []
+  for (let i = 6; i >= 0; i--) words.push(Math.floor(timestamp / 2 ** (5 * i)) & 31)
+  words.push(...tagged(1, Array.from(bech32.toWords(hexToBytes(paymentHashHex)))))
+  words.push(...tagged(23, Array.from(bech32.toWords(hexToBytes(descriptionHashHex)))))
+  words.push(...tagged(16, Array.from(bech32.toWords(randomBytes(32)))))
+  words.push(...tagged(5, [1, 0, 16, 0]))
+  // the 5-bit words regrouped as bytes, zero-padded, as BOLT-11 signs them
+  let acc = 0
+  let bits = 0
+  const bytes: number[] = []
+  for (const w of words) {
+    acc = (acc << 5) | w
+    bits += 5
+    while (bits >= 8) {
+      bits -= 8
+      bytes.push((acc >> bits) & 0xff)
+    }
+  }
+  if (bits > 0) bytes.push((acc << (8 - bits)) & 0xff)
+  const signed = sha256(new Uint8Array([...new TextEncoder().encode(hrp), ...bytes]))
+  const lead = secp256k1.sign(signed, randomBytes(32), {format: 'recovered', prehash: false})
+  words.push(...Array.from(bech32.toWords(new Uint8Array([...lead.subarray(1), lead[0]!]))))
+  return bech32.encode(hrp, words, false)
+}
+
+// The mint's quotes, rewritten to commit to a description hash of the
+// wallet's choosing, for the same amount and payment hash.
+const committingTo = (descriptionHashFor: (metadata: string) => string): typeof fetch => {
+  let metadata = ''
+  return async (input, init) => {
+    const response = await fetch(input as string, init)
+    const url = new URL(input.toString())
+    if (!url.pathname.includes('/.well-known/lnurlp/') && !url.pathname.endsWith('/p/cb')) return response
+    const body = (await response.json()) as Record<string, unknown>
+    if (typeof body.metadata === 'string') metadata = body.metadata
+    if (url.pathname.endsWith('/p/cb') && typeof body.pr === 'string') {
+      body.pr = bolt11WithDescriptionHash(Number(url.searchParams.get('amount')), bolt11PaymentHash(body.pr)!, descriptionHashFor(metadata))
+    }
+    return new Response(JSON.stringify(body), {status: response.status, headers: {'content-type': 'application/json'}})
+  }
+}
+
+describe('mint quotes and the payRequest metadata (LUD-06)', () => {
+  it('refuses a quote whose invoice commits to other metadata, before it is shown or paid', async () => {
+    const {moneyer} = await startMint()
+    const wallet = makeWallet({fetch: committingTo(metadata => bytesToHex(sha256(new TextEncoder().encode(`${metadata} `))))})
+    await wallet.wallet.addMint(`mint@${new URL(moneyer.url).host}`)
+    await expect(wallet.wallet.startMint(21_000)).rejects.toThrow(/does not commit to its payRequest's metadata/)
+    expect(wallet.data.pendingMints).toEqual([])
+  })
+
+  it('takes a quote whose invoice commits to the metadata it was asked under', async () => {
+    const {moneyer} = await startMint()
+    const wallet = makeWallet({fetch: committingTo(metadata => bytesToHex(sha256(new TextEncoder().encode(metadata))))})
+    await wallet.wallet.addMint(`mint@${new URL(moneyer.url).host}`)
+    const {pending} = await wallet.wallet.startMint(21_000)
+    expect(wallet.data.pendingMints.map(p => p.pr)).toEqual([pending.pr])
   })
 })
 
