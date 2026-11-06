@@ -266,7 +266,9 @@ new Wallet(data, save, {fetch?, timeoutMs?}) ->
   - minting: startMint, pay pending.pr from any Lightning wallet (payWithNwc
     below does it over NWC), then awaitMint(pending). The note's secret was
     fixed at quote time, so no preimage is needed; claimMint's optional
-    preimage argument is only for invoices quoted by older releases
+    preimage argument is only for invoices quoted by older releases. A quote whose
+    invoice has a description hash other than sha256(payRequest metadata) (LUD-06)
+    is refused before it is shown; a plain-description invoice passes
   reconcile(), checkNotes({apply?, mintHost?}) -> CheckReport,
   balanceMsat(), unrotatedMsat(), verifyNoteOffline(input), addMint(input),
   ladderFor(host), setLadder(host, sats[], copies), ladderPlan(host) -> LadderPlan,

@@ -110,6 +110,7 @@ export {
   updateAddressWithProofs,
   sendNoteToAddress,
   type LnurlcashOptions,
+  type QuotedPayRequest,
   type MintAddressExtensions,
   type WithdrawInfoExtensions,
   type CompatibleHashedMutationResult,
