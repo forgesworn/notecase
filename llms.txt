@@ -13,6 +13,12 @@ Companion mint: @forgesworn/moneyer
 Protocol client it builds on: @lnurlcash/kit
 Draft spec: https://github.com/lnurl/luds/pull/301
 
+## ForgeSworn ecosystem
+
+- [ForgeSworn library guide](https://forgesworn.dev/llms.txt): Find related libraries, tools and integration guides by task and runtime.
+- [ForgeSworn on GitHub](https://github.com/forgesworn): Browse the organisation’s public repositories.
+- [Project source](https://github.com/forgesworn/notecase): Canonical source repository, documentation and release information.
+
 ## The rules the engine enforces (and any wallet MUST)
 
 1. Persist before disclose: a replacement secret reaches disk BEFORE its
